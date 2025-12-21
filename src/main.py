@@ -536,7 +536,8 @@ class AnalysisPage(ttk.Frame):
 
     def _render_chart(self, closes: list[float]) -> None:
         self.chart_canvas.delete("all")
-        if not closes:
+        numeric_closes = [value for value in closes if isinstance(value, (int, float))]
+        if not numeric_closes:
             self.chart_canvas.create_text(
                 220,
                 110,
@@ -544,7 +545,7 @@ class AnalysisPage(ttk.Frame):
                 fill="#666",
             )
             return
-        if len(closes) < 2:
+        if len(numeric_closes) < 2:
             self.chart_canvas.update_idletasks()
             width = max(self.chart_canvas.winfo_width(), 1)
             height = max(self.chart_canvas.winfo_height(), 1)
@@ -563,7 +564,7 @@ class AnalysisPage(ttk.Frame):
                 padding,
                 padding / 2,
                 anchor="w",
-                text=f"{closes[0]:.2f}",
+                text=f"{numeric_closes[0]:.2f}",
                 fill="#1f77b4",
             )
             return
@@ -571,13 +572,13 @@ class AnalysisPage(ttk.Frame):
         width = max(self.chart_canvas.winfo_width(), 1)
         height = max(self.chart_canvas.winfo_height(), 1)
         padding = 20
-        min_price = min(closes)
-        max_price = max(closes)
+        min_price = min(numeric_closes)
+        max_price = max(numeric_closes)
         price_span = max(max_price - min_price, 1e-6)
-        x_span = max(len(closes) - 1, 1)
+        x_span = max(len(numeric_closes) - 1, 1)
 
         points = []
-        for idx, price in enumerate(closes):
+        for idx, price in enumerate(numeric_closes):
             x = padding + (width - 2 * padding) * (idx / x_span)
             y = height - padding - (height - 2 * padding) * ((price - min_price) / price_span)
             points.extend([x, y])
@@ -596,14 +597,14 @@ class AnalysisPage(ttk.Frame):
             padding,
             padding / 2,
             anchor="w",
-            text=f"{closes[-1]:.2f}",
+            text=f"{numeric_closes[-1]:.2f}",
             fill="#1f77b4",
         )
         self.chart_canvas.create_text(
             width - padding,
             padding / 2,
             anchor="e",
-            text=f"{closes[0]:.2f}",
+            text=f"{numeric_closes[0]:.2f}",
             fill="#1f77b4",
         )
 
