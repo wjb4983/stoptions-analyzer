@@ -1,6 +1,7 @@
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -12,6 +13,18 @@ STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
 API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
+HORIZON_CONFIGS = [
+    ("Day", 1, 10, "10m"),
+    ("3 Day", 3, 30, "30m"),
+    ("Week", 7, 60, "1h"),
+    ("Month", 30, 120, "2h"),
+    ("3M", 90, 360, "6h"),
+    ("6M", 180, 720, "12h"),
+    ("12M", 365, 1440, "1d"),
+    ("3Y", 1095, 4320, "3d"),
+    ("5Y", 1825, 7200, "5d"),
+    ("10Y", 3650, 10080, "7d"),
+]
 
 
 def load_api_key() -> str:
@@ -62,12 +75,22 @@ class MassiveApiClient:
         )
         return data.get("results", [])
 
+    def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days_back)
+        data = self._request(
+            f"/v2/aggs/ticker/{ticker}/range/{minutes_per_bar}/minute/{start_date}/{end_date}",
+            {"adjusted": "true", "sort": "asc", "limit": "5000"},
+        )
+        return data.get("results", [])
+
 
 @dataclass
 class AppState:
     tickers: list[str] = field(default_factory=list)
     selected_ticker: str | None = None
-    analysis_type: str = "Stock Analysis"
+    analysis_mode: str = "Stock Analysis"
+    option_strategy: str = "Naked Call"
     knob_delta: int = 50
     knob_risk: int = 50
     knob_prob: int = 50
@@ -76,7 +99,8 @@ class AppState:
         payload = {
             "tickers": self.tickers,
             "selected_ticker": self.selected_ticker,
-            "analysis_type": self.analysis_type,
+            "analysis_mode": self.analysis_mode,
+            "option_strategy": self.option_strategy,
             "knob_delta": self.knob_delta,
             "knob_risk": self.knob_risk,
             "knob_prob": self.knob_prob,
@@ -94,7 +118,8 @@ class AppState:
         return cls(
             tickers=payload.get("tickers", []),
             selected_ticker=payload.get("selected_ticker"),
-            analysis_type=payload.get("analysis_type", "Stock Analysis"),
+            analysis_mode=payload.get("analysis_mode", payload.get("analysis_type", "Stock Analysis")),
+            option_strategy=payload.get("option_strategy", "Naked Call"),
             knob_delta=payload.get("knob_delta", 50),
             knob_risk=payload.get("knob_risk", 50),
             knob_prob=payload.get("knob_prob", 50),
@@ -306,36 +331,40 @@ class AnalysisPage(ttk.Frame):
         super().__init__(parent)
         self.controller = controller
         self.api_client: MassiveApiClient | None = None
+        self.option_contract: dict | None = None
+        self.scroll_canvas = tk.Canvas(self, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.scroll_canvas.yview)
+        self.scroll_canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.scroll_canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
 
-        ttk.Label(self, text="Analysis", font=("Arial", 20, "bold")).pack(pady=10)
+        self.content_frame = ttk.Frame(self.scroll_canvas)
+        self.scroll_window = self.scroll_canvas.create_window(
+            (0, 0), window=self.content_frame, anchor="nw"
+        )
+        self.content_frame.bind("<Configure>", self._on_content_configure)
+        self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
+        self.scroll_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
-        self.selected_label = ttk.Label(self, text="Selected Ticker: None")
+        ttk.Label(self.content_frame, text="Analysis", font=("Arial", 20, "bold")).pack(
+            pady=10
+        )
+
+        self.selected_label = ttk.Label(self.content_frame, text="Selected Ticker: None")
         self.selected_label.pack(pady=5)
 
         integration_note = ttk.Label(
-            self,
-            text="Massive integration enabled via API key (stored locally or via env var).",
+            self.content_frame,
+            text="Massive integration uses the API key saved in the main menu (or env var).",
             foreground="#555",
         )
         integration_note.pack(pady=5)
 
-        api_frame = ttk.LabelFrame(self, text="Massive API Settings")
-        api_frame.pack(pady=10, fill="x", padx=40)
-        api_frame.columnconfigure(1, weight=1)
-
-        ttk.Label(api_frame, text="API Key").grid(row=0, column=0, padx=10, pady=8, sticky="w")
-        self.api_key_var = tk.StringVar()
-        self.api_key_entry = ttk.Entry(api_frame, textvariable=self.api_key_var, show="*")
-        self.api_key_entry.grid(row=0, column=1, padx=10, pady=8, sticky="ew")
-
-        ttk.Button(api_frame, text="Save Key", command=self.save_api_key).grid(
-            row=0, column=2, padx=10, pady=8
-        )
-        ttk.Button(api_frame, text="Load Data", command=self.load_market_data).grid(
-            row=0, column=3, padx=10, pady=8
+        ttk.Button(self.content_frame, text="Load Data", command=self.load_market_data).pack(
+            pady=10
         )
 
-        stock_frame = ttk.LabelFrame(self, text="Stock Analysis")
+        stock_frame = ttk.LabelFrame(self.content_frame, text="Stock Analysis")
         stock_frame.pack(pady=10, fill="both", expand=True, padx=40)
 
         chart_header = ttk.Label(
@@ -360,23 +389,33 @@ class AnalysisPage(ttk.Frame):
         slider_frame = ttk.Frame(stock_frame)
         slider_frame.pack(fill="x", padx=20, pady=(5, 10))
 
-        ttk.Label(slider_frame, text="Time Horizon").grid(row=0, column=0, sticky="w")
+        ttk.Label(slider_frame, text="Time Horizon").grid(
+            row=0, column=0, columnspan=len(HORIZON_CONFIGS), sticky="w"
+        )
         self.horizon_var = tk.IntVar(value=0)
-        self.horizon_slider = ttk.Scale(
+        self.horizon_slider = tk.Scale(
             slider_frame,
             from_=0,
-            to=8,
+            to=len(HORIZON_CONFIGS) - 1,
             orient="horizontal",
             variable=self.horizon_var,
+            resolution=1,
+            showvalue=False,
+            command=self._snap_horizon,
+            length=600,
         )
-        self.horizon_slider.grid(row=1, column=0, sticky="ew", pady=5)
-        slider_frame.columnconfigure(0, weight=1)
+        self.horizon_slider.grid(
+            row=1, column=0, columnspan=len(HORIZON_CONFIGS), sticky="ew", pady=5
+        )
+        for index in range(len(HORIZON_CONFIGS)):
+            slider_frame.columnconfigure(index, weight=1)
 
         labels_frame = ttk.Frame(slider_frame)
-        labels_frame.grid(row=2, column=0, sticky="ew")
-        labels = ["Day", "Week", "Month", "3M", "6M", "12M", "3Y", "5Y", "10Y"]
-        for index, label in enumerate(labels):
-            ttk.Label(labels_frame, text=label).grid(row=0, column=index, padx=4)
+        labels_frame.grid(row=2, column=0, columnspan=len(HORIZON_CONFIGS), sticky="ew")
+        for index, (label, _days, _minutes, cadence_label) in enumerate(HORIZON_CONFIGS):
+            ttk.Label(labels_frame, text=f"{label}\n({cadence_label})").grid(
+                row=0, column=index, padx=4
+            )
             labels_frame.columnconfigure(index, weight=1)
 
         self.stock_info_frame = ttk.LabelFrame(stock_frame, text="Stock Snapshot")
@@ -395,6 +434,7 @@ class AnalysisPage(ttk.Frame):
                 ("52 Week Range", "range_52w"),
             ],
             self.stock_values,
+            columns=2,
         )
 
         self.option_info_frame = ttk.LabelFrame(stock_frame, text="Option Snapshot")
@@ -411,24 +451,39 @@ class AnalysisPage(ttk.Frame):
             self.option_values,
         )
 
-        options_frame = ttk.LabelFrame(stock_frame, text="Option Contracts (Sample)")
-        options_frame.pack(padx=20, pady=(5, 15), fill="x")
+        self.options_frame = ttk.LabelFrame(stock_frame, text="Option Contracts (Sample)")
+        self.options_frame.pack(padx=20, pady=(5, 15), fill="x")
 
-        self.options_text = tk.Text(options_frame, height=6)
+        self.options_text = tk.Text(self.options_frame, height=6)
         self.options_text.pack(fill="x", padx=10, pady=8)
         self.options_text.insert("1.0", "No option data loaded yet.\n")
         self.options_text.configure(state="disabled")
 
-        selector_frame = ttk.Frame(self)
+        selector_frame = ttk.Frame(self.content_frame)
         selector_frame.pack(pady=5)
+        selector_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(selector_frame, text="Option Analysis Type:").grid(row=0, column=0, padx=5)
-        self.analysis_var = tk.StringVar(value=self.controller.state.analysis_type)
-        self.analysis_dropdown = ttk.Combobox(
+        ttk.Label(selector_frame, text="Analysis Mode:").grid(row=0, column=0, padx=5, sticky="w")
+        self.analysis_mode_var = tk.StringVar(value=self.controller.state.analysis_mode)
+        self.analysis_mode_dropdown = ttk.Combobox(
             selector_frame,
-            textvariable=self.analysis_var,
+            textvariable=self.analysis_mode_var,
+            values=["Stock Analysis", "Option Analysis"],
+            state="readonly",
+            width=20,
+        )
+        self.analysis_mode_dropdown.grid(row=0, column=1, padx=5, sticky="w")
+        self.analysis_mode_dropdown.bind("<<ComboboxSelected>>", self.on_analysis_mode_change)
+
+        self.strategy_frame = ttk.Frame(self.content_frame)
+        self.strategy_frame.pack(pady=5)
+
+        ttk.Label(self.strategy_frame, text="Option Strategy:").grid(row=0, column=0, padx=5)
+        self.strategy_var = tk.StringVar(value=self.controller.state.option_strategy)
+        self.strategy_dropdown = ttk.Combobox(
+            self.strategy_frame,
+            textvariable=self.strategy_var,
             values=[
-                "Stock Analysis",
                 "Naked Call",
                 "Naked Put",
                 "Vertical Spread",
@@ -437,21 +492,21 @@ class AnalysisPage(ttk.Frame):
             state="readonly",
             width=25,
         )
-        self.analysis_dropdown.grid(row=0, column=1, padx=5)
-        self.analysis_dropdown.bind("<<ComboboxSelected>>", self.on_analysis_change)
+        self.strategy_dropdown.grid(row=0, column=1, padx=5)
+        self.strategy_dropdown.bind("<<ComboboxSelected>>", self.on_strategy_change)
 
-        knobs_frame = ttk.LabelFrame(self, text="Option Strategy Knobs")
-        knobs_frame.pack(pady=10, fill="x", padx=40)
+        self.knobs_frame = ttk.LabelFrame(self.content_frame, text="Option Strategy Knobs")
+        self.knobs_frame.pack(pady=10, fill="x", padx=40)
 
         self.delta_var = tk.IntVar(value=self.controller.state.knob_delta)
         self.risk_var = tk.IntVar(value=self.controller.state.knob_risk)
         self.prob_var = tk.IntVar(value=self.controller.state.knob_prob)
 
-        self._build_slider(knobs_frame, "Option Delta", self.delta_var, 0)
-        self._build_slider(knobs_frame, "Risk", self.risk_var, 1)
-        self._build_slider(knobs_frame, "Probability of Profit", self.prob_var, 2)
+        self._build_slider(self.knobs_frame, "Option Delta", self.delta_var, 0)
+        self._build_slider(self.knobs_frame, "Risk", self.risk_var, 1)
+        self._build_slider(self.knobs_frame, "Probability of Profit", self.prob_var, 2)
 
-        button_row = ttk.Frame(self)
+        button_row = ttk.Frame(self.content_frame)
         button_row.pack(pady=10)
 
         ttk.Button(button_row, text="Save Analysis", command=self.save_analysis).grid(
@@ -476,26 +531,138 @@ class AnalysisPage(ttk.Frame):
         value_label.grid(row=row, column=2, padx=10, pady=5)
         parent.columnconfigure(1, weight=1)
 
+    def _snap_horizon(self, value: str) -> None:
+        snapped = int(round(float(value)))
+        self.horizon_var.set(snapped)
+        self.horizon_slider.set(snapped)
+
     def _build_info_grid(
         self,
         parent: ttk.Frame,
         rows: list[tuple[str, str]],
         target: dict[str, ttk.Label],
+        columns: int = 1,
     ) -> None:
-        for row_index, (label, key) in enumerate(rows):
+        for item_index, (label, key) in enumerate(rows):
+            row_index = item_index // columns
+            column_index = (item_index % columns) * 2
             ttk.Label(parent, text=label).grid(
-                row=row_index, column=0, padx=10, pady=4, sticky="w"
+                row=row_index, column=column_index, padx=10, pady=4, sticky="w"
             )
             value_label = ttk.Label(parent, text="--", foreground="#b00020")
-            value_label.grid(row=row_index, column=1, padx=10, pady=4, sticky="w")
+            value_label.grid(
+                row=row_index, column=column_index + 1, padx=10, pady=4, sticky="w"
+            )
             target[key] = value_label
-        parent.columnconfigure(1, weight=1)
+        for index in range(columns * 2):
+            parent.columnconfigure(index, weight=1)
 
     def _set_value(self, label: ttk.Label, value: str | int | float | None) -> None:
         if value in (None, "", "--"):
             label.config(text="--", foreground="#b00020")
         else:
             label.config(text=str(value), foreground="#0a7a2f")
+
+    def _render_chart(self, closes: list[float]) -> None:
+        self.chart_canvas.delete("all")
+        numeric_closes: list[float] = []
+        for value in closes:
+            try:
+                numeric_closes.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        if not numeric_closes:
+            self.chart_canvas.create_text(
+                220,
+                110,
+                text="No chart data available for this range.",
+                fill="#666",
+            )
+            return
+        if len(numeric_closes) < 2:
+            self.chart_canvas.update_idletasks()
+            width = max(self.chart_canvas.winfo_width(), 1)
+            height = max(self.chart_canvas.winfo_height(), 1)
+            padding = 20
+            x = width / 2
+            y = height / 2
+            self.chart_canvas.create_oval(
+                x - 4,
+                y - 4,
+                x + 4,
+                y + 4,
+                fill="#1f77b4",
+                outline="",
+            )
+            self.chart_canvas.create_text(
+                padding,
+                padding / 2,
+                anchor="w",
+                text=f"{numeric_closes[0]:.2f}",
+                fill="#1f77b4",
+            )
+            return
+        self.chart_canvas.update_idletasks()
+        width = max(self.chart_canvas.winfo_width(), 1)
+        height = max(self.chart_canvas.winfo_height(), 1)
+        padding = 20
+        min_price = min(numeric_closes)
+        max_price = max(numeric_closes)
+        price_span = max(max_price - min_price, 1e-6)
+        x_span = max(len(numeric_closes) - 1, 1)
+
+        points = []
+        for idx, price in enumerate(numeric_closes):
+            x = padding + (width - 2 * padding) * (idx / x_span)
+            y = height - padding - (height - 2 * padding) * ((price - min_price) / price_span)
+            points.extend([x, y])
+
+        if len(points) < 4:
+            self.chart_canvas.create_text(
+                220,
+                110,
+                text="Not enough chart data to render a line.",
+                fill="#666",
+            )
+            return
+
+        try:
+            if len(points) < 4:
+                raise tk.TclError("Insufficient points for line rendering.")
+            self.chart_canvas.create_line(*points, fill="#1f77b4", width=2, smooth=True)
+        except tk.TclError:
+            self.chart_canvas.create_text(
+                220,
+                110,
+                text="Unable to render chart line for this data.",
+                fill="#666",
+            )
+            return
+        self.chart_canvas.create_text(
+            padding,
+            padding / 2,
+            anchor="w",
+            text=f"{numeric_closes[-1]:.2f}",
+            fill="#1f77b4",
+        )
+        self.chart_canvas.create_text(
+            width - padding,
+            padding / 2,
+            anchor="e",
+            text=f"{numeric_closes[0]:.2f}",
+            fill="#1f77b4",
+        )
+
+    def _on_content_configure(self, _event: tk.Event) -> None:
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        self.scroll_canvas.itemconfigure(self.scroll_window, width=event.width)
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        if self.scroll_canvas.winfo_height() < self.content_frame.winfo_height():
+            self.scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
     def _sync_option_snapshot(self) -> None:
         contract = self.option_contract or {}
@@ -507,32 +674,49 @@ class AnalysisPage(ttk.Frame):
         self._set_value(self.option_values["strike"], contract.get("strike_price"))
 
     def _toggle_info_panels(self) -> None:
-        if self.analysis_var.get() == "Stock Analysis":
-            if not self.stock_info_frame.winfo_ismapped():
-                self.stock_info_frame.pack(padx=20, pady=(5, 15), fill="x")
+        is_stock = self.analysis_mode_var.get() == "Stock Analysis"
+
+        if not self.stock_info_frame.winfo_ismapped():
+            self.stock_info_frame.pack(padx=20, pady=(5, 15), fill="x")
+
+        if is_stock:
             self.option_info_frame.pack_forget()
+            self.options_frame.pack_forget()
+            self.strategy_frame.pack_forget()
+            self.knobs_frame.pack_forget()
         else:
             if not self.option_info_frame.winfo_ismapped():
                 self.option_info_frame.pack(padx=20, pady=(5, 15), fill="x")
-            self.stock_info_frame.pack_forget()
-            self.option_info_frame.pack(padx=20, pady=(5, 15), fill="x")
+            if not self.options_frame.winfo_ismapped():
+                self.options_frame.pack(padx=20, pady=(5, 15), fill="x")
+            if not self.strategy_frame.winfo_ismapped():
+                self.strategy_frame.pack(pady=5)
+            if not self.knobs_frame.winfo_ismapped():
+                self.knobs_frame.pack(pady=10, fill="x", padx=40)
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
     def refresh(self) -> None:
         ticker = self.controller.state.selected_ticker or "None"
         self.selected_label.config(text=f"Selected Ticker: {ticker}")
-        self.analysis_var.set(self.controller.state.analysis_type)
+        self.analysis_mode_var.set(self.controller.state.analysis_mode)
+        self.strategy_var.set(self.controller.state.option_strategy)
         self.delta_var.set(self.controller.state.knob_delta)
         self.risk_var.set(self.controller.state.knob_risk)
         self.prob_var.set(self.controller.state.knob_prob)
         api_key = load_api_key()
-        self.api_key_var.set(api_key)
         self.api_client = MassiveApiClient(api_key) if api_key else None
+        self._toggle_info_panels()
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
-    def on_analysis_change(self, _event: object) -> None:
-        self.controller.state.analysis_type = self.analysis_var.get()
+    def on_analysis_mode_change(self, _event: object) -> None:
+        self.controller.state.analysis_mode = self.analysis_mode_var.get()
         self.controller.persist_state()
         self._toggle_info_panels()
         self._sync_option_snapshot()
+
+    def on_strategy_change(self, _event: object) -> None:
+        self.controller.state.option_strategy = self.strategy_var.get()
+        self.controller.persist_state()
 
     def load_market_data(self) -> None:
         if not self.api_client:
@@ -547,6 +731,10 @@ class AnalysisPage(ttk.Frame):
         try:
             stock_data = self.api_client.fetch_previous_close(ticker)
             option_data = self.api_client.fetch_option_contracts(ticker)
+            horizon_index = int(round(self.horizon_var.get()))
+            horizon_index = min(max(horizon_index, 0), len(HORIZON_CONFIGS) - 1)
+            _label, days_back, minutes_per_bar, _cadence_label = HORIZON_CONFIGS[horizon_index]
+            aggregates = self.api_client.fetch_aggregates(ticker, days_back, minutes_per_bar)
         except HTTPError as exc:
             messagebox.showerror(
                 "API Error",
@@ -571,61 +759,8 @@ class AnalysisPage(ttk.Frame):
         self.option_contract = option_data[0] if option_data else None
         self._sync_option_snapshot()
 
-    def save_api_key(self) -> None:
-        key = self.api_key_var.get().strip()
-        if not key:
-            messagebox.showinfo("Missing key", "Enter a Massive API key first.")
-            return
-        save_api_key(key)
-        self.api_client = MassiveApiClient(key)
-        messagebox.showinfo(
-            "Saved", f"API key saved to {API_KEY_PATH} (not tracked in git)."
-        )
-
-    def load_market_data(self) -> None:
-        if not self.api_client:
-            messagebox.showinfo(
-                "Missing key", "Enter or set a Massive API key to load data."
-            )
-            return
-        ticker = self.controller.state.selected_ticker
-        if not ticker:
-            messagebox.showinfo("Missing ticker", "Select a ticker first.")
-            return
-        try:
-            stock_data = self.api_client.fetch_previous_close(ticker)
-            option_data = self.api_client.fetch_option_contracts(ticker)
-        except HTTPError as exc:
-            messagebox.showerror(
-                "API Error",
-                f"Massive API returned an error: {exc.code} {exc.reason}",
-            )
-            return
-        except URLError as exc:
-            messagebox.showerror(
-                "Connection Error",
-                f"Could not reach Massive API: {exc.reason}",
-            )
-            return
-
-        self.stats_text.configure(state="normal")
-        self.stats_text.delete("1.0", tk.END)
-        self.stats_text.insert(
-            "1.0",
-            "Price: {close}\n"
-            "Previous Close: {close}\n"
-            "Open / High / Low: {open} / {high} / {low}\n"
-            "Volume: {volume}\n"
-            "Market Cap: --\n"
-            "52 Week Range: --\n".format(
-                close=stock_data.get("close", "--"),
-                open=stock_data.get("open", "--"),
-                high=stock_data.get("high", "--"),
-                low=stock_data.get("low", "--"),
-                volume=stock_data.get("volume", "--"),
-            ),
-        )
-        self.stats_text.configure(state="disabled")
+        closes = [item.get("c") for item in aggregates if item.get("c") is not None]
+        self._render_chart(closes)
 
         self.options_text.configure(state="normal")
         self.options_text.delete("1.0", tk.END)
@@ -646,7 +781,8 @@ class AnalysisPage(ttk.Frame):
         self.options_text.configure(state="disabled")
 
     def save_analysis(self) -> None:
-        self.controller.state.analysis_type = self.analysis_var.get()
+        self.controller.state.analysis_mode = self.analysis_mode_var.get()
+        self.controller.state.option_strategy = self.strategy_var.get()
         self.controller.state.knob_delta = int(self.delta_var.get())
         self.controller.state.knob_risk = int(self.risk_var.get())
         self.controller.state.knob_prob = int(self.prob_var.get())
