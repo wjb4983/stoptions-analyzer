@@ -1,6 +1,7 @@
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -12,6 +13,8 @@ STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
 API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
+HORIZON_LABELS = ["Day", "Week", "Month", "3M", "6M", "12M", "3Y", "5Y", "10Y"]
+HORIZON_DAYS = [1, 7, 30, 90, 180, 365, 1095, 1825, 3650]
 
 
 def load_api_key() -> str:
@@ -59,6 +62,15 @@ class MassiveApiClient:
         data = self._request(
             "/v3/reference/options/contracts",
             {"underlying_ticker": ticker, "limit": str(limit)},
+        )
+        return data.get("results", [])
+
+    def fetch_aggregates(self, ticker: str, days_back: int) -> list[dict]:
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days_back)
+        data = self._request(
+            f"/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}",
+            {"adjusted": "true", "sort": "asc", "limit": "5000"},
         )
         return data.get("results", [])
 
@@ -365,8 +377,7 @@ class AnalysisPage(ttk.Frame):
 
         labels_frame = ttk.Frame(slider_frame)
         labels_frame.grid(row=2, column=0, sticky="ew")
-        labels = ["Day", "Week", "Month", "3M", "6M", "12M", "3Y", "5Y", "10Y"]
-        for index, label in enumerate(labels):
+        for index, label in enumerate(HORIZON_LABELS):
             ttk.Label(labels_frame, text=label).grid(row=0, column=index, padx=4)
             labels_frame.columnconfigure(index, weight=1)
 
@@ -513,6 +524,47 @@ class AnalysisPage(ttk.Frame):
         else:
             label.config(text=str(value), foreground="#0a7a2f")
 
+    def _render_chart(self, closes: list[float]) -> None:
+        self.chart_canvas.delete("all")
+        if not closes:
+            self.chart_canvas.create_text(
+                220,
+                110,
+                text="No chart data available for this range.",
+                fill="#666",
+            )
+            return
+        self.chart_canvas.update_idletasks()
+        width = max(self.chart_canvas.winfo_width(), 1)
+        height = max(self.chart_canvas.winfo_height(), 1)
+        padding = 20
+        min_price = min(closes)
+        max_price = max(closes)
+        price_span = max(max_price - min_price, 1e-6)
+        x_span = max(len(closes) - 1, 1)
+
+        points = []
+        for idx, price in enumerate(closes):
+            x = padding + (width - 2 * padding) * (idx / x_span)
+            y = height - padding - (height - 2 * padding) * ((price - min_price) / price_span)
+            points.extend([x, y])
+
+        self.chart_canvas.create_line(*points, fill="#1f77b4", width=2, smooth=True)
+        self.chart_canvas.create_text(
+            padding,
+            padding / 2,
+            anchor="w",
+            text=f"{closes[-1]:.2f}",
+            fill="#1f77b4",
+        )
+        self.chart_canvas.create_text(
+            width - padding,
+            padding / 2,
+            anchor="e",
+            text=f"{closes[0]:.2f}",
+            fill="#1f77b4",
+        )
+
     def _sync_option_snapshot(self) -> None:
         contract = self.option_contract or {}
         self._set_value(self.option_values["contract"], contract.get("ticker"))
@@ -578,6 +630,9 @@ class AnalysisPage(ttk.Frame):
         try:
             stock_data = self.api_client.fetch_previous_close(ticker)
             option_data = self.api_client.fetch_option_contracts(ticker)
+            horizon_index = int(round(self.horizon_var.get()))
+            days_back = HORIZON_DAYS[min(max(horizon_index, 0), len(HORIZON_DAYS) - 1)]
+            aggregates = self.api_client.fetch_aggregates(ticker, days_back)
         except HTTPError as exc:
             messagebox.showerror(
                 "API Error",
@@ -601,6 +656,9 @@ class AnalysisPage(ttk.Frame):
         self._set_value(self.stock_values["range_52w"], "--")
         self.option_contract = option_data[0] if option_data else None
         self._sync_option_snapshot()
+
+        closes = [item.get("c") for item in aggregates if item.get("c") is not None]
+        self._render_chart(closes)
 
         self.options_text.configure(state="normal")
         self.options_text.delete("1.0", tk.END)
