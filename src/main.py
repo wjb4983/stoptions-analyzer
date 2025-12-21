@@ -532,6 +532,11 @@ class AnalysisPage(ttk.Frame):
         self.horizon_var.set(snapped)
         self.horizon_slider.set(snapped)
 
+    def _snap_horizon(self, value: str) -> None:
+        snapped = int(round(float(value)))
+        self.horizon_var.set(snapped)
+        self.horizon_slider.set(snapped)
+
     def _build_info_grid(
         self,
         parent: ttk.Frame,
