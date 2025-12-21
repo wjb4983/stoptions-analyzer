@@ -1,7 +1,7 @@
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -91,9 +91,6 @@ class AppState:
     selected_ticker: str | None = None
     analysis_mode: str = "Stock Analysis"
     option_strategy: str = "Naked Call"
-    knob_delta: int = 50
-    knob_risk: int = 50
-    knob_prob: int = 50
 
     def save(self) -> None:
         payload = {
@@ -101,9 +98,6 @@ class AppState:
             "selected_ticker": self.selected_ticker,
             "analysis_mode": self.analysis_mode,
             "option_strategy": self.option_strategy,
-            "knob_delta": self.knob_delta,
-            "knob_risk": self.knob_risk,
-            "knob_prob": self.knob_prob,
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2))
 
@@ -120,9 +114,6 @@ class AppState:
             selected_ticker=payload.get("selected_ticker"),
             analysis_mode=payload.get("analysis_mode", payload.get("analysis_type", "Stock Analysis")),
             option_strategy=payload.get("option_strategy", "Naked Call"),
-            knob_delta=payload.get("knob_delta", 50),
-            knob_risk=payload.get("knob_risk", 50),
-            knob_prob=payload.get("knob_prob", 50),
         )
 
 
@@ -451,13 +442,37 @@ class AnalysisPage(ttk.Frame):
             self.option_values,
         )
 
-        self.options_frame = ttk.LabelFrame(stock_frame, text="Option Contracts (Sample)")
+        self.options_frame = ttk.LabelFrame(stock_frame, text="Option Contracts")
         self.options_frame.pack(padx=20, pady=(5, 15), fill="x")
 
-        self.options_text = tk.Text(self.options_frame, height=6)
-        self.options_text.pack(fill="x", padx=10, pady=8)
-        self.options_text.insert("1.0", "No option data loaded yet.\n")
-        self.options_text.configure(state="disabled")
+        self.option_records: list[dict] = []
+        list_frame = ttk.Frame(self.options_frame)
+        list_frame.pack(fill="both", expand=True, padx=10, pady=8)
+        self.options_list = tk.Listbox(list_frame, height=8)
+        options_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.options_list.yview)
+        self.options_list.configure(yscrollcommand=options_scroll.set)
+        self.options_list.grid(row=0, column=0, sticky="nsew")
+        options_scroll.grid(row=0, column=1, sticky="ns")
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        self.options_list.bind("<<ListboxSelect>>", self.on_option_select)
+
+        self.greeks_frame = ttk.LabelFrame(stock_frame, text="Option Greeks")
+        self.greeks_frame.pack(padx=20, pady=(5, 15), fill="x")
+        self.greeks_values: dict[str, ttk.Label] = {}
+        self._build_info_grid(
+            self.greeks_frame,
+            [
+                ("Delta", "delta"),
+                ("Gamma", "gamma"),
+                ("Theta", "theta"),
+                ("Vega", "vega"),
+                ("Rho", "rho"),
+                ("IV", "iv"),
+            ],
+            self.greeks_values,
+            columns=3,
+        )
 
         selector_frame = ttk.Frame(self.content_frame)
         selector_frame.pack(pady=5)
@@ -495,17 +510,6 @@ class AnalysisPage(ttk.Frame):
         self.strategy_dropdown.grid(row=0, column=1, padx=5)
         self.strategy_dropdown.bind("<<ComboboxSelected>>", self.on_strategy_change)
 
-        self.knobs_frame = ttk.LabelFrame(self.content_frame, text="Option Strategy Knobs")
-        self.knobs_frame.pack(pady=10, fill="x", padx=40)
-
-        self.delta_var = tk.IntVar(value=self.controller.state.knob_delta)
-        self.risk_var = tk.IntVar(value=self.controller.state.knob_risk)
-        self.prob_var = tk.IntVar(value=self.controller.state.knob_prob)
-
-        self._build_slider(self.knobs_frame, "Option Delta", self.delta_var, 0)
-        self._build_slider(self.knobs_frame, "Risk", self.risk_var, 1)
-        self._build_slider(self.knobs_frame, "Probability of Profit", self.prob_var, 2)
-
         button_row = ttk.Frame(self.content_frame)
         button_row.pack(pady=10)
 
@@ -523,13 +527,10 @@ class AnalysisPage(ttk.Frame):
             command=lambda: controller.show_frame("MainMenu"),
         ).grid(row=0, column=2, padx=10)
 
-    def _build_slider(self, parent: ttk.Frame, label: str, var: tk.IntVar, row: int) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, padx=10, pady=5, sticky="w")
-        slider = ttk.Scale(parent, from_=0, to=100, orient="horizontal", variable=var)
-        slider.grid(row=row, column=1, padx=10, pady=5, sticky="ew")
-        value_label = ttk.Label(parent, textvariable=var)
-        value_label.grid(row=row, column=2, padx=10, pady=5)
-        parent.columnconfigure(1, weight=1)
+    def _snap_horizon(self, value: str) -> None:
+        snapped = int(round(float(value)))
+        self.horizon_var.set(snapped)
+        self.horizon_slider.set(snapped)
 
     def _snap_horizon(self, value: str) -> None:
         snapped = int(round(float(value)))
@@ -563,15 +564,17 @@ class AnalysisPage(ttk.Frame):
         else:
             label.config(text=str(value), foreground="#0a7a2f")
 
-    def _render_chart(self, closes: list[float]) -> None:
+    def _render_chart(self, aggregates: list[dict]) -> None:
         self.chart_canvas.delete("all")
-        numeric_closes: list[float] = []
-        for value in closes:
+        points_raw: list[tuple[float, int]] = []
+        for item in aggregates:
             try:
-                numeric_closes.append(float(value))
+                close_value = float(item.get("c"))
+                timestamp = int(item.get("t"))
             except (TypeError, ValueError):
                 continue
-        if not numeric_closes:
+            points_raw.append((close_value, timestamp))
+        if not points_raw:
             self.chart_canvas.create_text(
                 220,
                 110,
@@ -579,7 +582,7 @@ class AnalysisPage(ttk.Frame):
                 fill="#666",
             )
             return
-        if len(numeric_closes) < 2:
+        if len(points_raw) < 2:
             self.chart_canvas.update_idletasks()
             width = max(self.chart_canvas.winfo_width(), 1)
             height = max(self.chart_canvas.winfo_height(), 1)
@@ -598,23 +601,28 @@ class AnalysisPage(ttk.Frame):
                 padding,
                 padding / 2,
                 anchor="w",
-                text=f"{numeric_closes[0]:.2f}",
+                text=f"{points_raw[0][0]:.2f}",
                 fill="#1f77b4",
             )
             return
         self.chart_canvas.update_idletasks()
         width = max(self.chart_canvas.winfo_width(), 1)
         height = max(self.chart_canvas.winfo_height(), 1)
-        padding = 20
-        min_price = min(numeric_closes)
-        max_price = max(numeric_closes)
+        padding_left = 60
+        padding_right = 20
+        padding_top = 20
+        padding_bottom = 30
+        min_price = min(price for price, _ts in points_raw)
+        max_price = max(price for price, _ts in points_raw)
         price_span = max(max_price - min_price, 1e-6)
-        x_span = max(len(numeric_closes) - 1, 1)
+        x_span = max(len(points_raw) - 1, 1)
 
         points = []
-        for idx, price in enumerate(numeric_closes):
-            x = padding + (width - 2 * padding) * (idx / x_span)
-            y = height - padding - (height - 2 * padding) * ((price - min_price) / price_span)
+        for idx, (price, _ts) in enumerate(points_raw):
+            x = padding_left + (width - padding_left - padding_right) * (idx / x_span)
+            y = height - padding_bottom - (
+                height - padding_top - padding_bottom
+            ) * ((price - min_price) / price_span)
             points.extend([x, y])
 
         if len(points) < 4:
@@ -638,20 +646,51 @@ class AnalysisPage(ttk.Frame):
                 fill="#666",
             )
             return
-        self.chart_canvas.create_text(
-            padding,
-            padding / 2,
-            anchor="w",
-            text=f"{numeric_closes[-1]:.2f}",
-            fill="#1f77b4",
+        grid_color = "#d9d9d9"
+        axis_color = "#444"
+        for step in range(5):
+            fraction = step / 4
+            y = height - padding_bottom - (
+                height - padding_top - padding_bottom
+            ) * fraction
+            self.chart_canvas.create_line(
+                padding_left, y, width - padding_right, y, fill=grid_color
+            )
+            value = min_price + (price_span * fraction)
+            self.chart_canvas.create_text(
+                padding_left - 8,
+                y,
+                anchor="e",
+                text=f"{value:.2f}",
+                fill=axis_color,
+            )
+
+        self.chart_canvas.create_line(
+            padding_left, padding_top, padding_left, height - padding_bottom, fill=axis_color
         )
-        self.chart_canvas.create_text(
-            width - padding,
-            padding / 2,
-            anchor="e",
-            text=f"{numeric_closes[0]:.2f}",
-            fill="#1f77b4",
+        self.chart_canvas.create_line(
+            padding_left,
+            height - padding_bottom,
+            width - padding_right,
+            height - padding_bottom,
+            fill=axis_color,
         )
+
+        total_points = len(points_raw)
+        tick_count = min(5, total_points)
+        for tick_index in range(tick_count):
+            idx = int(round(tick_index * (total_points - 1) / max(tick_count - 1, 1)))
+            _price, ts = points_raw[idx]
+            x = padding_left + (width - padding_left - padding_right) * (idx / x_span)
+            dt = datetime.fromtimestamp(ts / 1000)
+            label = dt.strftime("%m/%d")
+            self.chart_canvas.create_text(
+                x,
+                height - padding_bottom + 12,
+                anchor="n",
+                text=label,
+                fill=axis_color,
+            )
 
     def _on_content_configure(self, _event: tk.Event) -> None:
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
@@ -682,17 +721,17 @@ class AnalysisPage(ttk.Frame):
         if is_stock:
             self.option_info_frame.pack_forget()
             self.options_frame.pack_forget()
+            self.greeks_frame.pack_forget()
             self.strategy_frame.pack_forget()
-            self.knobs_frame.pack_forget()
         else:
             if not self.option_info_frame.winfo_ismapped():
                 self.option_info_frame.pack(padx=20, pady=(5, 15), fill="x")
             if not self.options_frame.winfo_ismapped():
                 self.options_frame.pack(padx=20, pady=(5, 15), fill="x")
+            if not self.greeks_frame.winfo_ismapped():
+                self.greeks_frame.pack(padx=20, pady=(5, 15), fill="x")
             if not self.strategy_frame.winfo_ismapped():
                 self.strategy_frame.pack(pady=5)
-            if not self.knobs_frame.winfo_ismapped():
-                self.knobs_frame.pack(pady=10, fill="x", padx=40)
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
     def refresh(self) -> None:
@@ -700,9 +739,6 @@ class AnalysisPage(ttk.Frame):
         self.selected_label.config(text=f"Selected Ticker: {ticker}")
         self.analysis_mode_var.set(self.controller.state.analysis_mode)
         self.strategy_var.set(self.controller.state.option_strategy)
-        self.delta_var.set(self.controller.state.knob_delta)
-        self.risk_var.set(self.controller.state.knob_risk)
-        self.prob_var.set(self.controller.state.knob_prob)
         api_key = load_api_key()
         self.api_client = MassiveApiClient(api_key) if api_key else None
         self._toggle_info_panels()
@@ -759,36 +795,54 @@ class AnalysisPage(ttk.Frame):
         self.option_contract = option_data[0] if option_data else None
         self._sync_option_snapshot()
 
-        closes = [item.get("c") for item in aggregates if item.get("c") is not None]
-        self._render_chart(closes)
+        self._render_chart(aggregates)
 
-        self.options_text.configure(state="normal")
-        self.options_text.delete("1.0", tk.END)
+        self.option_records = option_data
+        self.options_list.delete(0, tk.END)
         if not option_data:
-            self.options_text.insert("1.0", "No option contracts returned.\n")
+            self.options_list.insert(tk.END, "No option contracts returned.")
         else:
-            lines = []
-            for contract in option_data[:5]:
-                lines.append(
+            for contract in option_data:
+                self.options_list.insert(
+                    tk.END,
                     "{ticker} {expiration} {type} {strike}".format(
                         ticker=contract.get("ticker", "--"),
                         expiration=contract.get("expiration_date", "--"),
-                        type=contract.get("contract_type", "--").upper(),
+                        type=str(contract.get("contract_type", "--")).upper(),
                         strike=contract.get("strike_price", "--"),
-                    )
+                    ),
                 )
-            self.options_text.insert("1.0", "\n".join(lines))
-        self.options_text.configure(state="disabled")
+            self.options_list.selection_set(0)
+            self.options_list.see(0)
+        self._sync_option_snapshot()
+        self._sync_greeks()
 
     def save_analysis(self) -> None:
         self.controller.state.analysis_mode = self.analysis_mode_var.get()
         self.controller.state.option_strategy = self.strategy_var.get()
-        self.controller.state.knob_delta = int(self.delta_var.get())
-        self.controller.state.knob_risk = int(self.risk_var.get())
-        self.controller.state.knob_prob = int(self.prob_var.get())
         self.controller.persist_state()
         self._sync_option_snapshot()
         messagebox.showinfo("Saved", "Analysis settings saved locally.")
+
+    def on_option_select(self, _event: object) -> None:
+        selection = self.options_list.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        if index >= len(self.option_records):
+            return
+        self.option_contract = self.option_records[index]
+        self._sync_option_snapshot()
+        self._sync_greeks()
+
+    def _sync_greeks(self) -> None:
+        greeks = (self.option_contract or {}).get("greeks", {})
+        self._set_value(self.greeks_values["delta"], greeks.get("delta"))
+        self._set_value(self.greeks_values["gamma"], greeks.get("gamma"))
+        self._set_value(self.greeks_values["theta"], greeks.get("theta"))
+        self._set_value(self.greeks_values["vega"], greeks.get("vega"))
+        self._set_value(self.greeks_values["rho"], greeks.get("rho"))
+        self._set_value(self.greeks_values["iv"], greeks.get("iv"))
 
 
 if __name__ == "__main__":
