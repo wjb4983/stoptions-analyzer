@@ -544,6 +544,29 @@ class AnalysisPage(ttk.Frame):
                 fill="#666",
             )
             return
+        if len(closes) < 2:
+            self.chart_canvas.update_idletasks()
+            width = max(self.chart_canvas.winfo_width(), 1)
+            height = max(self.chart_canvas.winfo_height(), 1)
+            padding = 20
+            x = width / 2
+            y = height / 2
+            self.chart_canvas.create_oval(
+                x - 4,
+                y - 4,
+                x + 4,
+                y + 4,
+                fill="#1f77b4",
+                outline="",
+            )
+            self.chart_canvas.create_text(
+                padding,
+                padding / 2,
+                anchor="w",
+                text=f"{closes[0]:.2f}",
+                fill="#1f77b4",
+            )
+            return
         self.chart_canvas.update_idletasks()
         width = max(self.chart_canvas.winfo_width(), 1)
         height = max(self.chart_canvas.winfo_height(), 1)
