@@ -322,22 +322,39 @@ class AnalysisPage(ttk.Frame):
         self.controller = controller
         self.api_client: MassiveApiClient | None = None
         self.option_contract: dict | None = None
+        self.scroll_canvas = tk.Canvas(self, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.scroll_canvas.yview)
+        self.scroll_canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.scroll_canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
 
-        ttk.Label(self, text="Analysis", font=("Arial", 20, "bold")).pack(pady=10)
+        self.content_frame = ttk.Frame(self.scroll_canvas)
+        self.scroll_window = self.scroll_canvas.create_window(
+            (0, 0), window=self.content_frame, anchor="nw"
+        )
+        self.content_frame.bind("<Configure>", self._on_content_configure)
+        self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
+        self.scroll_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
-        self.selected_label = ttk.Label(self, text="Selected Ticker: None")
+        ttk.Label(self.content_frame, text="Analysis", font=("Arial", 20, "bold")).pack(
+            pady=10
+        )
+
+        self.selected_label = ttk.Label(self.content_frame, text="Selected Ticker: None")
         self.selected_label.pack(pady=5)
 
         integration_note = ttk.Label(
-            self,
+            self.content_frame,
             text="Massive integration uses the API key saved in the main menu (or env var).",
             foreground="#555",
         )
         integration_note.pack(pady=5)
 
-        ttk.Button(self, text="Load Data", command=self.load_market_data).pack(pady=10)
+        ttk.Button(self.content_frame, text="Load Data", command=self.load_market_data).pack(
+            pady=10
+        )
 
-        stock_frame = ttk.LabelFrame(self, text="Stock Analysis")
+        stock_frame = ttk.LabelFrame(self.content_frame, text="Stock Analysis")
         stock_frame.pack(pady=10, fill="both", expand=True, padx=40)
 
         chart_header = ttk.Label(
@@ -430,7 +447,7 @@ class AnalysisPage(ttk.Frame):
         self.options_text.insert("1.0", "No option data loaded yet.\n")
         self.options_text.configure(state="disabled")
 
-        selector_frame = ttk.Frame(self)
+        selector_frame = ttk.Frame(self.content_frame)
         selector_frame.pack(pady=5)
         selector_frame.columnconfigure(1, weight=1)
 
@@ -446,7 +463,7 @@ class AnalysisPage(ttk.Frame):
         self.analysis_mode_dropdown.grid(row=0, column=1, padx=5, sticky="w")
         self.analysis_mode_dropdown.bind("<<ComboboxSelected>>", self.on_analysis_mode_change)
 
-        self.strategy_frame = ttk.Frame(self)
+        self.strategy_frame = ttk.Frame(self.content_frame)
         self.strategy_frame.pack(pady=5)
 
         ttk.Label(self.strategy_frame, text="Option Strategy:").grid(row=0, column=0, padx=5)
@@ -466,7 +483,7 @@ class AnalysisPage(ttk.Frame):
         self.strategy_dropdown.grid(row=0, column=1, padx=5)
         self.strategy_dropdown.bind("<<ComboboxSelected>>", self.on_strategy_change)
 
-        self.knobs_frame = ttk.LabelFrame(self, text="Option Strategy Knobs")
+        self.knobs_frame = ttk.LabelFrame(self.content_frame, text="Option Strategy Knobs")
         self.knobs_frame.pack(pady=10, fill="x", padx=40)
 
         self.delta_var = tk.IntVar(value=self.controller.state.knob_delta)
@@ -477,7 +494,7 @@ class AnalysisPage(ttk.Frame):
         self._build_slider(self.knobs_frame, "Risk", self.risk_var, 1)
         self._build_slider(self.knobs_frame, "Probability of Profit", self.prob_var, 2)
 
-        button_row = ttk.Frame(self)
+        button_row = ttk.Frame(self.content_frame)
         button_row.pack(pady=10)
 
         ttk.Button(button_row, text="Save Analysis", command=self.save_analysis).grid(
@@ -592,7 +609,16 @@ class AnalysisPage(ttk.Frame):
             )
             return
 
-        self.chart_canvas.create_line(*points, fill="#1f77b4", width=2, smooth=True)
+        try:
+            self.chart_canvas.create_line(*points, fill="#1f77b4", width=2, smooth=True)
+        except tk.TclError:
+            self.chart_canvas.create_text(
+                220,
+                110,
+                text="Unable to render chart line for this data.",
+                fill="#666",
+            )
+            return
         self.chart_canvas.create_text(
             padding,
             padding / 2,
@@ -607,6 +633,16 @@ class AnalysisPage(ttk.Frame):
             text=f"{numeric_closes[0]:.2f}",
             fill="#1f77b4",
         )
+
+    def _on_content_configure(self, _event: tk.Event) -> None:
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        self.scroll_canvas.itemconfigure(self.scroll_window, width=event.width)
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        if self.scroll_canvas.winfo_height() < self.content_frame.winfo_height():
+            self.scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _sync_option_snapshot(self) -> None:
         contract = self.option_contract or {}
