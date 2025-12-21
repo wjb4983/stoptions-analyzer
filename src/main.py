@@ -1,10 +1,66 @@
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
+CONFIG_DIR = Path.home() / ".stoptions_analyzer"
+API_KEY_PATH = CONFIG_DIR / "api_key.txt"
+API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
+
+
+def load_api_key() -> str:
+    env_key = os.getenv("MASSIVE_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    if API_KEY_PATH.exists():
+        return API_KEY_PATH.read_text().strip()
+    return ""
+
+
+def save_api_key(key: str) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    API_KEY_PATH.write_text(key.strip())
+    try:
+        API_KEY_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
+class MassiveApiClient:
+    def __init__(self, api_key: str, base_url: str = API_BASE_URL) -> None:
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+
+    def _request(self, path: str, params: dict[str, str]) -> dict:
+        params = {**params, "apiKey": self.api_key}
+        url = f"{self.base_url}{path}?{urlencode(params)}"
+        with urlopen(url, timeout=10) as response:
+            payload = response.read().decode("utf-8")
+        return json.loads(payload)
+
+    def fetch_previous_close(self, ticker: str) -> dict:
+        data = self._request(f"/v2/aggs/ticker/{ticker}/prev", {"adjusted": "true"})
+        result = (data.get("results") or [{}])[0]
+        return {
+            "close": result.get("c"),
+            "open": result.get("o"),
+            "high": result.get("h"),
+            "low": result.get("l"),
+            "volume": result.get("v"),
+        }
+
+    def fetch_option_contracts(self, ticker: str, limit: int = 5) -> list[dict]:
+        data = self._request(
+            "/v3/reference/options/contracts",
+            {"underlying_ticker": ticker, "limit": str(limit)},
+        )
+        return data.get("results", [])
 
 
 @dataclass
@@ -52,6 +108,7 @@ class StoptionsApp(tk.Tk):
         self.geometry("1200x800")
         self._maximize_window()
         self.state = AppState.load()
+        self.api_key = load_api_key()
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
@@ -99,6 +156,18 @@ class MainMenu(ttk.Frame):
         )
         description.pack(pady=10)
 
+        api_frame = ttk.LabelFrame(self, text="Massive API Key")
+        api_frame.pack(pady=15, padx=40, fill="x")
+        api_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(api_frame, text="API Key").grid(row=0, column=0, padx=10, pady=8, sticky="w")
+        self.api_key_var = tk.StringVar(value=self.controller.api_key)
+        self.api_key_entry = ttk.Entry(api_frame, textvariable=self.api_key_var, show="*")
+        self.api_key_entry.grid(row=0, column=1, padx=10, pady=8, sticky="ew")
+        ttk.Button(api_frame, text="Save Key", command=self.save_api_key).grid(
+            row=0, column=2, padx=10, pady=8
+        )
+
         button_frame = ttk.Frame(self)
         button_frame.pack(pady=40)
 
@@ -122,6 +191,20 @@ class MainMenu(ttk.Frame):
             command=lambda: controller.show_frame("AnalysisPage"),
             width=30,
         ).grid(row=2, column=0, pady=10)
+
+    def refresh(self) -> None:
+        self.api_key_var.set(self.controller.api_key)
+
+    def save_api_key(self) -> None:
+        key = self.api_key_var.get().strip()
+        if not key:
+            messagebox.showinfo("Missing key", "Enter a Massive API key first.")
+            return
+        save_api_key(key)
+        self.controller.api_key = key
+        messagebox.showinfo(
+            "Saved", f"API key saved to {API_KEY_PATH} (not tracked in git)."
+        )
 
 
 class TickerEntryPage(ttk.Frame):
@@ -222,6 +305,8 @@ class AnalysisPage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
         super().__init__(parent)
         self.controller = controller
+        self.api_client: MassiveApiClient | None = None
+        self.option_contract: dict | None = None
 
         ttk.Label(self, text="Analysis", font=("Arial", 20, "bold")).pack(pady=10)
 
@@ -230,10 +315,12 @@ class AnalysisPage(ttk.Frame):
 
         integration_note = ttk.Label(
             self,
-            text="Massive account integration pending for live API data.",
+            text="Massive integration enabled via API key saved on the main menu.",
             foreground="#555",
         )
         integration_note.pack(pady=5)
+
+        ttk.Button(self, text="Load Data", command=self.load_market_data).pack(pady=5)
 
         stock_frame = ttk.LabelFrame(self, text="Stock Analysis")
         stock_frame.pack(pady=10, fill="both", expand=True, padx=40)
@@ -279,21 +366,37 @@ class AnalysisPage(ttk.Frame):
             ttk.Label(labels_frame, text=label).grid(row=0, column=index, padx=4)
             labels_frame.columnconfigure(index, weight=1)
 
-        stats_frame = ttk.LabelFrame(stock_frame, text="Stock Snapshot")
-        stats_frame.pack(padx=20, pady=(5, 15), fill="x")
-
-        self.stats_text = tk.Text(stats_frame, height=6)
-        self.stats_text.pack(fill="x", padx=10, pady=8)
-        self.stats_text.insert(
-            "1.0",
-            "Price: --\n"
-            "Previous Close: --\n"
-            "Open / High / Low: -- / -- / --\n"
-            "Volume: --\n"
-            "Market Cap: --\n"
-            "52 Week Range: --\n",
+        self.stock_info_frame = ttk.LabelFrame(stock_frame, text="Stock Snapshot")
+        self.stock_info_frame.pack(padx=20, pady=(5, 15), fill="x")
+        self.stock_values: dict[str, ttk.Label] = {}
+        self._build_info_grid(
+            self.stock_info_frame,
+            [
+                ("Price", "price"),
+                ("Previous Close", "prev_close"),
+                ("Open", "open"),
+                ("High", "high"),
+                ("Low", "low"),
+                ("Volume", "volume"),
+                ("Market Cap", "market_cap"),
+                ("52 Week Range", "range_52w"),
+            ],
+            self.stock_values,
         )
-        self.stats_text.configure(state="disabled")
+
+        self.option_info_frame = ttk.LabelFrame(stock_frame, text="Option Snapshot")
+        self.option_info_frame.pack(padx=20, pady=(5, 15), fill="x")
+        self.option_values: dict[str, ttk.Label] = {}
+        self._build_info_grid(
+            self.option_info_frame,
+            [
+                ("Contract", "contract"),
+                ("Expiration", "expiration"),
+                ("Type", "type"),
+                ("Strike", "strike"),
+            ],
+            self.option_values,
+        )
 
         selector_frame = ttk.Frame(self)
         selector_frame.pack(pady=5)
@@ -327,17 +430,6 @@ class AnalysisPage(ttk.Frame):
         self._build_slider(knobs_frame, "Risk", self.risk_var, 1)
         self._build_slider(knobs_frame, "Probability of Profit", self.prob_var, 2)
 
-        metrics_frame = ttk.LabelFrame(self, text="Option Metrics")
-        metrics_frame.pack(pady=10, fill="x", padx=40)
-
-        self.metrics_text = tk.Text(metrics_frame, height=6)
-        self.metrics_text.pack(fill="x", padx=10, pady=5)
-        self.metrics_text.insert(
-            "1.0",
-            "Option Delta: --\nRisk: --\nProbability of Profit: --\n",
-        )
-        self.metrics_text.configure(state="disabled")
-
         button_row = ttk.Frame(self)
         button_row.pack(pady=10)
 
@@ -363,6 +455,47 @@ class AnalysisPage(ttk.Frame):
         value_label.grid(row=row, column=2, padx=10, pady=5)
         parent.columnconfigure(1, weight=1)
 
+    def _build_info_grid(
+        self,
+        parent: ttk.Frame,
+        rows: list[tuple[str, str]],
+        target: dict[str, ttk.Label],
+    ) -> None:
+        for row_index, (label, key) in enumerate(rows):
+            ttk.Label(parent, text=label).grid(
+                row=row_index, column=0, padx=10, pady=4, sticky="w"
+            )
+            value_label = ttk.Label(parent, text="--", foreground="#b00020")
+            value_label.grid(row=row_index, column=1, padx=10, pady=4, sticky="w")
+            target[key] = value_label
+        parent.columnconfigure(1, weight=1)
+
+    def _set_value(self, label: ttk.Label, value: str | int | float | None) -> None:
+        if value in (None, "", "--"):
+            label.config(text="--", foreground="#b00020")
+        else:
+            label.config(text=str(value), foreground="#0a7a2f")
+
+    def _sync_option_snapshot(self) -> None:
+        contract = self.option_contract or {}
+        self._set_value(self.option_values["contract"], contract.get("ticker"))
+        self._set_value(self.option_values["expiration"], contract.get("expiration_date"))
+        contract_type = contract.get("contract_type")
+        display_type = contract_type.upper() if contract_type else None
+        self._set_value(self.option_values["type"], display_type)
+        self._set_value(self.option_values["strike"], contract.get("strike_price"))
+
+    def _toggle_info_panels(self) -> None:
+        if self.analysis_var.get() == "Stock Analysis":
+            if not self.stock_info_frame.winfo_ismapped():
+                self.stock_info_frame.pack(padx=20, pady=(5, 15), fill="x")
+            self.option_info_frame.pack_forget()
+        else:
+            if not self.option_info_frame.winfo_ismapped():
+                self.option_info_frame.pack(padx=20, pady=(5, 15), fill="x")
+            self.stock_info_frame.pack_forget()
+            self.option_info_frame.pack(padx=20, pady=(5, 15), fill="x")
+
     def refresh(self) -> None:
         ticker = self.controller.state.selected_ticker or "None"
         self.selected_label.config(text=f"Selected Ticker: {ticker}")
@@ -370,10 +503,54 @@ class AnalysisPage(ttk.Frame):
         self.delta_var.set(self.controller.state.knob_delta)
         self.risk_var.set(self.controller.state.knob_risk)
         self.prob_var.set(self.controller.state.knob_prob)
+        api_key = self.controller.api_key
+        self.api_client = MassiveApiClient(api_key) if api_key else None
+        self.option_contract = None
+        self._toggle_info_panels()
+        self._sync_option_snapshot()
 
     def on_analysis_change(self, _event: object) -> None:
         self.controller.state.analysis_type = self.analysis_var.get()
         self.controller.persist_state()
+        self._toggle_info_panels()
+        self._sync_option_snapshot()
+
+    def load_market_data(self) -> None:
+        if not self.api_client:
+            messagebox.showinfo(
+                "Missing key", "Enter or set a Massive API key to load data."
+            )
+            return
+        ticker = self.controller.state.selected_ticker
+        if not ticker:
+            messagebox.showinfo("Missing ticker", "Select a ticker first.")
+            return
+        try:
+            stock_data = self.api_client.fetch_previous_close(ticker)
+            option_data = self.api_client.fetch_option_contracts(ticker)
+        except HTTPError as exc:
+            messagebox.showerror(
+                "API Error",
+                f"Massive API returned an error: {exc.code} {exc.reason}",
+            )
+            return
+        except URLError as exc:
+            messagebox.showerror(
+                "Connection Error",
+                f"Could not reach Massive API: {exc.reason}",
+            )
+            return
+
+        self._set_value(self.stock_values["price"], stock_data.get("close"))
+        self._set_value(self.stock_values["prev_close"], stock_data.get("close"))
+        self._set_value(self.stock_values["open"], stock_data.get("open"))
+        self._set_value(self.stock_values["high"], stock_data.get("high"))
+        self._set_value(self.stock_values["low"], stock_data.get("low"))
+        self._set_value(self.stock_values["volume"], stock_data.get("volume"))
+        self._set_value(self.stock_values["market_cap"], "--")
+        self._set_value(self.stock_values["range_52w"], "--")
+        self.option_contract = option_data[0] if option_data else None
+        self._sync_option_snapshot()
 
     def save_analysis(self) -> None:
         self.controller.state.analysis_type = self.analysis_var.get()
@@ -381,6 +558,7 @@ class AnalysisPage(ttk.Frame):
         self.controller.state.knob_risk = int(self.risk_var.get())
         self.controller.state.knob_prob = int(self.prob_var.get())
         self.controller.persist_state()
+        self._sync_option_snapshot()
         messagebox.showinfo("Saved", "Analysis settings saved locally.")
 
 
