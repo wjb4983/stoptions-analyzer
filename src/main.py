@@ -12,6 +12,7 @@ from urllib.request import urlopen
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
+DATA_DIR = Path(__file__).resolve().parent / "data"
 API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
 HORIZON_CONFIGS = [
     ("Day", 1, 10, "10m"),
@@ -45,6 +46,30 @@ def save_api_key(key: str) -> None:
         pass
 
 
+def _safe_ticker_name(ticker: str) -> str:
+    return "".join(char if char.isalnum() else "_" for char in ticker.upper())
+
+
+def _cache_path(ticker: str) -> Path:
+    return DATA_DIR / f"{_safe_ticker_name(ticker)}.json"
+
+
+def load_cached_market_data(ticker: str) -> dict | None:
+    path = _cache_path(ticker)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def save_cached_market_data(ticker: str, payload: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path = _cache_path(ticker)
+    path.write_text(json.dumps(payload, indent=2))
+
+
 class MassiveApiClient:
     def __init__(self, api_key: str, base_url: str = API_BASE_URL) -> None:
         self.api_key = api_key
@@ -68,10 +93,32 @@ class MassiveApiClient:
             "volume": result.get("v"),
         }
 
-    def fetch_option_contracts(self, ticker: str, limit: int = 5) -> list[dict]:
+    def _request_url(self, url: str) -> dict:
+        with urlopen(url, timeout=10) as response:
+            payload = response.read().decode("utf-8")
+        return json.loads(payload)
+
+    def fetch_option_contracts(self, ticker: str, limit: int = 1000) -> list[dict]:
+        results: list[dict] = []
+        params = {"underlying_ticker": ticker, "limit": str(limit)}
+        data = self._request("/v3/reference/options/contracts", params)
+        results.extend(data.get("results", []))
+        next_url = data.get("next_url")
+        while next_url:
+            if "apiKey=" not in next_url:
+                joiner = "&" if "?" in next_url else "?"
+                next_url = f"{next_url}{joiner}apiKey={self.api_key}"
+            data = self._request_url(next_url)
+            results.extend(data.get("results", []))
+            next_url = data.get("next_url")
+        return results
+
+    def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days_back)
         data = self._request(
-            "/v3/reference/options/contracts",
-            {"underlying_ticker": ticker, "limit": str(limit)},
+            f"/v2/aggs/ticker/{ticker}/range/{minutes_per_bar}/minute/{start_date}/{end_date}",
+            {"adjusted": "true", "sort": "asc", "limit": "5000"},
         )
         return data.get("results", [])
 
@@ -532,11 +579,6 @@ class AnalysisPage(ttk.Frame):
         self.horizon_var.set(snapped)
         self.horizon_slider.set(snapped)
 
-    def _snap_horizon(self, value: str) -> None:
-        snapped = int(round(float(value)))
-        self.horizon_var.set(snapped)
-        self.horizon_slider.set(snapped)
-
     def _build_info_grid(
         self,
         parent: ttk.Frame,
@@ -764,25 +806,53 @@ class AnalysisPage(ttk.Frame):
         if not ticker:
             messagebox.showinfo("Missing ticker", "Select a ticker first.")
             return
-        try:
-            stock_data = self.api_client.fetch_previous_close(ticker)
-            option_data = self.api_client.fetch_option_contracts(ticker)
-            horizon_index = int(round(self.horizon_var.get()))
-            horizon_index = min(max(horizon_index, 0), len(HORIZON_CONFIGS) - 1)
-            _label, days_back, minutes_per_bar, _cadence_label = HORIZON_CONFIGS[horizon_index]
-            aggregates = self.api_client.fetch_aggregates(ticker, days_back, minutes_per_bar)
-        except HTTPError as exc:
-            messagebox.showerror(
-                "API Error",
-                f"Massive API returned an error: {exc.code} {exc.reason}",
+        horizon_index = int(round(self.horizon_var.get()))
+        horizon_index = min(max(horizon_index, 0), len(HORIZON_CONFIGS) - 1)
+        _label, days_back, minutes_per_bar, _cadence_label = HORIZON_CONFIGS[horizon_index]
+        cache_payload = load_cached_market_data(ticker) or {}
+        cache_date = cache_payload.get("last_updated")
+        today_label = date.today().isoformat()
+        aggregates_map = cache_payload.get("aggregates", {})
+        cached_stock = cache_payload.get("stock")
+        cached_options = cache_payload.get("options")
+        cached_aggregates = aggregates_map.get(str(horizon_index))
+        should_fetch = cache_date != today_label
+        if cached_stock is None or cached_options is None or cached_aggregates is None:
+            should_fetch = True
+
+        if should_fetch:
+            try:
+                stock_data = self.api_client.fetch_previous_close(ticker)
+                option_data = self.api_client.fetch_option_contracts(ticker)
+                aggregates = self.api_client.fetch_aggregates(
+                    ticker, days_back, minutes_per_bar
+                )
+            except HTTPError as exc:
+                messagebox.showerror(
+                    "API Error",
+                    f"Massive API returned an error: {exc.code} {exc.reason}",
+                )
+                return
+            except URLError as exc:
+                messagebox.showerror(
+                    "Connection Error",
+                    f"Could not reach Massive API: {exc.reason}",
+                )
+                return
+            aggregates_map[str(horizon_index)] = aggregates
+            cache_payload.update(
+                {
+                    "last_updated": today_label,
+                    "stock": stock_data,
+                    "options": option_data,
+                    "aggregates": aggregates_map,
+                }
             )
-            return
-        except URLError as exc:
-            messagebox.showerror(
-                "Connection Error",
-                f"Could not reach Massive API: {exc.reason}",
-            )
-            return
+            save_cached_market_data(ticker, cache_payload)
+        else:
+            stock_data = cached_stock or {}
+            option_data = cached_options or []
+            aggregates = cached_aggregates or []
 
         self._set_value(self.stock_values["price"], stock_data.get("close"))
         self._set_value(self.stock_values["prev_close"], stock_data.get("close"))
