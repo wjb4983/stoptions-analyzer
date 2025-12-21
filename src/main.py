@@ -49,7 +49,8 @@ class StoptionsApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Stoptions Analyzer")
-        self.geometry("900x600")
+        self.geometry("1200x800")
+        self._maximize_window()
         self.state = AppState.load()
 
         container = ttk.Frame(self)
@@ -73,6 +74,13 @@ class StoptionsApp(tk.Tk):
 
     def persist_state(self) -> None:
         self.state.save()
+
+    def _maximize_window(self) -> None:
+        self.update_idletasks()
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            self.attributes("-fullscreen", True)
 
 
 class MainMenu(ttk.Frame):
@@ -215,15 +223,82 @@ class AnalysisPage(ttk.Frame):
         super().__init__(parent)
         self.controller = controller
 
-        ttk.Label(self, text="Analysis", font=("Arial", 18, "bold")).pack(pady=10)
+        ttk.Label(self, text="Analysis", font=("Arial", 20, "bold")).pack(pady=10)
 
         self.selected_label = ttk.Label(self, text="Selected Ticker: None")
         self.selected_label.pack(pady=5)
 
-        selector_frame = ttk.Frame(self)
-        selector_frame.pack(pady=10)
+        integration_note = ttk.Label(
+            self,
+            text="Massive account integration pending for live API data.",
+            foreground="#555",
+        )
+        integration_note.pack(pady=5)
 
-        ttk.Label(selector_frame, text="Analysis Type:").grid(row=0, column=0, padx=5)
+        stock_frame = ttk.LabelFrame(self, text="Stock Analysis")
+        stock_frame.pack(pady=10, fill="both", expand=True, padx=40)
+
+        chart_header = ttk.Label(
+            stock_frame,
+            text="Current (or previous trading day) chart",
+            font=("Arial", 12, "bold"),
+        )
+        chart_header.pack(pady=(10, 5))
+
+        chart_frame = ttk.Frame(stock_frame)
+        chart_frame.pack(pady=5, fill="both", expand=True)
+
+        self.chart_canvas = tk.Canvas(chart_frame, height=220, bg="#f0f0f0")
+        self.chart_canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        self.chart_canvas.create_text(
+            220,
+            110,
+            text="Daily chart preview will render here.",
+            fill="#666",
+        )
+
+        slider_frame = ttk.Frame(stock_frame)
+        slider_frame.pack(fill="x", padx=20, pady=(5, 10))
+
+        ttk.Label(slider_frame, text="Time Horizon").grid(row=0, column=0, sticky="w")
+        self.horizon_var = tk.IntVar(value=0)
+        self.horizon_slider = ttk.Scale(
+            slider_frame,
+            from_=0,
+            to=8,
+            orient="horizontal",
+            variable=self.horizon_var,
+        )
+        self.horizon_slider.grid(row=1, column=0, sticky="ew", pady=5)
+        slider_frame.columnconfigure(0, weight=1)
+
+        labels_frame = ttk.Frame(slider_frame)
+        labels_frame.grid(row=2, column=0, sticky="ew")
+        labels = ["Day", "Week", "Month", "3M", "6M", "12M", "3Y", "5Y", "10Y"]
+        for index, label in enumerate(labels):
+            ttk.Label(labels_frame, text=label).grid(row=0, column=index, padx=4)
+            labels_frame.columnconfigure(index, weight=1)
+
+        stats_frame = ttk.LabelFrame(stock_frame, text="Stock Snapshot")
+        stats_frame.pack(padx=20, pady=(5, 15), fill="x")
+
+        self.stats_text = tk.Text(stats_frame, height=6)
+        self.stats_text.pack(fill="x", padx=10, pady=8)
+        self.stats_text.insert(
+            "1.0",
+            "Price: --\n"
+            "Previous Close: --\n"
+            "Open / High / Low: -- / -- / --\n"
+            "Volume: --\n"
+            "Market Cap: --\n"
+            "52 Week Range: --\n",
+        )
+        self.stats_text.configure(state="disabled")
+
+        selector_frame = ttk.Frame(self)
+        selector_frame.pack(pady=5)
+
+        ttk.Label(selector_frame, text="Option Analysis Type:").grid(row=0, column=0, padx=5)
         self.analysis_var = tk.StringVar(value=self.controller.state.analysis_type)
         self.analysis_dropdown = ttk.Combobox(
             selector_frame,
@@ -241,7 +316,7 @@ class AnalysisPage(ttk.Frame):
         self.analysis_dropdown.grid(row=0, column=1, padx=5)
         self.analysis_dropdown.bind("<<ComboboxSelected>>", self.on_analysis_change)
 
-        knobs_frame = ttk.LabelFrame(self, text="Strategy Knobs")
+        knobs_frame = ttk.LabelFrame(self, text="Option Strategy Knobs")
         knobs_frame.pack(pady=10, fill="x", padx=40)
 
         self.delta_var = tk.IntVar(value=self.controller.state.knob_delta)
@@ -252,7 +327,7 @@ class AnalysisPage(ttk.Frame):
         self._build_slider(knobs_frame, "Risk", self.risk_var, 1)
         self._build_slider(knobs_frame, "Probability of Profit", self.prob_var, 2)
 
-        metrics_frame = ttk.LabelFrame(self, text="Metrics")
+        metrics_frame = ttk.LabelFrame(self, text="Option Metrics")
         metrics_frame.pack(pady=10, fill="x", padx=40)
 
         self.metrics_text = tk.Text(metrics_frame, height=6)
@@ -263,18 +338,6 @@ class AnalysisPage(ttk.Frame):
         )
         self.metrics_text.configure(state="disabled")
 
-        chart_frame = ttk.LabelFrame(self, text="Chart Placeholder")
-        chart_frame.pack(pady=10, fill="both", expand=True, padx=40)
-
-        self.chart_canvas = tk.Canvas(chart_frame, height=180, bg="#f0f0f0")
-        self.chart_canvas.pack(fill="both", expand=True, padx=10, pady=10)
-        self.chart_canvas.create_text(
-            200,
-            90,
-            text="Charts will render here in a future update.",
-            fill="#666",
-        )
-
         button_row = ttk.Frame(self)
         button_row.pack(pady=10)
 
@@ -283,9 +346,14 @@ class AnalysisPage(ttk.Frame):
         )
         ttk.Button(
             button_row,
+            text="Select Stock",
+            command=lambda: controller.show_frame("TickerSelectPage"),
+        ).grid(row=0, column=1, padx=10)
+        ttk.Button(
+            button_row,
             text="Back to Main Menu",
             command=lambda: controller.show_frame("MainMenu"),
-        ).grid(row=0, column=1, padx=10)
+        ).grid(row=0, column=2, padx=10)
 
     def _build_slider(self, parent: ttk.Frame, label: str, var: tk.IntVar, row: int) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, padx=10, pady=5, sticky="w")
