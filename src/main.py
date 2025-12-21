@@ -122,6 +122,15 @@ class MassiveApiClient:
         )
         return data.get("results", [])
 
+    def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days_back)
+        data = self._request(
+            f"/v2/aggs/ticker/{ticker}/range/{minutes_per_bar}/minute/{start_date}/{end_date}",
+            {"adjusted": "true", "sort": "asc", "limit": "5000"},
+        )
+        return data.get("results", [])
+
 
 @dataclass
 class AppState:
