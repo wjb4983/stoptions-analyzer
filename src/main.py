@@ -358,6 +358,7 @@ class AnalysisPage(ttk.Frame):
             to=8,
             orient="horizontal",
             variable=self.horizon_var,
+            command=self._snap_horizon,
         )
         self.horizon_slider.grid(row=1, column=0, sticky="ew", pady=5)
         slider_frame.columnconfigure(0, weight=1)
@@ -481,6 +482,9 @@ class AnalysisPage(ttk.Frame):
         value_label = ttk.Label(parent, textvariable=var)
         value_label.grid(row=row, column=2, padx=10, pady=5)
         parent.columnconfigure(1, weight=1)
+
+    def _snap_horizon(self, value: str) -> None:
+        self.horizon_var.set(int(round(float(value))))
 
     def _build_info_grid(
         self,
