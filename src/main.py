@@ -582,6 +582,15 @@ class AnalysisPage(ttk.Frame):
             y = height - padding - (height - 2 * padding) * ((price - min_price) / price_span)
             points.extend([x, y])
 
+        if len(points) < 4:
+            self.chart_canvas.create_text(
+                220,
+                110,
+                text="Not enough chart data to render a line.",
+                fill="#666",
+            )
+            return
+
         self.chart_canvas.create_line(*points, fill="#1f77b4", width=2, smooth=True)
         self.chart_canvas.create_text(
             padding,
