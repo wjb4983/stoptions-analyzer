@@ -306,7 +306,6 @@ class AnalysisPage(ttk.Frame):
         super().__init__(parent)
         self.controller = controller
         self.api_client: MassiveApiClient | None = None
-        self.option_contract: dict | None = None
 
         ttk.Label(self, text="Analysis", font=("Arial", 20, "bold")).pack(pady=10)
 
@@ -315,12 +314,26 @@ class AnalysisPage(ttk.Frame):
 
         integration_note = ttk.Label(
             self,
-            text="Massive integration enabled via API key saved on the main menu.",
+            text="Massive integration enabled via API key (stored locally or via env var).",
             foreground="#555",
         )
         integration_note.pack(pady=5)
 
-        ttk.Button(self, text="Load Data", command=self.load_market_data).pack(pady=5)
+        api_frame = ttk.LabelFrame(self, text="Massive API Settings")
+        api_frame.pack(pady=10, fill="x", padx=40)
+        api_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(api_frame, text="API Key").grid(row=0, column=0, padx=10, pady=8, sticky="w")
+        self.api_key_var = tk.StringVar()
+        self.api_key_entry = ttk.Entry(api_frame, textvariable=self.api_key_var, show="*")
+        self.api_key_entry.grid(row=0, column=1, padx=10, pady=8, sticky="ew")
+
+        ttk.Button(api_frame, text="Save Key", command=self.save_api_key).grid(
+            row=0, column=2, padx=10, pady=8
+        )
+        ttk.Button(api_frame, text="Load Data", command=self.load_market_data).grid(
+            row=0, column=3, padx=10, pady=8
+        )
 
         stock_frame = ttk.LabelFrame(self, text="Stock Analysis")
         stock_frame.pack(pady=10, fill="both", expand=True, padx=40)
@@ -397,6 +410,14 @@ class AnalysisPage(ttk.Frame):
             ],
             self.option_values,
         )
+
+        options_frame = ttk.LabelFrame(stock_frame, text="Option Contracts (Sample)")
+        options_frame.pack(padx=20, pady=(5, 15), fill="x")
+
+        self.options_text = tk.Text(options_frame, height=6)
+        self.options_text.pack(fill="x", padx=10, pady=8)
+        self.options_text.insert("1.0", "No option data loaded yet.\n")
+        self.options_text.configure(state="disabled")
 
         selector_frame = ttk.Frame(self)
         selector_frame.pack(pady=5)
@@ -503,11 +524,9 @@ class AnalysisPage(ttk.Frame):
         self.delta_var.set(self.controller.state.knob_delta)
         self.risk_var.set(self.controller.state.knob_risk)
         self.prob_var.set(self.controller.state.knob_prob)
-        api_key = self.controller.api_key
+        api_key = load_api_key()
+        self.api_key_var.set(api_key)
         self.api_client = MassiveApiClient(api_key) if api_key else None
-        self.option_contract = None
-        self._toggle_info_panels()
-        self._sync_option_snapshot()
 
     def on_analysis_change(self, _event: object) -> None:
         self.controller.state.analysis_type = self.analysis_var.get()
@@ -551,6 +570,80 @@ class AnalysisPage(ttk.Frame):
         self._set_value(self.stock_values["range_52w"], "--")
         self.option_contract = option_data[0] if option_data else None
         self._sync_option_snapshot()
+
+    def save_api_key(self) -> None:
+        key = self.api_key_var.get().strip()
+        if not key:
+            messagebox.showinfo("Missing key", "Enter a Massive API key first.")
+            return
+        save_api_key(key)
+        self.api_client = MassiveApiClient(key)
+        messagebox.showinfo(
+            "Saved", f"API key saved to {API_KEY_PATH} (not tracked in git)."
+        )
+
+    def load_market_data(self) -> None:
+        if not self.api_client:
+            messagebox.showinfo(
+                "Missing key", "Enter or set a Massive API key to load data."
+            )
+            return
+        ticker = self.controller.state.selected_ticker
+        if not ticker:
+            messagebox.showinfo("Missing ticker", "Select a ticker first.")
+            return
+        try:
+            stock_data = self.api_client.fetch_previous_close(ticker)
+            option_data = self.api_client.fetch_option_contracts(ticker)
+        except HTTPError as exc:
+            messagebox.showerror(
+                "API Error",
+                f"Massive API returned an error: {exc.code} {exc.reason}",
+            )
+            return
+        except URLError as exc:
+            messagebox.showerror(
+                "Connection Error",
+                f"Could not reach Massive API: {exc.reason}",
+            )
+            return
+
+        self.stats_text.configure(state="normal")
+        self.stats_text.delete("1.0", tk.END)
+        self.stats_text.insert(
+            "1.0",
+            "Price: {close}\n"
+            "Previous Close: {close}\n"
+            "Open / High / Low: {open} / {high} / {low}\n"
+            "Volume: {volume}\n"
+            "Market Cap: --\n"
+            "52 Week Range: --\n".format(
+                close=stock_data.get("close", "--"),
+                open=stock_data.get("open", "--"),
+                high=stock_data.get("high", "--"),
+                low=stock_data.get("low", "--"),
+                volume=stock_data.get("volume", "--"),
+            ),
+        )
+        self.stats_text.configure(state="disabled")
+
+        self.options_text.configure(state="normal")
+        self.options_text.delete("1.0", tk.END)
+        if not option_data:
+            self.options_text.insert("1.0", "No option contracts returned.\n")
+        else:
+            lines = []
+            for contract in option_data[:5]:
+                lines.append(
+                    "{ticker} {expiration} {type} {strike}".format(
+                        ticker=contract.get("ticker", "--"),
+                        expiration=contract.get("expiration_date", "--"),
+                        type=contract.get("contract_type", "--").upper(),
+                        strike=contract.get("strike_price", "--"),
+                    )
+                )
+            self.options_text.insert("1.0", "\n".join(lines))
+        self.options_text.configure(state="disabled")
 
     def save_analysis(self) -> None:
         self.controller.state.analysis_type = self.analysis_var.get()
