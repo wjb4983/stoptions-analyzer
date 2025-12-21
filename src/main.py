@@ -13,8 +13,18 @@ STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
 API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
-HORIZON_LABELS = ["Day", "Week", "Month", "3M", "6M", "12M", "3Y", "5Y", "10Y"]
-HORIZON_DAYS = [1, 7, 30, 90, 180, 365, 1095, 1825, 3650]
+HORIZON_CONFIGS = [
+    ("Day", 1, 10, "10m"),
+    ("3 Day", 3, 30, "30m"),
+    ("Week", 7, 60, "1h"),
+    ("Month", 30, 120, "2h"),
+    ("3M", 90, 360, "6h"),
+    ("6M", 180, 720, "12h"),
+    ("12M", 365, 1440, "1d"),
+    ("3Y", 1095, 4320, "3d"),
+    ("5Y", 1825, 7200, "5d"),
+    ("10Y", 3650, 10080, "7d"),
+]
 
 
 def load_api_key() -> str:
@@ -65,11 +75,11 @@ class MassiveApiClient:
         )
         return data.get("results", [])
 
-    def fetch_aggregates(self, ticker: str, days_back: int) -> list[dict]:
+    def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
         end_date = date.today()
         start_date = end_date - timedelta(days=days_back)
         data = self._request(
-            f"/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}",
+            f"/v2/aggs/ticker/{ticker}/range/{minutes_per_bar}/minute/{start_date}/{end_date}",
             {"adjusted": "true", "sort": "asc", "limit": "5000"},
         )
         return data.get("results", [])
@@ -380,13 +390,13 @@ class AnalysisPage(ttk.Frame):
         slider_frame.pack(fill="x", padx=20, pady=(5, 10))
 
         ttk.Label(slider_frame, text="Time Horizon").grid(
-            row=0, column=0, columnspan=len(HORIZON_LABELS), sticky="w"
+            row=0, column=0, columnspan=len(HORIZON_CONFIGS), sticky="w"
         )
         self.horizon_var = tk.IntVar(value=0)
         self.horizon_slider = tk.Scale(
             slider_frame,
             from_=0,
-            to=len(HORIZON_LABELS) - 1,
+            to=len(HORIZON_CONFIGS) - 1,
             orient="horizontal",
             variable=self.horizon_var,
             resolution=1,
@@ -395,15 +405,17 @@ class AnalysisPage(ttk.Frame):
             length=600,
         )
         self.horizon_slider.grid(
-            row=1, column=0, columnspan=len(HORIZON_LABELS), sticky="ew", pady=5
+            row=1, column=0, columnspan=len(HORIZON_CONFIGS), sticky="ew", pady=5
         )
-        for index in range(len(HORIZON_LABELS)):
+        for index in range(len(HORIZON_CONFIGS)):
             slider_frame.columnconfigure(index, weight=1)
 
         labels_frame = ttk.Frame(slider_frame)
-        labels_frame.grid(row=2, column=0, columnspan=len(HORIZON_LABELS), sticky="ew")
-        for index, label in enumerate(HORIZON_LABELS):
-            ttk.Label(labels_frame, text=label).grid(row=0, column=index, padx=4)
+        labels_frame.grid(row=2, column=0, columnspan=len(HORIZON_CONFIGS), sticky="ew")
+        for index, (label, _days, _minutes, cadence_label) in enumerate(HORIZON_CONFIGS):
+            ttk.Label(labels_frame, text=f"{label}\n({cadence_label})").grid(
+                row=0, column=index, padx=4
+            )
             labels_frame.columnconfigure(index, weight=1)
 
         self.stock_info_frame = ttk.LabelFrame(stock_frame, text="Stock Snapshot")
@@ -553,7 +565,12 @@ class AnalysisPage(ttk.Frame):
 
     def _render_chart(self, closes: list[float]) -> None:
         self.chart_canvas.delete("all")
-        numeric_closes = [value for value in closes if isinstance(value, (int, float))]
+        numeric_closes: list[float] = []
+        for value in closes:
+            try:
+                numeric_closes.append(float(value))
+            except (TypeError, ValueError):
+                continue
         if not numeric_closes:
             self.chart_canvas.create_text(
                 220,
@@ -610,6 +627,8 @@ class AnalysisPage(ttk.Frame):
             return
 
         try:
+            if len(points) < 4:
+                raise tk.TclError("Insufficient points for line rendering.")
             self.chart_canvas.create_line(*points, fill="#1f77b4", width=2, smooth=True)
         except tk.TclError:
             self.chart_canvas.create_text(
@@ -643,6 +662,7 @@ class AnalysisPage(ttk.Frame):
     def _on_mousewheel(self, event: tk.Event) -> None:
         if self.scroll_canvas.winfo_height() < self.content_frame.winfo_height():
             self.scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
     def _sync_option_snapshot(self) -> None:
         contract = self.option_contract or {}
@@ -673,6 +693,7 @@ class AnalysisPage(ttk.Frame):
                 self.strategy_frame.pack(pady=5)
             if not self.knobs_frame.winfo_ismapped():
                 self.knobs_frame.pack(pady=10, fill="x", padx=40)
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
     def refresh(self) -> None:
         ticker = self.controller.state.selected_ticker or "None"
@@ -685,6 +706,7 @@ class AnalysisPage(ttk.Frame):
         api_key = load_api_key()
         self.api_client = MassiveApiClient(api_key) if api_key else None
         self._toggle_info_panels()
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
     def on_analysis_mode_change(self, _event: object) -> None:
         self.controller.state.analysis_mode = self.analysis_mode_var.get()
@@ -710,8 +732,9 @@ class AnalysisPage(ttk.Frame):
             stock_data = self.api_client.fetch_previous_close(ticker)
             option_data = self.api_client.fetch_option_contracts(ticker)
             horizon_index = int(round(self.horizon_var.get()))
-            days_back = HORIZON_DAYS[min(max(horizon_index, 0), len(HORIZON_DAYS) - 1)]
-            aggregates = self.api_client.fetch_aggregates(ticker, days_back)
+            horizon_index = min(max(horizon_index, 0), len(HORIZON_CONFIGS) - 1)
+            _label, days_back, minutes_per_bar, _cadence_label = HORIZON_CONFIGS[horizon_index]
+            aggregates = self.api_client.fetch_aggregates(ticker, days_back, minutes_per_bar)
         except HTTPError as exc:
             messagebox.showerror(
                 "API Error",
