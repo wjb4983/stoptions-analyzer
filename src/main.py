@@ -362,21 +362,29 @@ class AnalysisPage(ttk.Frame):
         slider_frame = ttk.Frame(stock_frame)
         slider_frame.pack(fill="x", padx=20, pady=(5, 10))
 
-        ttk.Label(slider_frame, text="Time Horizon").grid(row=0, column=0, sticky="w")
+        ttk.Label(slider_frame, text="Time Horizon").grid(
+            row=0, column=0, columnspan=len(HORIZON_LABELS), sticky="w"
+        )
         self.horizon_var = tk.IntVar(value=0)
-        self.horizon_slider = ttk.Scale(
+        self.horizon_slider = tk.Scale(
             slider_frame,
             from_=0,
-            to=8,
+            to=len(HORIZON_LABELS) - 1,
             orient="horizontal",
             variable=self.horizon_var,
+            resolution=1,
+            showvalue=False,
             command=self._snap_horizon,
+            length=600,
         )
-        self.horizon_slider.grid(row=1, column=0, sticky="ew", pady=5)
-        slider_frame.columnconfigure(0, weight=1)
+        self.horizon_slider.grid(
+            row=1, column=0, columnspan=len(HORIZON_LABELS), sticky="ew", pady=5
+        )
+        for index in range(len(HORIZON_LABELS)):
+            slider_frame.columnconfigure(index, weight=1)
 
         labels_frame = ttk.Frame(slider_frame)
-        labels_frame.grid(row=2, column=0, sticky="ew")
+        labels_frame.grid(row=2, column=0, columnspan=len(HORIZON_LABELS), sticky="ew")
         for index, label in enumerate(HORIZON_LABELS):
             ttk.Label(labels_frame, text=label).grid(row=0, column=index, padx=4)
             labels_frame.columnconfigure(index, weight=1)
@@ -495,7 +503,9 @@ class AnalysisPage(ttk.Frame):
         parent.columnconfigure(1, weight=1)
 
     def _snap_horizon(self, value: str) -> None:
-        self.horizon_var.set(int(round(float(value))))
+        snapped = int(round(float(value)))
+        self.horizon_var.set(snapped)
+        self.horizon_slider.set(snapped)
 
     def _build_info_grid(
         self,
