@@ -1,10 +1,66 @@
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
+CONFIG_DIR = Path.home() / ".stoptions_analyzer"
+API_KEY_PATH = CONFIG_DIR / "api_key.txt"
+API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
+
+
+def load_api_key() -> str:
+    env_key = os.getenv("MASSIVE_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    if API_KEY_PATH.exists():
+        return API_KEY_PATH.read_text().strip()
+    return ""
+
+
+def save_api_key(key: str) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    API_KEY_PATH.write_text(key.strip())
+    try:
+        API_KEY_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
+class MassiveApiClient:
+    def __init__(self, api_key: str, base_url: str = API_BASE_URL) -> None:
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+
+    def _request(self, path: str, params: dict[str, str]) -> dict:
+        params = {**params, "apiKey": self.api_key}
+        url = f"{self.base_url}{path}?{urlencode(params)}"
+        with urlopen(url, timeout=10) as response:
+            payload = response.read().decode("utf-8")
+        return json.loads(payload)
+
+    def fetch_previous_close(self, ticker: str) -> dict:
+        data = self._request(f"/v2/aggs/ticker/{ticker}/prev", {"adjusted": "true"})
+        result = (data.get("results") or [{}])[0]
+        return {
+            "close": result.get("c"),
+            "open": result.get("o"),
+            "high": result.get("h"),
+            "low": result.get("l"),
+            "volume": result.get("v"),
+        }
+
+    def fetch_option_contracts(self, ticker: str, limit: int = 5) -> list[dict]:
+        data = self._request(
+            "/v3/reference/options/contracts",
+            {"underlying_ticker": ticker, "limit": str(limit)},
+        )
+        return data.get("results", [])
 
 
 @dataclass
@@ -222,6 +278,7 @@ class AnalysisPage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
         super().__init__(parent)
         self.controller = controller
+        self.api_client: MassiveApiClient | None = None
 
         ttk.Label(self, text="Analysis", font=("Arial", 20, "bold")).pack(pady=10)
 
@@ -230,10 +287,26 @@ class AnalysisPage(ttk.Frame):
 
         integration_note = ttk.Label(
             self,
-            text="Massive account integration pending for live API data.",
+            text="Massive integration enabled via API key (stored locally or via env var).",
             foreground="#555",
         )
         integration_note.pack(pady=5)
+
+        api_frame = ttk.LabelFrame(self, text="Massive API Settings")
+        api_frame.pack(pady=10, fill="x", padx=40)
+        api_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(api_frame, text="API Key").grid(row=0, column=0, padx=10, pady=8, sticky="w")
+        self.api_key_var = tk.StringVar()
+        self.api_key_entry = ttk.Entry(api_frame, textvariable=self.api_key_var, show="*")
+        self.api_key_entry.grid(row=0, column=1, padx=10, pady=8, sticky="ew")
+
+        ttk.Button(api_frame, text="Save Key", command=self.save_api_key).grid(
+            row=0, column=2, padx=10, pady=8
+        )
+        ttk.Button(api_frame, text="Load Data", command=self.load_market_data).grid(
+            row=0, column=3, padx=10, pady=8
+        )
 
         stock_frame = ttk.LabelFrame(self, text="Stock Analysis")
         stock_frame.pack(pady=10, fill="both", expand=True, padx=40)
@@ -294,6 +367,14 @@ class AnalysisPage(ttk.Frame):
             "52 Week Range: --\n",
         )
         self.stats_text.configure(state="disabled")
+
+        options_frame = ttk.LabelFrame(stock_frame, text="Option Contracts (Sample)")
+        options_frame.pack(padx=20, pady=(5, 15), fill="x")
+
+        self.options_text = tk.Text(options_frame, height=6)
+        self.options_text.pack(fill="x", padx=10, pady=8)
+        self.options_text.insert("1.0", "No option data loaded yet.\n")
+        self.options_text.configure(state="disabled")
 
         selector_frame = ttk.Frame(self)
         selector_frame.pack(pady=5)
@@ -370,10 +451,87 @@ class AnalysisPage(ttk.Frame):
         self.delta_var.set(self.controller.state.knob_delta)
         self.risk_var.set(self.controller.state.knob_risk)
         self.prob_var.set(self.controller.state.knob_prob)
+        api_key = load_api_key()
+        self.api_key_var.set(api_key)
+        self.api_client = MassiveApiClient(api_key) if api_key else None
 
     def on_analysis_change(self, _event: object) -> None:
         self.controller.state.analysis_type = self.analysis_var.get()
         self.controller.persist_state()
+
+    def save_api_key(self) -> None:
+        key = self.api_key_var.get().strip()
+        if not key:
+            messagebox.showinfo("Missing key", "Enter a Massive API key first.")
+            return
+        save_api_key(key)
+        self.api_client = MassiveApiClient(key)
+        messagebox.showinfo(
+            "Saved", f"API key saved to {API_KEY_PATH} (not tracked in git)."
+        )
+
+    def load_market_data(self) -> None:
+        if not self.api_client:
+            messagebox.showinfo(
+                "Missing key", "Enter or set a Massive API key to load data."
+            )
+            return
+        ticker = self.controller.state.selected_ticker
+        if not ticker:
+            messagebox.showinfo("Missing ticker", "Select a ticker first.")
+            return
+        try:
+            stock_data = self.api_client.fetch_previous_close(ticker)
+            option_data = self.api_client.fetch_option_contracts(ticker)
+        except HTTPError as exc:
+            messagebox.showerror(
+                "API Error",
+                f"Massive API returned an error: {exc.code} {exc.reason}",
+            )
+            return
+        except URLError as exc:
+            messagebox.showerror(
+                "Connection Error",
+                f"Could not reach Massive API: {exc.reason}",
+            )
+            return
+
+        self.stats_text.configure(state="normal")
+        self.stats_text.delete("1.0", tk.END)
+        self.stats_text.insert(
+            "1.0",
+            "Price: {close}\n"
+            "Previous Close: {close}\n"
+            "Open / High / Low: {open} / {high} / {low}\n"
+            "Volume: {volume}\n"
+            "Market Cap: --\n"
+            "52 Week Range: --\n".format(
+                close=stock_data.get("close", "--"),
+                open=stock_data.get("open", "--"),
+                high=stock_data.get("high", "--"),
+                low=stock_data.get("low", "--"),
+                volume=stock_data.get("volume", "--"),
+            ),
+        )
+        self.stats_text.configure(state="disabled")
+
+        self.options_text.configure(state="normal")
+        self.options_text.delete("1.0", tk.END)
+        if not option_data:
+            self.options_text.insert("1.0", "No option contracts returned.\n")
+        else:
+            lines = []
+            for contract in option_data[:5]:
+                lines.append(
+                    "{ticker} {expiration} {type} {strike}".format(
+                        ticker=contract.get("ticker", "--"),
+                        expiration=contract.get("expiration_date", "--"),
+                        type=contract.get("contract_type", "--").upper(),
+                        strike=contract.get("strike_price", "--"),
+                    )
+                )
+            self.options_text.insert("1.0", "\n".join(lines))
+        self.options_text.configure(state="disabled")
 
     def save_analysis(self) -> None:
         self.controller.state.analysis_type = self.analysis_var.get()
