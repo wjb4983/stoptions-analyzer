@@ -113,6 +113,21 @@ class MassiveApiClient:
             next_url = data.get("next_url")
         return results
 
+    def fetch_option_snapshots(self, ticker: str, limit: int = 1000) -> list[dict]:
+        results: list[dict] = []
+        params = {"limit": str(limit)}
+        data = self._request(f"/v3/snapshot/options/{ticker}", params)
+        results.extend(data.get("results", []))
+        next_url = data.get("next_url")
+        while next_url:
+            if "apiKey=" not in next_url:
+                joiner = "&" if "?" in next_url else "?"
+                next_url = f"{next_url}{joiner}apiKey={self.api_key}"
+            data = self._request_url(next_url)
+            results.extend(data.get("results", []))
+            next_url = data.get("next_url")
+        return results
+
     def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
         end_date = date.today()
         start_date = end_date - timedelta(days=days_back)
@@ -370,6 +385,7 @@ class AnalysisPage(ttk.Frame):
         self.controller = controller
         self.api_client: MassiveApiClient | None = None
         self.option_contract: dict | None = None
+        self.filtered_option_records: list[dict] = []
         self.scroll_canvas = tk.Canvas(self, highlightthickness=0)
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.scroll_canvas.yview)
         self.scroll_canvas.configure(yscrollcommand=self.scrollbar.set)
@@ -493,6 +509,55 @@ class AnalysisPage(ttk.Frame):
         self.options_frame.pack(padx=20, pady=(5, 15), fill="x")
 
         self.option_records: list[dict] = []
+        self.option_filter_vars = {
+            "expiration": tk.StringVar(),
+            "type": tk.StringVar(),
+            "strike": tk.StringVar(),
+        }
+        self.option_filter_dropdowns: dict[str, ttk.Combobox] = {}
+
+        filter_frame = ttk.Frame(self.options_frame)
+        filter_frame.pack(fill="x", padx=10, pady=(8, 4))
+        filter_frame.columnconfigure(1, weight=1)
+        filter_frame.columnconfigure(3, weight=1)
+        filter_frame.columnconfigure(5, weight=1)
+
+        ttk.Label(filter_frame, text="Expiration").grid(row=0, column=0, sticky="w", padx=4)
+        expiration_dropdown = ttk.Combobox(
+            filter_frame,
+            textvariable=self.option_filter_vars["expiration"],
+            state="readonly",
+            width=18,
+        )
+        expiration_dropdown.grid(row=0, column=1, sticky="ew", padx=4, pady=2)
+        expiration_dropdown.bind("<<ComboboxSelected>>", self.on_option_filter_change)
+        self.option_filter_dropdowns["expiration"] = expiration_dropdown
+
+        ttk.Label(filter_frame, text="Type").grid(row=0, column=2, sticky="w", padx=4)
+        type_dropdown = ttk.Combobox(
+            filter_frame,
+            textvariable=self.option_filter_vars["type"],
+            state="readonly",
+            width=10,
+        )
+        type_dropdown.grid(row=0, column=3, sticky="ew", padx=4, pady=2)
+        type_dropdown.bind("<<ComboboxSelected>>", self.on_option_filter_change)
+        self.option_filter_dropdowns["type"] = type_dropdown
+
+        ttk.Label(filter_frame, text="Strike").grid(row=0, column=4, sticky="w", padx=4)
+        strike_dropdown = ttk.Combobox(
+            filter_frame,
+            textvariable=self.option_filter_vars["strike"],
+            state="readonly",
+            width=12,
+        )
+        strike_dropdown.grid(row=0, column=5, sticky="ew", padx=4, pady=2)
+        strike_dropdown.bind("<<ComboboxSelected>>", self.on_option_filter_change)
+        self.option_filter_dropdowns["strike"] = strike_dropdown
+
+        self.option_match_label = ttk.Label(self.options_frame, text="Matching contracts: --")
+        self.option_match_label.pack(anchor="w", padx=10)
+
         list_frame = ttk.Frame(self.options_frame)
         list_frame.pack(fill="both", expand=True, padx=10, pady=8)
         self.options_list = tk.Listbox(list_frame, height=8)
@@ -823,7 +888,7 @@ class AnalysisPage(ttk.Frame):
         if should_fetch:
             try:
                 stock_data = self.api_client.fetch_previous_close(ticker)
-                option_data = self.api_client.fetch_option_contracts(ticker)
+                option_data = self.api_client.fetch_option_snapshots(ticker)
                 aggregates = self.api_client.fetch_aggregates(
                     ticker, days_back, minutes_per_bar
                 )
@@ -840,18 +905,19 @@ class AnalysisPage(ttk.Frame):
                 )
                 return
             aggregates_map[str(horizon_index)] = aggregates
+            option_records = self._normalize_option_records(option_data)
             cache_payload.update(
                 {
                     "last_updated": today_label,
                     "stock": stock_data,
-                    "options": option_data,
+                    "options": option_records,
                     "aggregates": aggregates_map,
                 }
             )
             save_cached_market_data(ticker, cache_payload)
         else:
             stock_data = cached_stock or {}
-            option_data = cached_options or []
+            option_records = self._normalize_option_records(cached_options or [])
             aggregates = cached_aggregates or []
 
         self._set_value(self.stock_values["price"], stock_data.get("close"))
@@ -862,29 +928,13 @@ class AnalysisPage(ttk.Frame):
         self._set_value(self.stock_values["volume"], stock_data.get("volume"))
         self._set_value(self.stock_values["market_cap"], "--")
         self._set_value(self.stock_values["range_52w"], "--")
-        self.option_contract = option_data[0] if option_data else None
+        self.option_contract = option_records[0] if option_records else None
         self._sync_option_snapshot()
 
         self._render_chart(aggregates)
 
-        self.option_records = option_data
-        self.options_list.delete(0, tk.END)
-        if not option_data:
-            self.options_list.insert(tk.END, "No option contracts returned.")
-        else:
-            for contract in option_data:
-                self.options_list.insert(
-                    tk.END,
-                    "{ticker} {expiration} {type} {strike}".format(
-                        ticker=contract.get("ticker", "--"),
-                        expiration=contract.get("expiration_date", "--"),
-                        type=str(contract.get("contract_type", "--")).upper(),
-                        strike=contract.get("strike_price", "--"),
-                    ),
-                )
-            self.options_list.selection_set(0)
-            self.options_list.see(0)
-        self._sync_option_snapshot()
+        self.option_records = option_records
+        self._populate_option_filters()
         self._sync_greeks()
 
     def save_analysis(self) -> None:
@@ -899,20 +949,185 @@ class AnalysisPage(ttk.Frame):
         if not selection:
             return
         index = selection[0]
-        if index >= len(self.option_records):
+        if index >= len(self.filtered_option_records):
             return
-        self.option_contract = self.option_records[index]
+        self.option_contract = self.filtered_option_records[index]
         self._sync_option_snapshot()
         self._sync_greeks()
 
     def _sync_greeks(self) -> None:
-        greeks = (self.option_contract or {}).get("greeks", {})
+        greeks = self._extract_greeks(self.option_contract or {})
         self._set_value(self.greeks_values["delta"], greeks.get("delta"))
         self._set_value(self.greeks_values["gamma"], greeks.get("gamma"))
         self._set_value(self.greeks_values["theta"], greeks.get("theta"))
         self._set_value(self.greeks_values["vega"], greeks.get("vega"))
         self._set_value(self.greeks_values["rho"], greeks.get("rho"))
         self._set_value(self.greeks_values["iv"], greeks.get("iv"))
+
+    def _normalize_option_records(self, records: list[dict]) -> list[dict]:
+        normalized: list[dict] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            details = record.get("details") or {}
+            greeks = record.get("greeks") or {}
+            if not isinstance(greeks, dict):
+                greeks = {}
+            implied_vol = greeks.get("iv")
+            if implied_vol is None:
+                implied_vol = record.get("implied_volatility") or record.get("implied_vol")
+            normalized.append(
+                {
+                    "ticker": record.get("ticker") or details.get("ticker"),
+                    "expiration_date": record.get("expiration_date")
+                    or details.get("expiration_date"),
+                    "contract_type": record.get("contract_type")
+                    or details.get("contract_type"),
+                    "strike_price": record.get("strike_price") or details.get("strike_price"),
+                    "greeks": {
+                        "delta": greeks.get("delta"),
+                        "gamma": greeks.get("gamma"),
+                        "theta": greeks.get("theta"),
+                        "vega": greeks.get("vega"),
+                        "rho": greeks.get("rho"),
+                        "iv": implied_vol,
+                    },
+                }
+            )
+        return normalized
+
+    def _extract_greeks(self, contract: dict) -> dict:
+        greeks = contract.get("greeks") or {}
+        if not isinstance(greeks, dict):
+            greeks = {}
+        implied_vol = greeks.get("iv")
+        if implied_vol is None:
+            implied_vol = contract.get("implied_volatility") or contract.get("implied_vol")
+        return {
+            "delta": greeks.get("delta"),
+            "gamma": greeks.get("gamma"),
+            "theta": greeks.get("theta"),
+            "vega": greeks.get("vega"),
+            "rho": greeks.get("rho"),
+            "iv": implied_vol,
+        }
+
+    def _option_key(self, contract: dict) -> tuple:
+        return (
+            contract.get("ticker"),
+            contract.get("expiration_date"),
+            contract.get("contract_type"),
+            contract.get("strike_price"),
+        )
+
+    def _parse_strike(self, value: object) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float("inf")
+
+    def _filtered_contracts(self, ignore_key: str | None = None) -> list[dict]:
+        selected = {
+            key: var.get().strip()
+            for key, var in self.option_filter_vars.items()
+            if var.get().strip()
+        }
+        results = []
+        for contract in self.option_records:
+            expiration = contract.get("expiration_date") or ""
+            contract_type = contract.get("contract_type") or ""
+            strike = contract.get("strike_price")
+            contract_map = {
+                "expiration": str(expiration),
+                "type": str(contract_type),
+                "strike": str(strike),
+            }
+            matches = True
+            for key, selected_value in selected.items():
+                if key == ignore_key:
+                    continue
+                if contract_map.get(key) != selected_value:
+                    matches = False
+                    break
+            if matches:
+                results.append(contract)
+        return results
+
+    def _populate_option_filters(self) -> None:
+        if not self.option_records:
+            for dropdown in self.option_filter_dropdowns.values():
+                dropdown["values"] = []
+            for var in self.option_filter_vars.values():
+                var.set("")
+            self.options_list.delete(0, tk.END)
+            self.options_list.insert(tk.END, "No option contracts returned.")
+            self.filtered_option_records = []
+            self.option_match_label.config(text="Matching contracts: 0")
+            return
+        for key in self.option_filter_vars:
+            self._refresh_filter_options(key)
+        self._update_filtered_options()
+
+    def _refresh_filter_options(self, ignore_key: str) -> None:
+        available: set[str] = set()
+        for contract in self._filtered_contracts(ignore_key=ignore_key):
+            if ignore_key == "expiration":
+                value = contract.get("expiration_date")
+            elif ignore_key == "type":
+                value = contract.get("contract_type")
+            else:
+                value = contract.get("strike_price")
+            if value not in (None, ""):
+                available.add(str(value))
+        if ignore_key == "strike":
+            ordered_values = sorted(available, key=self._parse_strike)
+        else:
+            ordered_values = sorted(available)
+        dropdown = self.option_filter_dropdowns[ignore_key]
+        dropdown["values"] = ordered_values
+        current = self.option_filter_vars[ignore_key].get().strip()
+        if current not in available:
+            self.option_filter_vars[ignore_key].set(ordered_values[0] if ordered_values else "")
+
+    def on_option_filter_change(self, _event: object) -> None:
+        for key in self.option_filter_vars:
+            self._refresh_filter_options(key)
+        self._update_filtered_options()
+
+    def _update_filtered_options(self) -> None:
+        self.filtered_option_records = self._filtered_contracts()
+        self.options_list.delete(0, tk.END)
+        if not self.filtered_option_records:
+            self.options_list.insert(tk.END, "No matching option contracts.")
+            self.option_match_label.config(text="Matching contracts: 0")
+            self.option_contract = None
+            self._sync_option_snapshot()
+            self._sync_greeks()
+            return
+        for contract in self.filtered_option_records:
+            self.options_list.insert(
+                tk.END,
+                "{ticker} {expiration} {type} {strike}".format(
+                    ticker=contract.get("ticker", "--"),
+                    expiration=contract.get("expiration_date", "--"),
+                    type=str(contract.get("contract_type", "--")).upper(),
+                    strike=contract.get("strike_price", "--"),
+                ),
+            )
+        self.option_match_label.config(
+            text=f"Matching contracts: {len(self.filtered_option_records)}"
+        )
+        current_key = self._option_key(self.option_contract or {})
+        selected_index = 0
+        for index, contract in enumerate(self.filtered_option_records):
+            if self._option_key(contract) == current_key:
+                selected_index = index
+                break
+        self.options_list.selection_set(selected_index)
+        self.options_list.see(selected_index)
+        self.option_contract = self.filtered_option_records[selected_index]
+        self._sync_option_snapshot()
+        self._sync_greeks()
 
 
 if __name__ == "__main__":
