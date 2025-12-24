@@ -113,6 +113,40 @@ class MassiveApiClient:
             next_url = data.get("next_url")
         return results
 
+    def fetch_option_snapshots(self, ticker: str, limit: int = 250) -> list[dict]:
+        results: list[dict] = []
+        params = {"limit": str(limit)}
+        data = self._request(f"/v3/snapshot/options/{ticker}", params)
+        results.extend(self._normalize_option_snapshots(data.get("results", [])))
+        next_url = data.get("next_url")
+        while next_url:
+            if "apiKey=" not in next_url:
+                joiner = "&" if "?" in next_url else "?"
+                next_url = f"{next_url}{joiner}apiKey={self.api_key}"
+            data = self._request_url(next_url)
+            results.extend(self._normalize_option_snapshots(data.get("results", [])))
+            next_url = data.get("next_url")
+        return results
+
+    def _normalize_option_snapshots(self, snapshots: list[dict]) -> list[dict]:
+        normalized: list[dict] = []
+        for snapshot in snapshots:
+            details = snapshot.get("details", {}) or {}
+            greeks = snapshot.get("greeks", {}) or {}
+            implied_vol = snapshot.get("implied_volatility")
+            if implied_vol is not None and "iv" not in greeks:
+                greeks = {**greeks, "iv": implied_vol}
+            normalized.append(
+                {
+                    "ticker": details.get("ticker") or snapshot.get("ticker"),
+                    "expiration_date": details.get("expiration_date"),
+                    "contract_type": details.get("contract_type"),
+                    "strike_price": details.get("strike_price"),
+                    "greeks": greeks,
+                }
+            )
+        return normalized
+
     def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
         end_date = date.today()
         start_date = end_date - timedelta(days=days_back)
@@ -823,7 +857,7 @@ class AnalysisPage(ttk.Frame):
         if should_fetch:
             try:
                 stock_data = self.api_client.fetch_previous_close(ticker)
-                option_data = self.api_client.fetch_option_contracts(ticker)
+                option_data = self.api_client.fetch_option_snapshots(ticker)
                 aggregates = self.api_client.fetch_aggregates(
                     ticker, days_back, minutes_per_bar
                 )
