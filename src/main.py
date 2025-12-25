@@ -1,5 +1,6 @@
 import json
 import os
+import base64
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
@@ -187,8 +188,8 @@ class MassiveApiClient:
 
 class AlpacaApiClient:
     def __init__(self, api_key: str, api_secret: str, base_url: str = ALPACA_BASE_URL) -> None:
-        self.api_key = api_key
-        self.api_secret = api_secret
+        self.api_key = api_key.strip()
+        self.api_secret = api_secret.strip()
         self.base_url = base_url.rstrip("/")
 
     def _request(self, path: str, params: dict[str, str] | None = None) -> dict:
@@ -197,7 +198,11 @@ class AlpacaApiClient:
         headers = {
             "APCA-API-KEY-ID": self.api_key,
             "APCA-API-SECRET-KEY": self.api_secret,
+            "Accept": "application/json",
         }
+        if self.api_key and self.api_secret:
+            credentials = f"{self.api_key}:{self.api_secret}".encode("utf-8")
+            headers["Authorization"] = f"Basic {base64.b64encode(credentials).decode('utf-8')}"
         request = Request(url, headers=headers)
         with urlopen(request, timeout=10) as response:
             payload = response.read().decode("utf-8")
