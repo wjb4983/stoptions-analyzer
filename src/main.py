@@ -2,6 +2,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -987,6 +988,19 @@ class AnalysisPage(ttk.Frame):
                 fill=axis_color,
             )
 
+    def _strip_html(self, text: str) -> str:
+        class _HTMLStripper(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__()
+                self.parts: list[str] = []
+
+            def handle_data(self, data: str) -> None:
+                self.parts.append(data)
+
+        stripper = _HTMLStripper()
+        stripper.feed(text)
+        return " ".join(stripper.parts)
+
     def _format_http_error_detail(self, exc: HTTPError) -> str:
         try:
             body = exc.read().decode("utf-8").strip()
@@ -994,6 +1008,8 @@ class AnalysisPage(ttk.Frame):
             return ""
         if not body:
             return ""
+        if "<html" in body.lower():
+            body = self._strip_html(body)
         try:
             payload = json.loads(body)
         except json.JSONDecodeError:
@@ -1009,9 +1025,46 @@ class AnalysisPage(ttk.Frame):
         detail = self._format_http_error_detail(exc)
         detail_msg = f"\nDetails: {detail}" if detail else ""
         hint_msg = f"\n{hint}" if hint else ""
-        messagebox.showerror(
+        self._show_error_dialog(
             "API Error",
             f"{service} API returned an error: {exc.code} {exc.reason}.{detail_msg}{hint_msg}",
+        )
+
+    def _show_error_dialog(self, title: str, message: str) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.geometry("620x320")
+        dialog.transient(self)
+
+        dialog.rowconfigure(0, weight=1)
+        dialog.columnconfigure(0, weight=1)
+
+        text_frame = ttk.Frame(dialog)
+        text_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+
+        text_widget = tk.Text(text_frame, wrap="word")
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        text_widget.insert("1.0", message)
+        text_widget.focus_set()
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.grid(row=1, column=0, pady=(0, 10))
+
+        def copy_to_clipboard() -> None:
+            dialog.clipboard_clear()
+            dialog.clipboard_append(text_widget.get("1.0", "end-1c"))
+            dialog.update_idletasks()
+
+        ttk.Button(button_frame, text="Copy", command=copy_to_clipboard).grid(
+            row=0, column=0, padx=5
+        )
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).grid(
+            row=0, column=1, padx=5
         )
 
     def _on_content_configure(self, _event: tk.Event) -> None:
@@ -1228,7 +1281,7 @@ class AnalysisPage(ttk.Frame):
                 self._show_api_error(exc, "Massive", "Verify your Massive API key.")
                 return
             except URLError as exc:
-                messagebox.showerror(
+                self._show_error_dialog(
                     "Connection Error",
                     f"Could not reach Massive API endpoint: {exc.reason}",
                 )
@@ -1243,7 +1296,7 @@ class AnalysisPage(ttk.Frame):
                 )
                 return
             except URLError as exc:
-                messagebox.showerror(
+                self._show_error_dialog(
                     "Connection Error",
                     f"Could not reach Alpaca API endpoint: {exc.reason}",
                 )
@@ -1256,7 +1309,7 @@ class AnalysisPage(ttk.Frame):
                 self._show_api_error(exc, "Massive", "Verify your Massive API key.")
                 return
             except URLError as exc:
-                messagebox.showerror(
+                self._show_error_dialog(
                     "Connection Error",
                     f"Could not reach Massive API endpoint: {exc.reason}",
                 )
