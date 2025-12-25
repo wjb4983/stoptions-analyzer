@@ -987,6 +987,33 @@ class AnalysisPage(ttk.Frame):
                 fill=axis_color,
             )
 
+    def _format_http_error_detail(self, exc: HTTPError) -> str:
+        try:
+            body = exc.read().decode("utf-8").strip()
+        except Exception:
+            return ""
+        if not body:
+            return ""
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        return (
+            payload.get("message")
+            or payload.get("error")
+            or payload.get("msg")
+            or body
+        )
+
+    def _show_api_error(self, exc: HTTPError, service: str, hint: str | None = None) -> None:
+        detail = self._format_http_error_detail(exc)
+        detail_msg = f"\nDetails: {detail}" if detail else ""
+        hint_msg = f"\n{hint}" if hint else ""
+        messagebox.showerror(
+            "API Error",
+            f"{service} API returned an error: {exc.code} {exc.reason}.{detail_msg}{hint_msg}",
+        )
+
     def _on_content_configure(self, _event: tk.Event) -> None:
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
@@ -1197,20 +1224,41 @@ class AnalysisPage(ttk.Frame):
         if should_fetch:
             try:
                 stock_data = self.api_client.fetch_previous_close(ticker)
-                option_data = self.alpaca_client.fetch_option_snapshots(ticker)
-                aggregates = self.api_client.fetch_aggregates(
-                    ticker, days_back, minutes_per_bar
-                )
             except HTTPError as exc:
+                self._show_api_error(exc, "Massive", "Verify your Massive API key.")
+                return
+            except URLError as exc:
                 messagebox.showerror(
-                    "API Error",
-                    f"API returned an error: {exc.code} {exc.reason}",
+                    "Connection Error",
+                    f"Could not reach Massive API endpoint: {exc.reason}",
+                )
+                return
+            try:
+                option_data = self.alpaca_client.fetch_option_snapshots(ticker)
+            except HTTPError as exc:
+                self._show_api_error(
+                    exc,
+                    "Alpaca",
+                    "Check the Alpaca API key/secret in the Main Menu settings.",
                 )
                 return
             except URLError as exc:
                 messagebox.showerror(
                     "Connection Error",
-                    f"Could not reach API endpoint: {exc.reason}",
+                    f"Could not reach Alpaca API endpoint: {exc.reason}",
+                )
+                return
+            try:
+                aggregates = self.api_client.fetch_aggregates(
+                    ticker, days_back, minutes_per_bar
+                )
+            except HTTPError as exc:
+                self._show_api_error(exc, "Massive", "Verify your Massive API key.")
+                return
+            except URLError as exc:
+                messagebox.showerror(
+                    "Connection Error",
+                    f"Could not reach Massive API endpoint: {exc.reason}",
                 )
                 return
             aggregates_map[str(horizon_index)] = aggregates
