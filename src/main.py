@@ -1,21 +1,21 @@
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
-
+from urllib.request import urlopen
+from zoneinfo import ZoneInfo
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
-ALPACA_CREDENTIALS_PATH = CONFIG_DIR / "alpaca_credentials.json"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://data.alpaca.markets")
 HORIZON_CONFIGS = [
     ("Day", 1, 10, "10m"),
     ("3 Day", 3, 30, "30m"),
@@ -44,31 +44,6 @@ def save_api_key(key: str) -> None:
     API_KEY_PATH.write_text(key.strip())
     try:
         API_KEY_PATH.chmod(0o600)
-    except OSError:
-        pass
-
-
-def load_alpaca_credentials() -> tuple[str, str]:
-    env_key = os.getenv("ALPACA_API_KEY", "").strip()
-    env_secret = os.getenv("ALPACA_API_SECRET", "").strip()
-    if env_key and env_secret:
-        return env_key, env_secret
-    if ALPACA_CREDENTIALS_PATH.exists():
-        try:
-            payload = json.loads(ALPACA_CREDENTIALS_PATH.read_text())
-        except json.JSONDecodeError:
-            return "", ""
-        return payload.get("key", "").strip(), payload.get("secret", "").strip()
-    return "", ""
-
-
-def save_alpaca_credentials(key: str, secret: str) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    ALPACA_CREDENTIALS_PATH.write_text(
-        json.dumps({"key": key.strip(), "secret": secret.strip()}, indent=2)
-    )
-    try:
-        ALPACA_CREDENTIALS_PATH.chmod(0o600)
     except OSError:
         pass
 
@@ -160,9 +135,18 @@ class MassiveApiClient:
         for snapshot in snapshots:
             details = snapshot.get("details", {}) or {}
             greeks = snapshot.get("greeks", {}) or {}
+            day = snapshot.get("day", {}) or {}
+            last_trade = snapshot.get("last_trade", {}) or {}
+            last_quote = snapshot.get("last_quote", {}) or {}
             implied_vol = snapshot.get("implied_volatility")
             if implied_vol is not None and "iv" not in greeks:
                 greeks = {**greeks, "iv": implied_vol}
+            volume = snapshot.get("volume")
+            if volume is None:
+                volume = day.get("volume") or day.get("v")
+            open_interest = snapshot.get("open_interest")
+            if open_interest is None:
+                open_interest = details.get("open_interest")
             normalized.append(
                 {
                     "ticker": details.get("ticker") or snapshot.get("ticker"),
@@ -170,139 +154,34 @@ class MassiveApiClient:
                     "contract_type": details.get("contract_type"),
                     "strike_price": details.get("strike_price"),
                     "greeks": greeks,
+                    "implied_volatility": implied_vol,
+                    "volume": volume,
+                    "open_interest": open_interest,
+                    "bid": last_quote.get("bid")
+                    or last_quote.get("bid_price")
+                    or last_quote.get("bp"),
+                    "ask": last_quote.get("ask")
+                    or last_quote.get("ask_price")
+                    or last_quote.get("ap"),
+                    "last": last_trade.get("price") or last_trade.get("p"),
                 }
             )
         return normalized
 
     def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
-        end_date = date.today()
-        start_date = end_date - timedelta(days=days_back)
+        if days_back == 1:
+            now = datetime.now(ZoneInfo("America/New_York"))
+            market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+            end_date = (now - timedelta(days=1)).date() if now < market_open else now.date()
+            start_date = end_date
+        else:
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days_back)
         data = self._request(
             f"/v2/aggs/ticker/{ticker}/range/{minutes_per_bar}/minute/{start_date}/{end_date}",
             {"adjusted": "true", "sort": "asc", "limit": "5000"},
         )
         return data.get("results", [])
-
-
-class AlpacaApiClient:
-    def __init__(self, api_key: str, api_secret: str, base_url: str = ALPACA_BASE_URL) -> None:
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.base_url = base_url.rstrip("/")
-
-    def _request(self, path: str, params: dict[str, str] | None = None) -> dict:
-        params = params or {}
-        url = f"{self.base_url}{path}?{urlencode(params)}" if params else f"{self.base_url}{path}"
-        headers = {
-            "APCA-API-KEY-ID": self.api_key,
-            "APCA-API-SECRET-KEY": self.api_secret,
-        }
-        request = Request(url, headers=headers)
-        with urlopen(request, timeout=10) as response:
-            payload = response.read().decode("utf-8")
-        return json.loads(payload)
-
-    def fetch_previous_close(self, ticker: str) -> dict:
-        data = self._request(
-            f"/v2/stocks/{ticker}/bars",
-            {"timeframe": "1Day", "limit": "2", "adjustment": "all"},
-        )
-        bars = data.get("bars", [])
-        bar = bars[-1] if bars else {}
-        return {
-            "close": bar.get("c"),
-            "open": bar.get("o"),
-            "high": bar.get("h"),
-            "low": bar.get("l"),
-            "volume": bar.get("v"),
-        }
-
-    def _timeframe_for_minutes(self, minutes_per_bar: int) -> str:
-        options = [1, 5, 15, 60, 1440]
-        closest = min(options, key=lambda option: abs(option - minutes_per_bar))
-        if closest == 60:
-            return "1Hour"
-        if closest == 1440:
-            return "1Day"
-        return f"{closest}Min"
-
-    def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
-        end_date = date.today()
-        start_date = end_date - timedelta(days=days_back)
-        data = self._request(
-            f"/v2/stocks/{ticker}/bars",
-            {
-                "timeframe": self._timeframe_for_minutes(minutes_per_bar),
-                "start": start_date.isoformat(),
-                "end": end_date.isoformat(),
-                "limit": "10000",
-                "adjustment": "all",
-            },
-        )
-        bars = []
-        for bar in data.get("bars", []):
-            timestamp = bar.get("t")
-            if isinstance(timestamp, str):
-                ts_value = (
-                    datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
-                    * 1000
-                )
-            else:
-                ts_value = timestamp
-            bars.append({"c": bar.get("c"), "t": ts_value})
-        return bars
-
-    def fetch_option_contracts(self, ticker: str, limit: int = 1000) -> list[dict]:
-        results: list[dict] = []
-        next_token = None
-        while True:
-            params = {
-                "underlying_symbols": ticker,
-                "limit": str(limit),
-            }
-            if next_token:
-                params["page_token"] = next_token
-            data = self._request("/v1beta1/options/contracts", params)
-            contracts = (
-                data.get("option_contracts")
-                or data.get("contracts")
-                or data.get("results")
-                or []
-            )
-            results.extend(contracts)
-            next_token = data.get("next_page_token")
-            if not next_token:
-                break
-        return results
-
-    def fetch_option_snapshots(self, ticker: str) -> list[dict]:
-        contracts = self.fetch_option_contracts(ticker)
-        snapshot_response = self._request(f"/v1beta1/options/snapshots/{ticker}")
-        snapshot_map = snapshot_response.get("snapshots") or snapshot_response.get(
-            "option_snapshots", {}
-        )
-        if isinstance(snapshot_map, list):
-            snapshot_map = {
-                snapshot.get("symbol"): snapshot for snapshot in snapshot_map if snapshot.get("symbol")
-            }
-        normalized: list[dict] = []
-        for contract in contracts:
-            symbol = contract.get("symbol") or contract.get("id")
-            snapshot = snapshot_map.get(symbol, {})
-            greeks = snapshot.get("greeks", {}) or {}
-            implied_vol = snapshot.get("implied_volatility")
-            if implied_vol is not None and "iv" not in greeks:
-                greeks = {**greeks, "iv": implied_vol}
-            normalized.append(
-                {
-                    "ticker": symbol,
-                    "expiration_date": contract.get("expiration_date"),
-                    "contract_type": contract.get("type") or contract.get("option_type"),
-                    "strike_price": contract.get("strike_price"),
-                    "greeks": greeks,
-                }
-            )
-        return normalized
 
 
 @dataclass
@@ -345,7 +224,6 @@ class StoptionsApp(tk.Tk):
         self._maximize_window()
         self.state = AppState.load()
         self.api_key = load_api_key()
-        self.alpaca_key, self.alpaca_secret = load_alpaca_credentials()
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
@@ -405,32 +283,6 @@ class MainMenu(ttk.Frame):
             row=0, column=2, padx=10, pady=8
         )
 
-        alpaca_frame = ttk.LabelFrame(self, text="Alpaca API Credentials")
-        alpaca_frame.pack(pady=15, padx=40, fill="x")
-        alpaca_frame.columnconfigure(1, weight=1)
-
-        ttk.Label(alpaca_frame, text="API Key").grid(
-            row=0, column=0, padx=10, pady=8, sticky="w"
-        )
-        self.alpaca_key_var = tk.StringVar(value=self.controller.alpaca_key)
-        self.alpaca_key_entry = ttk.Entry(
-            alpaca_frame, textvariable=self.alpaca_key_var, show="*"
-        )
-        self.alpaca_key_entry.grid(row=0, column=1, padx=10, pady=8, sticky="ew")
-
-        ttk.Label(alpaca_frame, text="Secret Key").grid(
-            row=1, column=0, padx=10, pady=8, sticky="w"
-        )
-        self.alpaca_secret_var = tk.StringVar(value=self.controller.alpaca_secret)
-        self.alpaca_secret_entry = ttk.Entry(
-            alpaca_frame, textvariable=self.alpaca_secret_var, show="*"
-        )
-        self.alpaca_secret_entry.grid(row=1, column=1, padx=10, pady=8, sticky="ew")
-
-        ttk.Button(alpaca_frame, text="Save Keys", command=self.save_alpaca_keys).grid(
-            row=0, column=2, rowspan=2, padx=10, pady=8
-        )
-
         button_frame = ttk.Frame(self)
         button_frame.pack(pady=40)
 
@@ -457,8 +309,6 @@ class MainMenu(ttk.Frame):
 
     def refresh(self) -> None:
         self.api_key_var.set(self.controller.api_key)
-        self.alpaca_key_var.set(self.controller.alpaca_key)
-        self.alpaca_secret_var.set(self.controller.alpaca_secret)
 
     def save_api_key(self) -> None:
         key = self.api_key_var.get().strip()
@@ -471,19 +321,7 @@ class MainMenu(ttk.Frame):
             "Saved", f"API key saved to {API_KEY_PATH} (not tracked in git)."
         )
 
-    def save_alpaca_keys(self) -> None:
-        key = self.alpaca_key_var.get().strip()
-        secret = self.alpaca_secret_var.get().strip()
-        if not key or not secret:
-            messagebox.showinfo("Missing keys", "Enter the Alpaca API key and secret.")
-            return
-        save_alpaca_credentials(key, secret)
-        self.controller.alpaca_key = key
-        self.controller.alpaca_secret = secret
-        messagebox.showinfo(
-            "Saved",
-            f"Alpaca credentials saved to {ALPACA_CREDENTIALS_PATH} (not tracked in git).",
-        )
+
 
 
 class TickerEntryPage(ttk.Frame):
@@ -585,9 +423,7 @@ class AnalysisPage(ttk.Frame):
         super().__init__(parent)
         self.controller = controller
         self.api_client: MassiveApiClient | None = None
-        self.alpaca_client: AlpacaApiClient | None = None
         self.option_contract: dict | None = None
-        self.filtered_option_records: list[dict] = []
         self.scroll_canvas = tk.Canvas(self, highlightthickness=0)
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.scroll_canvas.yview)
         self.scroll_canvas.configure(yscrollcommand=self.scrollbar.set)
@@ -602,27 +438,6 @@ class AnalysisPage(ttk.Frame):
         self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
         self.scroll_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
-        ttk.Label(self.content_frame, text="Analysis", font=("Arial", 20, "bold")).pack(
-            pady=10
-        )
-
-        self.selected_label = ttk.Label(self.content_frame, text="Selected Ticker: None")
-        self.selected_label.pack(pady=5)
-
-        integration_note = ttk.Label(
-            self.content_frame,
-            text=(
-                "Massive provides stock/aggregate data (API key), Alpaca provides option greeks "
-                "(API key + secret)."
-            ),
-            foreground="#555",
-        )
-        integration_note.pack(pady=5)
-
-        ttk.Button(self.content_frame, text="Load Data", command=self.load_market_data).pack(
-            pady=10
-        )
-
         stock_frame = ttk.LabelFrame(self.content_frame, text="Stock Analysis")
         stock_frame.pack(pady=10, fill="both", expand=True, padx=40)
 
@@ -636,7 +451,7 @@ class AnalysisPage(ttk.Frame):
         chart_frame = ttk.Frame(stock_frame)
         chart_frame.pack(pady=5, fill="both", expand=True)
 
-        self.chart_canvas = tk.Canvas(chart_frame, height=220, bg="#f0f0f0")
+        self.chart_canvas = tk.Canvas(chart_frame, height=180, bg="#f0f0f0")
         self.chart_canvas.pack(fill="both", expand=True, padx=10, pady=10)
         self.chart_canvas.create_text(
             220,
@@ -693,7 +508,7 @@ class AnalysisPage(ttk.Frame):
                 ("52 Week Range", "range_52w"),
             ],
             self.stock_values,
-            columns=2,
+            columns=4,
         )
 
         self.option_info_frame = ttk.LabelFrame(stock_frame, text="Option Snapshot")
@@ -708,53 +523,61 @@ class AnalysisPage(ttk.Frame):
                 ("Strike", "strike"),
             ],
             self.option_values,
+            columns=4,
         )
 
         self.options_frame = ttk.LabelFrame(stock_frame, text="Option Contracts")
         self.options_frame.pack(padx=20, pady=(5, 15), fill="x")
+        self.options_frame.columnconfigure(0, weight=1)
+        self.options_frame.columnconfigure(1, weight=0)
+        self.options_frame.rowconfigure(0, weight=1)
 
         self.option_records: list[dict] = []
         self.all_option_records: list[dict] = []
         list_frame = ttk.Frame(self.options_frame)
-        list_frame.pack(fill="both", expand=True, padx=10, pady=8)
+        list_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
 
         filter_frame = ttk.Frame(self.options_frame)
-        filter_frame.pack(fill="x", padx=10, pady=(0, 8))
+        filter_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=8)
         filter_frame.columnconfigure(1, weight=1)
-        filter_frame.columnconfigure(3, weight=1)
-        filter_frame.columnconfigure(5, weight=1)
 
-        ttk.Label(filter_frame, text="Expiration").grid(row=0, column=0, padx=5, sticky="w")
+        ttk.Label(filter_frame, text="Expiration").grid(
+            row=0, column=0, padx=5, pady=2, sticky="w"
+        )
         self.expiration_var = tk.StringVar(value="All")
         self.expiration_dropdown = ttk.Combobox(
             filter_frame, textvariable=self.expiration_var, state="readonly", width=18
         )
-        self.expiration_dropdown.grid(row=0, column=1, padx=5, sticky="ew")
+        self.expiration_dropdown.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
         self.expiration_dropdown.bind("<<ComboboxSelected>>", self.on_option_filter_change)
 
-        ttk.Label(filter_frame, text="Strike").grid(row=0, column=2, padx=5, sticky="w")
+        ttk.Label(filter_frame, text="Strike").grid(
+            row=1, column=0, padx=5, pady=2, sticky="w"
+        )
         self.strike_var = tk.StringVar(value="All")
         self.strike_dropdown = ttk.Combobox(
             filter_frame, textvariable=self.strike_var, state="readonly", width=12
         )
-        self.strike_dropdown.grid(row=0, column=3, padx=5, sticky="ew")
+        self.strike_dropdown.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
         self.strike_dropdown.bind("<<ComboboxSelected>>", self.on_option_filter_change)
 
-        ttk.Label(filter_frame, text="Type").grid(row=0, column=4, padx=5, sticky="w")
+        ttk.Label(filter_frame, text="Type").grid(row=2, column=0, padx=5, pady=2, sticky="w")
         self.type_var = tk.StringVar(value="All")
         self.type_dropdown = ttk.Combobox(
             filter_frame, textvariable=self.type_var, state="readonly", width=10
         )
-        self.type_dropdown.grid(row=0, column=5, padx=5, sticky="ew")
+        self.type_dropdown.grid(row=2, column=1, padx=5, pady=2, sticky="ew")
         self.type_dropdown.bind("<<ComboboxSelected>>", self.on_option_filter_change)
 
-        self.options_list = tk.Listbox(list_frame, height=8)
-        options_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.options_list.yview)
+        self.options_list = tk.Listbox(list_frame, height=8, width=42)
+        options_scroll = ttk.Scrollbar(
+            list_frame, orient="vertical", command=self.options_list.yview
+        )
         self.options_list.configure(yscrollcommand=options_scroll.set)
         self.options_list.grid(row=0, column=0, sticky="nsew")
         options_scroll.grid(row=0, column=1, sticky="ns")
-        list_frame.rowconfigure(0, weight=1)
-        list_frame.columnconfigure(0, weight=1)
         self.options_list.bind("<<ListboxSelect>>", self.on_option_select)
 
         self.greeks_frame = ttk.LabelFrame(stock_frame, text="Option Greeks")
@@ -774,29 +597,9 @@ class AnalysisPage(ttk.Frame):
             columns=3,
         )
 
-        selector_frame = ttk.Frame(self.content_frame)
-        selector_frame.pack(pady=5)
-        selector_frame.columnconfigure(1, weight=1)
-
-        ttk.Label(selector_frame, text="Analysis Mode:").grid(row=0, column=0, padx=5, sticky="w")
-        self.analysis_mode_var = tk.StringVar(value=self.controller.state.analysis_mode)
-        self.analysis_mode_dropdown = ttk.Combobox(
-            selector_frame,
-            textvariable=self.analysis_mode_var,
-            values=["Stock Analysis", "Option Analysis"],
-            state="readonly",
-            width=20,
-        )
-        self.analysis_mode_dropdown.grid(row=0, column=1, padx=5, sticky="w")
-        self.analysis_mode_dropdown.bind("<<ComboboxSelected>>", self.on_analysis_mode_change)
-
-        self.strategy_frame = ttk.Frame(self.content_frame)
-        self.strategy_frame.pack(pady=5)
-
-        ttk.Label(self.strategy_frame, text="Option Strategy:").grid(row=0, column=0, padx=5)
         self.strategy_var = tk.StringVar(value=self.controller.state.option_strategy)
         self.strategy_dropdown = ttk.Combobox(
-            self.strategy_frame,
+            filter_frame,
             textvariable=self.strategy_var,
             values=[
                 "Naked Call",
@@ -805,10 +608,18 @@ class AnalysisPage(ttk.Frame):
                 "Calendar Spread",
             ],
             state="readonly",
-            width=25,
+            width=20,
         )
-        self.strategy_dropdown.grid(row=0, column=1, padx=5)
         self.strategy_dropdown.bind("<<ComboboxSelected>>", self.on_strategy_change)
+
+        ttk.Label(filter_frame, text="Option Strategy:").grid(
+            row=3, column=0, padx=5, pady=(8, 2), sticky="w"
+        )
+        self.strategy_dropdown.grid(row=3, column=1, padx=5, pady=(8, 2), sticky="ew")
+
+        ttk.Button(filter_frame, text="Go", command=self.load_market_data).grid(
+            row=4, column=0, columnspan=2, padx=5, pady=(8, 2), sticky="ew"
+        )
 
         button_row = ttk.Frame(self.content_frame)
         button_row.pack(pady=10)
@@ -817,20 +628,41 @@ class AnalysisPage(ttk.Frame):
             row=0, column=0, padx=10
         )
         ttk.Button(
+            button_row, text="Load Data", command=self.load_market_data
+        ).grid(row=0, column=1, padx=10)
+        ttk.Button(
             button_row,
             text="Select Stock",
             command=lambda: controller.show_frame("TickerSelectPage"),
-        ).grid(row=0, column=1, padx=10)
+        ).grid(row=0, column=2, padx=10)
         ttk.Button(
             button_row,
             text="Back to Main Menu",
             command=lambda: controller.show_frame("MainMenu"),
-        ).grid(row=0, column=2, padx=10)
+        ).grid(row=0, column=3, padx=10)
+        ttk.Label(button_row, text="Analysis Mode:").grid(row=0, column=4, padx=(20, 5))
+        self.analysis_mode_var = tk.StringVar(value=self.controller.state.analysis_mode)
+        self.analysis_mode_dropdown = ttk.Combobox(
+            button_row,
+            textvariable=self.analysis_mode_var,
+            values=["Stock Analysis", "Option Analysis"],
+            state="readonly",
+            width=20,
+        )
+        self.analysis_mode_dropdown.grid(row=0, column=5, padx=5)
+        self.analysis_mode_dropdown.bind("<<ComboboxSelected>>", self.on_analysis_mode_change)
 
     def _snap_horizon(self, value: str) -> None:
         snapped = int(round(float(value)))
         self.horizon_var.set(snapped)
         self.horizon_slider.set(snapped)
+
+    def _effective_market_date(self) -> date:
+        now = datetime.now(ZoneInfo("America/New_York"))
+        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        if now < market_open:
+            return (now - timedelta(days=1)).date()
+        return now.date()
 
     def _build_info_grid(
         self,
@@ -853,11 +685,23 @@ class AnalysisPage(ttk.Frame):
         for index in range(columns * 2):
             parent.columnconfigure(index, weight=1)
 
+    def _format_float(self, value: float) -> str:
+        decimals = 2 if abs(value) >= 1 else 4
+        multiplier = 10**decimals
+        truncated = math.trunc(value * multiplier) / multiplier
+        return f"{truncated:.{decimals}f}".rstrip("0").rstrip(".")
+
     def _set_value(self, label: ttk.Label, value: str | int | float | None) -> None:
         if value in (None, "", "--"):
             label.config(text="--", foreground="#b00020")
         else:
-            label.config(text=str(value), foreground="#0a7a2f")
+            if isinstance(value, float):
+                text = self._format_float(value)
+            elif isinstance(value, int):
+                text = str(value)
+            else:
+                text = str(value)
+            label.config(text=text, foreground="#0a7a2f")
 
     def _render_chart(self, aggregates: list[dict]) -> None:
         self.chart_canvas.delete("all")
@@ -987,6 +831,85 @@ class AnalysisPage(ttk.Frame):
                 fill=axis_color,
             )
 
+    def _strip_html(self, text: str) -> str:
+        class _HTMLStripper(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__()
+                self.parts: list[str] = []
+
+            def handle_data(self, data: str) -> None:
+                self.parts.append(data)
+
+        stripper = _HTMLStripper()
+        stripper.feed(text)
+        return " ".join(stripper.parts)
+
+    def _format_http_error_detail(self, exc: HTTPError) -> str:
+        try:
+            body = exc.read().decode("utf-8").strip()
+        except Exception:
+            return ""
+        if not body:
+            return ""
+        if "<html" in body.lower():
+            body = self._strip_html(body)
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        return (
+            payload.get("message")
+            or payload.get("error")
+            or payload.get("msg")
+            or body
+        )
+
+    def _show_api_error(self, exc: HTTPError, service: str, hint: str | None = None) -> None:
+        detail = self._format_http_error_detail(exc)
+        detail_msg = f"\nDetails: {detail}" if detail else ""
+        hint_msg = f"\n{hint}" if hint else ""
+        self._show_error_dialog(
+            "API Error",
+            f"{service} API returned an error: {exc.code} {exc.reason}.{detail_msg}{hint_msg}",
+        )
+
+    def _show_error_dialog(self, title: str, message: str) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.geometry("620x320")
+        dialog.transient(self)
+
+        dialog.rowconfigure(0, weight=1)
+        dialog.columnconfigure(0, weight=1)
+
+        text_frame = ttk.Frame(dialog)
+        text_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+
+        text_widget = tk.Text(text_frame, wrap="word")
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        text_widget.insert("1.0", message)
+        text_widget.focus_set()
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.grid(row=1, column=0, pady=(0, 10))
+
+        def copy_to_clipboard() -> None:
+            dialog.clipboard_clear()
+            dialog.clipboard_append(text_widget.get("1.0", "end-1c"))
+            dialog.update_idletasks()
+
+        ttk.Button(button_frame, text="Copy", command=copy_to_clipboard).grid(
+            row=0, column=0, padx=5
+        )
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).grid(
+            row=0, column=1, padx=5
+        )
+
     def _on_content_configure(self, _event: tk.Event) -> None:
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
@@ -1017,7 +940,6 @@ class AnalysisPage(ttk.Frame):
             self.option_info_frame.pack_forget()
             self.options_frame.pack_forget()
             self.greeks_frame.pack_forget()
-            self.strategy_frame.pack_forget()
         else:
             if not self.option_info_frame.winfo_ismapped():
                 self.option_info_frame.pack(padx=20, pady=(5, 15), fill="x")
@@ -1025,8 +947,6 @@ class AnalysisPage(ttk.Frame):
                 self.options_frame.pack(padx=20, pady=(5, 15), fill="x")
             if not self.greeks_frame.winfo_ismapped():
                 self.greeks_frame.pack(padx=20, pady=(5, 15), fill="x")
-            if not self.strategy_frame.winfo_ismapped():
-                self.strategy_frame.pack(pady=5)
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
     def _normalize_contract_type(self, value: str | None) -> str | None:
@@ -1141,18 +1061,14 @@ class AnalysisPage(ttk.Frame):
         self._sync_greeks()
 
     def refresh(self) -> None:
-        ticker = self.controller.state.selected_ticker or "None"
-        self.selected_label.config(text=f"Selected Ticker: {ticker}")
-        self.analysis_mode_var.set(self.controller.state.analysis_mode)
+        self.controller.state.analysis_mode = "Option Analysis"
+        self.analysis_mode_var.set("Option Analysis")
         self.strategy_var.set(self.controller.state.option_strategy)
         api_key = load_api_key()
         self.api_client = MassiveApiClient(api_key) if api_key else None
-        alpaca_key, alpaca_secret = load_alpaca_credentials()
-        self.alpaca_client = (
-            AlpacaApiClient(alpaca_key, alpaca_secret) if alpaca_key and alpaca_secret else None
-        )
         self._toggle_info_panels()
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
+        self.after(0, self.load_market_data)
 
     def on_analysis_mode_change(self, _event: object) -> None:
         self.controller.state.analysis_mode = self.analysis_mode_var.get()
@@ -1170,12 +1086,6 @@ class AnalysisPage(ttk.Frame):
                 "Missing key", "Enter or set a Massive API key to load stock data."
             )
             return
-        if not self.alpaca_client:
-            messagebox.showinfo(
-                "Missing keys",
-                "Enter or set Alpaca API credentials to load option greeks.",
-            )
-            return
         ticker = self.controller.state.selected_ticker
         if not ticker:
             messagebox.showinfo("Missing ticker", "Select a ticker first.")
@@ -1185,7 +1095,7 @@ class AnalysisPage(ttk.Frame):
         _label, days_back, minutes_per_bar, _cadence_label = HORIZON_CONFIGS[horizon_index]
         cache_payload = load_cached_market_data(ticker) or {}
         cache_date = cache_payload.get("last_updated")
-        today_label = date.today().isoformat()
+        today_label = self._effective_market_date().isoformat()
         aggregates_map = cache_payload.get("aggregates", {})
         cached_stock = cache_payload.get("stock")
         cached_options = cache_payload.get("options")
@@ -1197,20 +1107,41 @@ class AnalysisPage(ttk.Frame):
         if should_fetch:
             try:
                 stock_data = self.api_client.fetch_previous_close(ticker)
-                option_data = self.alpaca_client.fetch_option_snapshots(ticker)
+            except HTTPError as exc:
+                self._show_api_error(exc, "Massive", "Verify your Massive API key.")
+                return
+            except URLError as exc:
+                self._show_error_dialog(
+                    "Connection Error",
+                    f"Could not reach Massive API endpoint: {exc.reason}",
+                )
+                return
+            try:
+                option_data = self.api_client.fetch_option_snapshots(ticker)
+            except HTTPError as exc:
+                self._show_api_error(
+                    exc,
+                    "Massive",
+                    "Verify your Massive API key and options data entitlements.",
+                )
+                return
+            except URLError as exc:
+                self._show_error_dialog(
+                    "Connection Error",
+                    f"Could not reach Massive API endpoint: {exc.reason}",
+                )
+                return
+            try:
                 aggregates = self.api_client.fetch_aggregates(
                     ticker, days_back, minutes_per_bar
                 )
             except HTTPError as exc:
-                messagebox.showerror(
-                    "API Error",
-                    f"API returned an error: {exc.code} {exc.reason}",
-                )
+                self._show_api_error(exc, "Massive", "Verify your Massive API key.")
                 return
             except URLError as exc:
-                messagebox.showerror(
+                self._show_error_dialog(
                     "Connection Error",
-                    f"Could not reach API endpoint: {exc.reason}",
+                    f"Could not reach Massive API endpoint: {exc.reason}",
                 )
                 return
             aggregates_map[str(horizon_index)] = aggregates
@@ -1242,7 +1173,7 @@ class AnalysisPage(ttk.Frame):
 
         self._render_chart(aggregates)
 
-        self.all_option_records = option_data
+        self.all_option_records = option_records
         self._refresh_option_filters(reset=True)
 
     def save_analysis(self) -> None:
@@ -1257,9 +1188,9 @@ class AnalysisPage(ttk.Frame):
         if not selection:
             return
         index = selection[0]
-        if index >= len(self.filtered_option_records):
+        if index >= len(self.option_records):
             return
-        self.option_contract = self.filtered_option_records[index]
+        self.option_contract = self.option_records[index]
         self._sync_option_snapshot()
         self._sync_greeks()
 
@@ -1282,11 +1213,18 @@ class AnalysisPage(ttk.Frame):
                 continue
             details = record.get("details") or {}
             greeks = record.get("greeks") or {}
+            day = record.get("day") or {}
+            last_trade = record.get("last_trade") or {}
+            last_quote = record.get("last_quote") or {}
             if not isinstance(greeks, dict):
                 greeks = {}
             implied_vol = greeks.get("iv")
             if implied_vol is None:
                 implied_vol = record.get("implied_volatility") or record.get("implied_vol")
+            volume = record.get("volume")
+            if volume is None:
+                volume = day.get("volume") or day.get("v")
+            open_interest = record.get("open_interest") or details.get("open_interest")
             normalized.append(
                 {
                     "ticker": record.get("ticker") or details.get("ticker"),
@@ -1295,6 +1233,20 @@ class AnalysisPage(ttk.Frame):
                     "contract_type": record.get("contract_type")
                     or details.get("contract_type"),
                     "strike_price": record.get("strike_price") or details.get("strike_price"),
+                    "implied_volatility": implied_vol,
+                    "volume": volume,
+                    "open_interest": open_interest,
+                    "bid": record.get("bid")
+                    or last_quote.get("bid")
+                    or last_quote.get("bid_price")
+                    or last_quote.get("bp"),
+                    "ask": record.get("ask")
+                    or last_quote.get("ask")
+                    or last_quote.get("ask_price")
+                    or last_quote.get("ap"),
+                    "last": record.get("last")
+                    or last_trade.get("price")
+                    or last_trade.get("p"),
                     "greeks": {
                         "delta": greeks.get("delta"),
                         "gamma": greeks.get("gamma"),
@@ -1322,124 +1274,6 @@ class AnalysisPage(ttk.Frame):
             "rho": greeks.get("rho"),
             "iv": implied_vol,
         }
-
-    def _option_key(self, contract: dict) -> tuple:
-        return (
-            contract.get("ticker"),
-            contract.get("expiration_date"),
-            contract.get("contract_type"),
-            contract.get("strike_price"),
-        )
-
-    def _parse_strike(self, value: object) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return float("inf")
-
-    def _filtered_contracts(self, ignore_key: str | None = None) -> list[dict]:
-        selected = {
-            key: var.get().strip()
-            for key, var in self.option_filter_vars.items()
-            if var.get().strip()
-        }
-        results = []
-        for contract in self.option_records:
-            expiration = contract.get("expiration_date") or ""
-            contract_type = contract.get("contract_type") or ""
-            strike = contract.get("strike_price")
-            contract_map = {
-                "expiration": str(expiration),
-                "type": str(contract_type),
-                "strike": str(strike),
-            }
-            matches = True
-            for key, selected_value in selected.items():
-                if key == ignore_key:
-                    continue
-                if contract_map.get(key) != selected_value:
-                    matches = False
-                    break
-            if matches:
-                results.append(contract)
-        return results
-
-    def _populate_option_filters(self) -> None:
-        if not self.option_records:
-            for dropdown in self.option_filter_dropdowns.values():
-                dropdown["values"] = []
-            for var in self.option_filter_vars.values():
-                var.set("")
-            self.options_list.delete(0, tk.END)
-            self.options_list.insert(tk.END, "No option contracts returned.")
-            self.filtered_option_records = []
-            self.option_match_label.config(text="Matching contracts: 0")
-            return
-        for key in self.option_filter_vars:
-            self._refresh_filter_options(key)
-        self._update_filtered_options()
-
-    def _refresh_filter_options(self, ignore_key: str) -> None:
-        available: set[str] = set()
-        for contract in self._filtered_contracts(ignore_key=ignore_key):
-            if ignore_key == "expiration":
-                value = contract.get("expiration_date")
-            elif ignore_key == "type":
-                value = contract.get("contract_type")
-            else:
-                value = contract.get("strike_price")
-            if value not in (None, ""):
-                available.add(str(value))
-        if ignore_key == "strike":
-            ordered_values = sorted(available, key=self._parse_strike)
-        else:
-            ordered_values = sorted(available)
-        dropdown = self.option_filter_dropdowns[ignore_key]
-        dropdown["values"] = ordered_values
-        current = self.option_filter_vars[ignore_key].get().strip()
-        if current not in available:
-            self.option_filter_vars[ignore_key].set(ordered_values[0] if ordered_values else "")
-
-    def on_option_filter_change(self, _event: object) -> None:
-        for key in self.option_filter_vars:
-            self._refresh_filter_options(key)
-        self._update_filtered_options()
-
-    def _update_filtered_options(self) -> None:
-        self.filtered_option_records = self._filtered_contracts()
-        self.options_list.delete(0, tk.END)
-        if not self.filtered_option_records:
-            self.options_list.insert(tk.END, "No matching option contracts.")
-            self.option_match_label.config(text="Matching contracts: 0")
-            self.option_contract = None
-            self._sync_option_snapshot()
-            self._sync_greeks()
-            return
-        for contract in self.filtered_option_records:
-            self.options_list.insert(
-                tk.END,
-                "{ticker} {expiration} {type} {strike}".format(
-                    ticker=contract.get("ticker", "--"),
-                    expiration=contract.get("expiration_date", "--"),
-                    type=str(contract.get("contract_type", "--")).upper(),
-                    strike=contract.get("strike_price", "--"),
-                ),
-            )
-        self.option_match_label.config(
-            text=f"Matching contracts: {len(self.filtered_option_records)}"
-        )
-        current_key = self._option_key(self.option_contract or {})
-        selected_index = 0
-        for index, contract in enumerate(self.filtered_option_records):
-            if self._option_key(contract) == current_key:
-                selected_index = index
-                break
-        self.options_list.selection_set(selected_index)
-        self.options_list.see(selected_index)
-        self.option_contract = self.filtered_option_records[selected_index]
-        self._sync_option_snapshot()
-        self._sync_greeks()
-
 
 if __name__ == "__main__":
     app = StoptionsApp()
