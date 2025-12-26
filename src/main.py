@@ -197,16 +197,18 @@ class AlpacaApiClient:
         self.base_url = base_url.rstrip("/")
         self.stock_client = StockHistoricalDataClient(self.api_key, self.api_secret)
         self.option_client = OptionHistoricalDataClient(self.api_key, self.api_secret)
-        self.options_feed = self._resolve_options_feed(os.getenv("ALPACA_OPTIONS_FEED", "OPRA"))
+        self.options_feed = self._resolve_options_feed(
+            os.getenv("ALPACA_OPTIONS_FEED", "INDICATIVE")
+        )
 
     def _resolve_options_feed(self, feed_name: str) -> OptionsFeed:
         normalized = feed_name.strip().upper()
         return getattr(OptionsFeed, normalized, OptionsFeed.OPRA)
 
     def _fallback_options_feed(self) -> OptionsFeed | None:
-        if self.options_feed != OptionsFeed.OPRA:
+        if self.options_feed != OptionsFeed.INDICATIVE:
             return None
-        return getattr(OptionsFeed, "INDICATIVE", None)
+        return getattr(OptionsFeed, "OPRA", None)
 
     def _is_unauthorized_error(self, exc: AlpacaAPIError) -> bool:
         status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
