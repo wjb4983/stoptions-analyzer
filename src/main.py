@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -539,49 +540,56 @@ class AnalysisPage(ttk.Frame):
 
         self.options_frame = ttk.LabelFrame(stock_frame, text="Option Contracts")
         self.options_frame.pack(padx=20, pady=(5, 15), fill="x")
+        self.options_frame.columnconfigure(0, weight=1)
+        self.options_frame.columnconfigure(1, weight=0)
+        self.options_frame.rowconfigure(0, weight=1)
 
         self.option_records: list[dict] = []
         self.all_option_records: list[dict] = []
         list_frame = ttk.Frame(self.options_frame)
-        list_frame.pack(fill="both", expand=True, padx=10, pady=8)
+        list_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
 
         filter_frame = ttk.Frame(self.options_frame)
-        filter_frame.pack(fill="x", padx=10, pady=(0, 8))
+        filter_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=8)
         filter_frame.columnconfigure(1, weight=1)
-        filter_frame.columnconfigure(3, weight=1)
-        filter_frame.columnconfigure(5, weight=1)
 
-        ttk.Label(filter_frame, text="Expiration").grid(row=0, column=0, padx=5, sticky="w")
+        ttk.Label(filter_frame, text="Expiration").grid(
+            row=0, column=0, padx=5, pady=2, sticky="w"
+        )
         self.expiration_var = tk.StringVar(value="All")
         self.expiration_dropdown = ttk.Combobox(
             filter_frame, textvariable=self.expiration_var, state="readonly", width=18
         )
-        self.expiration_dropdown.grid(row=0, column=1, padx=5, sticky="ew")
+        self.expiration_dropdown.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
         self.expiration_dropdown.bind("<<ComboboxSelected>>", self.on_option_filter_change)
 
-        ttk.Label(filter_frame, text="Strike").grid(row=0, column=2, padx=5, sticky="w")
+        ttk.Label(filter_frame, text="Strike").grid(
+            row=1, column=0, padx=5, pady=2, sticky="w"
+        )
         self.strike_var = tk.StringVar(value="All")
         self.strike_dropdown = ttk.Combobox(
             filter_frame, textvariable=self.strike_var, state="readonly", width=12
         )
-        self.strike_dropdown.grid(row=0, column=3, padx=5, sticky="ew")
+        self.strike_dropdown.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
         self.strike_dropdown.bind("<<ComboboxSelected>>", self.on_option_filter_change)
 
-        ttk.Label(filter_frame, text="Type").grid(row=0, column=4, padx=5, sticky="w")
+        ttk.Label(filter_frame, text="Type").grid(row=2, column=0, padx=5, pady=2, sticky="w")
         self.type_var = tk.StringVar(value="All")
         self.type_dropdown = ttk.Combobox(
             filter_frame, textvariable=self.type_var, state="readonly", width=10
         )
-        self.type_dropdown.grid(row=0, column=5, padx=5, sticky="ew")
+        self.type_dropdown.grid(row=2, column=1, padx=5, pady=2, sticky="ew")
         self.type_dropdown.bind("<<ComboboxSelected>>", self.on_option_filter_change)
 
-        self.options_list = tk.Listbox(list_frame, height=8)
-        options_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.options_list.yview)
+        self.options_list = tk.Listbox(list_frame, height=8, width=42)
+        options_scroll = ttk.Scrollbar(
+            list_frame, orient="vertical", command=self.options_list.yview
+        )
         self.options_list.configure(yscrollcommand=options_scroll.set)
         self.options_list.grid(row=0, column=0, sticky="nsew")
         options_scroll.grid(row=0, column=1, sticky="ns")
-        list_frame.rowconfigure(0, weight=1)
-        list_frame.columnconfigure(0, weight=1)
         self.options_list.bind("<<ListboxSelect>>", self.on_option_select)
 
         self.greeks_frame = ttk.LabelFrame(stock_frame, text="Option Greeks")
@@ -680,11 +688,23 @@ class AnalysisPage(ttk.Frame):
         for index in range(columns * 2):
             parent.columnconfigure(index, weight=1)
 
+    def _format_float(self, value: float) -> str:
+        decimals = 2 if abs(value) >= 1 else 4
+        multiplier = 10**decimals
+        truncated = math.trunc(value * multiplier) / multiplier
+        return f"{truncated:.{decimals}f}".rstrip("0").rstrip(".")
+
     def _set_value(self, label: ttk.Label, value: str | int | float | None) -> None:
         if value in (None, "", "--"):
             label.config(text="--", foreground="#b00020")
         else:
-            label.config(text=str(value), foreground="#0a7a2f")
+            if isinstance(value, float):
+                text = self._format_float(value)
+            elif isinstance(value, int):
+                text = str(value)
+            else:
+                text = str(value)
+            label.config(text=text, foreground="#0a7a2f")
 
     def _render_chart(self, aggregates: list[dict]) -> None:
         self.chart_canvas.delete("all")
