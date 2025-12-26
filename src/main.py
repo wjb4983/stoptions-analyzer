@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 
 def effective_market_date() -> date:
     now = datetime.now(ZoneInfo("America/New_York"))
-    market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    if now < market_open:
+    market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    if now < market_close:
         return (now - timedelta(days=1)).date()
     return now.date()
 
@@ -67,6 +67,10 @@ def normalize_option_records(records: list[dict]) -> list[dict]:
                 "implied_volatility": implied_vol,
                 "volume": volume,
                 "open_interest": open_interest,
+                "day_close": record.get("close")
+                or day.get("close")
+                or day.get("c")
+                or record.get("day_close"),
                 "bid": record.get("bid")
                 or last_quote.get("bid")
                 or last_quote.get("bid_price")
@@ -112,10 +116,13 @@ def option_mid_price(contract: dict) -> float | None:
     bid = contract.get("bid")
     ask = contract.get("ask")
     last = contract.get("last")
+    day_close = contract.get("day_close")
     if isinstance(bid, (int, float)) and isinstance(ask, (int, float)):
         return (bid + ask) / 2
     if isinstance(last, (int, float)):
         return float(last)
+    if isinstance(day_close, (int, float)):
+        return float(day_close)
     if isinstance(bid, (int, float)):
         return float(bid)
     if isinstance(ask, (int, float)):
@@ -367,6 +374,7 @@ class MassiveApiClient:
                     "implied_volatility": implied_vol,
                     "volume": volume,
                     "open_interest": open_interest,
+                    "day_close": snapshot.get("close") or day.get("close") or day.get("c"),
                     "bid": last_quote.get("bid")
                     or last_quote.get("bid_price")
                     or last_quote.get("bp"),
@@ -381,8 +389,8 @@ class MassiveApiClient:
     def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
         if days_back == 1:
             now = datetime.now(ZoneInfo("America/New_York"))
-            market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
-            end_date = (now - timedelta(days=1)).date() if now < market_open else now.date()
+            market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+            end_date = (now - timedelta(days=1)).date() if now < market_close else now.date()
             start_date = end_date
         else:
             end_date = date.today()
