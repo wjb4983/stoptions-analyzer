@@ -11,6 +11,223 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
+
+
+def effective_market_date() -> date:
+    now = datetime.now(ZoneInfo("America/New_York"))
+    market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    if now < market_close:
+        return (now - timedelta(days=1)).date()
+    return now.date()
+
+
+def normalize_contract_type(value: str | None) -> str | None:
+    if not value:
+        return None
+    return str(value).strip().upper()
+
+
+def format_strike(value: float | int | str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:.2f}".rstrip("0").rstrip(".")
+
+
+def normalize_option_records(records: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        details = record.get("details") or {}
+        greeks = record.get("greeks") or {}
+        day = record.get("day") or {}
+        last_trade = record.get("last_trade") or {}
+        last_quote = record.get("last_quote") or {}
+        if not isinstance(greeks, dict):
+            greeks = {}
+        implied_vol = greeks.get("iv")
+        if implied_vol is None:
+            implied_vol = record.get("implied_volatility") or record.get("implied_vol")
+        volume = record.get("volume")
+        if volume is None:
+            volume = day.get("volume") or day.get("v")
+        open_interest = record.get("open_interest") or details.get("open_interest")
+        normalized.append(
+            {
+                "ticker": record.get("ticker") or details.get("ticker"),
+                "expiration_date": record.get("expiration_date") or details.get("expiration_date"),
+                "contract_type": record.get("contract_type") or details.get("contract_type"),
+                "strike_price": record.get("strike_price") or details.get("strike_price"),
+                "implied_volatility": implied_vol,
+                "volume": volume,
+                "open_interest": open_interest,
+                "day_close": record.get("close")
+                or day.get("close")
+                or day.get("c")
+                or record.get("day_close"),
+                "bid": record.get("bid")
+                or last_quote.get("bid")
+                or last_quote.get("bid_price")
+                or last_quote.get("bp"),
+                "ask": record.get("ask")
+                or last_quote.get("ask")
+                or last_quote.get("ask_price")
+                or last_quote.get("ap"),
+                "last": record.get("last")
+                or last_trade.get("price")
+                or last_trade.get("p"),
+                "greeks": {
+                    "delta": greeks.get("delta"),
+                    "gamma": greeks.get("gamma"),
+                    "theta": greeks.get("theta"),
+                    "vega": greeks.get("vega"),
+                    "rho": greeks.get("rho"),
+                    "iv": implied_vol,
+                },
+            }
+        )
+    return normalized
+
+
+def extract_greeks(contract: dict) -> dict:
+    greeks = contract.get("greeks") or {}
+    if not isinstance(greeks, dict):
+        greeks = {}
+    implied_vol = greeks.get("iv")
+    if implied_vol is None:
+        implied_vol = contract.get("implied_volatility") or contract.get("implied_vol")
+    return {
+        "delta": greeks.get("delta"),
+        "gamma": greeks.get("gamma"),
+        "theta": greeks.get("theta"),
+        "vega": greeks.get("vega"),
+        "rho": greeks.get("rho"),
+        "iv": implied_vol,
+    }
+
+
+def option_mid_price(contract: dict) -> float | None:
+    bid = contract.get("bid")
+    ask = contract.get("ask")
+    last = contract.get("last")
+    day_close = contract.get("day_close")
+    if isinstance(bid, (int, float)) and isinstance(ask, (int, float)):
+        return (bid + ask) / 2
+    if isinstance(last, (int, float)):
+        return float(last)
+    if isinstance(day_close, (int, float)):
+        return float(day_close)
+    if isinstance(bid, (int, float)):
+        return float(bid)
+    if isinstance(ask, (int, float)):
+        return float(ask)
+    return None
+
+
+def option_likelihood(contract: dict) -> float | None:
+    greeks = extract_greeks(contract)
+    delta = greeks.get("delta")
+    if delta is None:
+        return None
+    try:
+        likelihood = abs(float(delta))
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, likelihood))
+
+
+def combine_greeks(long_leg: dict, short_leg: dict) -> dict:
+    long_greeks = extract_greeks(long_leg)
+    short_greeks = extract_greeks(short_leg)
+    combined: dict[str, float | None] = {}
+    for key in ("delta", "gamma", "theta", "vega", "rho"):
+        long_value = long_greeks.get(key)
+        short_value = short_greeks.get(key)
+        if isinstance(long_value, (int, float)) or isinstance(short_value, (int, float)):
+            combined[key] = (long_value or 0) - (short_value or 0)
+        else:
+            combined[key] = None
+    iv_long = long_greeks.get("iv")
+    iv_short = short_greeks.get("iv")
+    if isinstance(iv_long, (int, float)) and isinstance(iv_short, (int, float)):
+        combined["iv"] = (iv_long + iv_short) / 2
+    else:
+        combined["iv"] = iv_long if iv_long is not None else iv_short
+    return combined
+
+
+def parse_float(value: str) -> float | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def normalize_likelihood_threshold(value: str) -> float | None:
+    raw = parse_float(value)
+    if raw is None:
+        return None
+    if raw > 1:
+        raw = raw / 100
+    return max(0.0, min(1.0, raw))
+
+
+def load_option_records(api_client: "MassiveApiClient", ticker: str) -> list[dict]:
+    cache_payload = load_cached_market_data(ticker) or {}
+    cache_date = cache_payload.get("last_updated")
+    today_label = effective_market_date().isoformat()
+    cached_options = cache_payload.get("options")
+    if cached_options is not None and cache_date == today_label:
+        return normalize_option_records(cached_options or [])
+    option_data = api_client.fetch_option_snapshots(ticker)
+    option_records = normalize_option_records(option_data)
+    cache_payload.update(
+        {
+            "last_updated": today_label,
+            "options": option_records,
+        }
+    )
+    save_cached_market_data(ticker, cache_payload)
+    return option_records
+
+
+def strip_html(text: str) -> str:
+    class _HTMLStripper(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.parts: list[str] = []
+
+        def handle_data(self, data: str) -> None:
+            self.parts.append(data)
+
+    stripper = _HTMLStripper()
+    stripper.feed(text)
+    return " ".join(stripper.parts)
+
+
+def format_http_error_detail(exc: HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8").strip()
+    except Exception:
+        return ""
+    if not body:
+        return ""
+    if "<html" in body.lower():
+        body = strip_html(body)
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return body
+    return payload.get("message") or payload.get("error") or payload.get("msg") or body
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
@@ -157,6 +374,7 @@ class MassiveApiClient:
                     "implied_volatility": implied_vol,
                     "volume": volume,
                     "open_interest": open_interest,
+                    "day_close": snapshot.get("close") or day.get("close") or day.get("c"),
                     "bid": last_quote.get("bid")
                     or last_quote.get("bid_price")
                     or last_quote.get("bp"),
@@ -171,8 +389,8 @@ class MassiveApiClient:
     def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
         if days_back == 1:
             now = datetime.now(ZoneInfo("America/New_York"))
-            market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
-            end_date = (now - timedelta(days=1)).date() if now < market_open else now.date()
+            market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+            end_date = (now - timedelta(days=1)).date() if now < market_close else now.date()
             start_date = end_date
         else:
             end_date = date.today()
@@ -231,7 +449,14 @@ class StoptionsApp(tk.Tk):
         container.rowconfigure(0, weight=1)
 
         self.frames: dict[str, ttk.Frame] = {}
-        for frame_cls in (MainMenu, TickerEntryPage, TickerSelectPage, AnalysisPage):
+        for frame_cls in (
+            MainMenu,
+            TickerEntryPage,
+            TickerSelectPage,
+            AnalysisPage,
+            CallPutAnalysisPage,
+            SpreadAnalysisPage,
+        ):
             frame = frame_cls(container, self)
             self.frames[frame_cls.__name__] = frame
             frame.grid(row=0, column=0, sticky="nsew")
@@ -521,6 +746,7 @@ class AnalysisPage(ttk.Frame):
                 ("Expiration", "expiration"),
                 ("Type", "type"),
                 ("Strike", "strike"),
+                ("Option Price", "price"),
             ],
             self.option_values,
             columns=4,
@@ -617,7 +843,7 @@ class AnalysisPage(ttk.Frame):
         )
         self.strategy_dropdown.grid(row=3, column=1, padx=5, pady=(8, 2), sticky="ew")
 
-        ttk.Button(filter_frame, text="Go", command=self.load_market_data).grid(
+        ttk.Button(filter_frame, text="Go", command=self.go_to_strategy).grid(
             row=4, column=0, columnspan=2, padx=5, pady=(8, 2), sticky="ew"
         )
 
@@ -656,13 +882,6 @@ class AnalysisPage(ttk.Frame):
         snapped = int(round(float(value)))
         self.horizon_var.set(snapped)
         self.horizon_slider.set(snapped)
-
-    def _effective_market_date(self) -> date:
-        now = datetime.now(ZoneInfo("America/New_York"))
-        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
-        if now < market_open:
-            return (now - timedelta(days=1)).date()
-        return now.date()
 
     def _build_info_grid(
         self,
@@ -831,38 +1050,8 @@ class AnalysisPage(ttk.Frame):
                 fill=axis_color,
             )
 
-    def _strip_html(self, text: str) -> str:
-        class _HTMLStripper(HTMLParser):
-            def __init__(self) -> None:
-                super().__init__()
-                self.parts: list[str] = []
-
-            def handle_data(self, data: str) -> None:
-                self.parts.append(data)
-
-        stripper = _HTMLStripper()
-        stripper.feed(text)
-        return " ".join(stripper.parts)
-
     def _format_http_error_detail(self, exc: HTTPError) -> str:
-        try:
-            body = exc.read().decode("utf-8").strip()
-        except Exception:
-            return ""
-        if not body:
-            return ""
-        if "<html" in body.lower():
-            body = self._strip_html(body)
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            return body
-        return (
-            payload.get("message")
-            or payload.get("error")
-            or payload.get("msg")
-            or body
-        )
+        return format_http_error_detail(exc)
 
     def _show_api_error(self, exc: HTTPError, service: str, hint: str | None = None) -> None:
         detail = self._format_http_error_detail(exc)
@@ -929,6 +1118,7 @@ class AnalysisPage(ttk.Frame):
         display_type = contract_type.upper() if contract_type else None
         self._set_value(self.option_values["type"], display_type)
         self._set_value(self.option_values["strike"], contract.get("strike_price"))
+        self._set_value(self.option_values["price"], option_mid_price(contract))
 
     def _toggle_info_panels(self) -> None:
         is_stock = self.analysis_mode_var.get() == "Stock Analysis"
@@ -949,30 +1139,14 @@ class AnalysisPage(ttk.Frame):
                 self.greeks_frame.pack(padx=20, pady=(5, 15), fill="x")
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
-    def _normalize_contract_type(self, value: str | None) -> str | None:
-        if not value:
-            return None
-        return str(value).strip().upper()
-
-    def _format_strike(self, value: float | int | str | None) -> str | None:
-        if value is None:
-            return None
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            return str(value)
-        if numeric.is_integer():
-            return str(int(numeric))
-        return f"{numeric:.2f}".rstrip("0").rstrip(".")
-
     def _get_filter_value(self, var: tk.StringVar) -> str | None:
         value = var.get()
         return None if value == "All" else value
 
     def _record_matches_filters(self, record: dict, filters: dict[str, str | None]) -> bool:
         expiration = record.get("expiration_date")
-        strike = self._format_strike(record.get("strike_price"))
-        contract_type = self._normalize_contract_type(record.get("contract_type"))
+        strike = format_strike(record.get("strike_price"))
+        contract_type = normalize_contract_type(record.get("contract_type"))
         if filters.get("expiration") and filters["expiration"] != expiration:
             return False
         if filters.get("strike") and filters["strike"] != strike:
@@ -987,8 +1161,8 @@ class AnalysisPage(ttk.Frame):
         options: dict[str, set[str]] = {"expiration": set(), "strike": set(), "type": set()}
         for record in records:
             expiration = record.get("expiration_date")
-            strike = self._format_strike(record.get("strike_price"))
-            contract_type = self._normalize_contract_type(record.get("contract_type"))
+            strike = format_strike(record.get("strike_price"))
+            contract_type = normalize_contract_type(record.get("contract_type"))
             if self._record_matches_filters(record, {**current, "expiration": None}):
                 if expiration:
                     options["expiration"].add(expiration)
@@ -1080,6 +1254,15 @@ class AnalysisPage(ttk.Frame):
         self.controller.state.option_strategy = self.strategy_var.get()
         self.controller.persist_state()
 
+    def go_to_strategy(self) -> None:
+        strategy = self.strategy_var.get()
+        self.controller.state.option_strategy = strategy
+        self.controller.persist_state()
+        if strategy in ("Naked Call", "Naked Put"):
+            self.controller.show_frame("CallPutAnalysisPage")
+        else:
+            self.controller.show_frame("SpreadAnalysisPage")
+
     def load_market_data(self) -> None:
         if not self.api_client:
             messagebox.showinfo(
@@ -1095,7 +1278,7 @@ class AnalysisPage(ttk.Frame):
         _label, days_back, minutes_per_bar, _cadence_label = HORIZON_CONFIGS[horizon_index]
         cache_payload = load_cached_market_data(ticker) or {}
         cache_date = cache_payload.get("last_updated")
-        today_label = self._effective_market_date().isoformat()
+        today_label = effective_market_date().isoformat()
         aggregates_map = cache_payload.get("aggregates", {})
         cached_stock = cache_payload.get("stock")
         cached_options = cache_payload.get("options")
@@ -1145,7 +1328,7 @@ class AnalysisPage(ttk.Frame):
                 )
                 return
             aggregates_map[str(horizon_index)] = aggregates
-            option_records = self._normalize_option_records(option_data)
+            option_records = normalize_option_records(option_data)
             cache_payload.update(
                 {
                     "last_updated": today_label,
@@ -1157,7 +1340,7 @@ class AnalysisPage(ttk.Frame):
             save_cached_market_data(ticker, cache_payload)
         else:
             stock_data = cached_stock or {}
-            option_records = self._normalize_option_records(cached_options or [])
+            option_records = normalize_option_records(cached_options or [])
             aggregates = cached_aggregates or []
 
         self._set_value(self.stock_values["price"], stock_data.get("close"))
@@ -1198,7 +1381,7 @@ class AnalysisPage(ttk.Frame):
         self._refresh_option_filters()
 
     def _sync_greeks(self) -> None:
-        greeks = self._extract_greeks(self.option_contract or {})
+        greeks = extract_greeks(self.option_contract or {})
         self._set_value(self.greeks_values["delta"], greeks.get("delta"))
         self._set_value(self.greeks_values["gamma"], greeks.get("gamma"))
         self._set_value(self.greeks_values["theta"], greeks.get("theta"))
@@ -1206,74 +1389,969 @@ class AnalysisPage(ttk.Frame):
         self._set_value(self.greeks_values["rho"], greeks.get("rho"))
         self._set_value(self.greeks_values["iv"], greeks.get("iv"))
 
-    def _normalize_option_records(self, records: list[dict]) -> list[dict]:
-        normalized: list[dict] = []
-        for record in records:
-            if not isinstance(record, dict):
-                continue
-            details = record.get("details") or {}
-            greeks = record.get("greeks") or {}
-            day = record.get("day") or {}
-            last_trade = record.get("last_trade") or {}
-            last_quote = record.get("last_quote") or {}
-            if not isinstance(greeks, dict):
-                greeks = {}
-            implied_vol = greeks.get("iv")
-            if implied_vol is None:
-                implied_vol = record.get("implied_volatility") or record.get("implied_vol")
-            volume = record.get("volume")
-            if volume is None:
-                volume = day.get("volume") or day.get("v")
-            open_interest = record.get("open_interest") or details.get("open_interest")
-            normalized.append(
-                {
-                    "ticker": record.get("ticker") or details.get("ticker"),
-                    "expiration_date": record.get("expiration_date")
-                    or details.get("expiration_date"),
-                    "contract_type": record.get("contract_type")
-                    or details.get("contract_type"),
-                    "strike_price": record.get("strike_price") or details.get("strike_price"),
-                    "implied_volatility": implied_vol,
-                    "volume": volume,
-                    "open_interest": open_interest,
-                    "bid": record.get("bid")
-                    or last_quote.get("bid")
-                    or last_quote.get("bid_price")
-                    or last_quote.get("bp"),
-                    "ask": record.get("ask")
-                    or last_quote.get("ask")
-                    or last_quote.get("ask_price")
-                    or last_quote.get("ap"),
-                    "last": record.get("last")
-                    or last_trade.get("price")
-                    or last_trade.get("p"),
-                    "greeks": {
-                        "delta": greeks.get("delta"),
-                        "gamma": greeks.get("gamma"),
-                        "theta": greeks.get("theta"),
-                        "vega": greeks.get("vega"),
-                        "rho": greeks.get("rho"),
-                        "iv": implied_vol,
-                    },
-                }
-            )
-        return normalized
 
-    def _extract_greeks(self, contract: dict) -> dict:
-        greeks = contract.get("greeks") or {}
-        if not isinstance(greeks, dict):
-            greeks = {}
-        implied_vol = greeks.get("iv")
-        if implied_vol is None:
-            implied_vol = contract.get("implied_volatility") or contract.get("implied_vol")
+class CallPutAnalysisPage(ttk.Frame):
+    def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
+        super().__init__(parent)
+        self.controller = controller
+        self.api_client: MassiveApiClient | None = None
+        self.option_contract: dict | None = None
+        self.all_option_records: list[dict] = []
+        self.option_records: list[dict] = []
+
+        header = ttk.Label(self, text="Call/Put Analysis", font=("Arial", 18, "bold"))
+        header.pack(pady=10)
+
+        self.strategy_label = ttk.Label(self, text="Strategy: --", font=("Arial", 12))
+        self.strategy_label.pack(pady=(0, 10))
+
+        self.options_frame = ttk.LabelFrame(self, text="Option Candidates")
+        self.options_frame.pack(padx=30, pady=10, fill="both", expand=True)
+        self.options_frame.columnconfigure(0, weight=1)
+        self.options_frame.columnconfigure(1, weight=0)
+        self.options_frame.rowconfigure(0, weight=1)
+
+        list_frame = ttk.Frame(self.options_frame)
+        list_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+
+        filter_frame = ttk.Frame(self.options_frame)
+        filter_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=8)
+        filter_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(filter_frame, text="Max Loss / Contract Price").grid(
+            row=0, column=0, padx=5, pady=2, sticky="w"
+        )
+        self.max_loss_var = tk.StringVar()
+        self.max_loss_entry = ttk.Entry(filter_frame, textvariable=self.max_loss_var, width=12)
+        self.max_loss_entry.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
+        self.max_loss_entry.bind("<KeyRelease>", self.on_filter_change)
+
+        ttk.Label(filter_frame, text="Min Likelihood (%)").grid(
+            row=1, column=0, padx=5, pady=2, sticky="w"
+        )
+        self.likelihood_var = tk.StringVar()
+        self.likelihood_entry = ttk.Entry(
+            filter_frame, textvariable=self.likelihood_var, width=12
+        )
+        self.likelihood_entry.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
+        self.likelihood_entry.bind("<KeyRelease>", self.on_filter_change)
+
+        ttk.Label(filter_frame, text="Expiration").grid(
+            row=2, column=0, padx=5, pady=2, sticky="w"
+        )
+        self.expiration_var = tk.StringVar(value="All")
+        self.expiration_dropdown = ttk.Combobox(
+            filter_frame, textvariable=self.expiration_var, state="readonly", width=18
+        )
+        self.expiration_dropdown.grid(row=2, column=1, padx=5, pady=2, sticky="ew")
+        self.expiration_dropdown.bind("<<ComboboxSelected>>", self.on_filter_change)
+
+        ttk.Label(filter_frame, text="Strike").grid(
+            row=3, column=0, padx=5, pady=2, sticky="w"
+        )
+        self.strike_var = tk.StringVar(value="All")
+        self.strike_dropdown = ttk.Combobox(
+            filter_frame, textvariable=self.strike_var, state="readonly", width=12
+        )
+        self.strike_dropdown.grid(row=3, column=1, padx=5, pady=2, sticky="ew")
+        self.strike_dropdown.bind("<<ComboboxSelected>>", self.on_filter_change)
+
+        ttk.Label(filter_frame, text="Type").grid(row=4, column=0, padx=5, pady=2, sticky="w")
+        self.type_var = tk.StringVar(value="All")
+        self.type_dropdown = ttk.Combobox(
+            filter_frame, textvariable=self.type_var, state="readonly", width=10
+        )
+        self.type_dropdown.grid(row=4, column=1, padx=5, pady=2, sticky="ew")
+        self.type_dropdown.bind("<<ComboboxSelected>>", self.on_filter_change)
+
+        self.options_list = tk.Listbox(list_frame, height=12, width=48)
+        options_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.options_list.yview)
+        self.options_list.configure(yscrollcommand=options_scroll.set)
+        self.options_list.grid(row=0, column=0, sticky="nsew")
+        options_scroll.grid(row=0, column=1, sticky="ns")
+        self.options_list.bind("<<ListboxSelect>>", self.on_option_select)
+
+        self.option_info_frame = ttk.LabelFrame(self, text="Selected Option")
+        self.option_info_frame.pack(padx=30, pady=(5, 10), fill="x")
+        self.option_values: dict[str, ttk.Label] = {}
+        self._build_info_grid(
+            self.option_info_frame,
+            [
+                ("Contract", "contract"),
+                ("Expiration", "expiration"),
+                ("Type", "type"),
+                ("Strike", "strike"),
+                ("Contract Price", "premium"),
+                ("Likelihood", "likelihood"),
+            ],
+            self.option_values,
+            columns=3,
+        )
+
+        self.greeks_frame = ttk.LabelFrame(self, text="Option Greeks")
+        self.greeks_frame.pack(padx=30, pady=(5, 10), fill="x")
+        self.greeks_values: dict[str, ttk.Label] = {}
+        self._build_info_grid(
+            self.greeks_frame,
+            [
+                ("Delta", "delta"),
+                ("Gamma", "gamma"),
+                ("Theta", "theta"),
+                ("Vega", "vega"),
+                ("Rho", "rho"),
+                ("IV", "iv"),
+            ],
+            self.greeks_values,
+            columns=3,
+        )
+
+        button_row = ttk.Frame(self)
+        button_row.pack(pady=10)
+        ttk.Button(button_row, text="Refresh", command=self.load_market_data).grid(
+            row=0, column=0, padx=10
+        )
+        ttk.Button(
+            button_row,
+            text="Select Stock",
+            command=lambda: controller.show_frame("TickerSelectPage"),
+        ).grid(row=0, column=1, padx=10)
+        ttk.Button(
+            button_row,
+            text="Back to Analysis",
+            command=lambda: controller.show_frame("AnalysisPage"),
+        ).grid(row=0, column=2, padx=10)
+        ttk.Button(
+            button_row,
+            text="Back to Main Menu",
+            command=lambda: controller.show_frame("MainMenu"),
+        ).grid(row=0, column=3, padx=10)
+
+    def _build_info_grid(
+        self,
+        parent: ttk.Frame,
+        rows: list[tuple[str, str]],
+        target: dict[str, ttk.Label],
+        columns: int = 1,
+    ) -> None:
+        for item_index, (label, key) in enumerate(rows):
+            row_index = item_index // columns
+            column_index = (item_index % columns) * 2
+            ttk.Label(parent, text=label).grid(
+                row=row_index, column=column_index, padx=10, pady=4, sticky="w"
+            )
+            value_label = ttk.Label(parent, text="--", foreground="#b00020")
+            value_label.grid(
+                row=row_index, column=column_index + 1, padx=10, pady=4, sticky="w"
+            )
+            target[key] = value_label
+        for index in range(columns * 2):
+            parent.columnconfigure(index, weight=1)
+
+    def _format_float(self, value: float) -> str:
+        decimals = 2 if abs(value) >= 1 else 4
+        multiplier = 10**decimals
+        truncated = math.trunc(value * multiplier) / multiplier
+        return f"{truncated:.{decimals}f}".rstrip("0").rstrip(".")
+
+    def _set_value(self, label: ttk.Label, value: str | int | float | None) -> None:
+        if value in (None, "", "--"):
+            label.config(text="--", foreground="#b00020")
+        else:
+            if isinstance(value, float):
+                text = self._format_float(value)
+            elif isinstance(value, int):
+                text = str(value)
+            else:
+                text = str(value)
+            label.config(text=text, foreground="#0a7a2f")
+
+    def refresh(self) -> None:
+        self.api_client = MassiveApiClient(load_api_key()) if load_api_key() else None
+        self.load_market_data()
+
+    def load_market_data(self) -> None:
+        if not self.api_client:
+            messagebox.showinfo(
+                "Missing key", "Enter or set a Massive API key to load options data."
+            )
+            return
+        ticker = self.controller.state.selected_ticker
+        if not ticker:
+            messagebox.showinfo("Missing ticker", "Select a ticker first.")
+            return
+        strategy = self.controller.state.option_strategy
+        self.strategy_label.config(text=f"Strategy: {strategy}")
+        try:
+            option_records = load_option_records(self.api_client, ticker)
+        except HTTPError as exc:
+            self._show_api_error(exc, "Massive", "Verify your Massive API key.")
+            return
+        except URLError as exc:
+            self._show_error_dialog(
+                "Connection Error",
+                f"Could not reach Massive API endpoint: {exc.reason}",
+            )
+            return
+        self.all_option_records = [
+            {
+                **record,
+                "premium": option_mid_price(record),
+                "likelihood": option_likelihood(record),
+            }
+            for record in option_records
+        ]
+        if strategy == "Naked Call":
+            self.type_var.set("CALL")
+        elif strategy == "Naked Put":
+            self.type_var.set("PUT")
+        else:
+            self.type_var.set("All")
+        self._refresh_option_filters(reset=True)
+
+    def _get_filter_value(self, var: tk.StringVar) -> str | None:
+        value = var.get()
+        return None if value == "All" else value
+
+    def _record_matches_filters(self, record: dict, filters: dict[str, str | None]) -> bool:
+        expiration = record.get("expiration_date")
+        strike = format_strike(record.get("strike_price"))
+        contract_type = normalize_contract_type(record.get("contract_type"))
+        if filters.get("expiration") and filters["expiration"] != expiration:
+            return False
+        if filters.get("strike") and filters["strike"] != strike:
+            return False
+        if filters.get("type") and filters["type"] != contract_type:
+            return False
+        return True
+
+    def _record_matches_constraints(self, record: dict) -> bool:
+        max_loss = parse_float(self.max_loss_var.get())
+        min_likelihood = normalize_likelihood_threshold(self.likelihood_var.get())
+        premium = record.get("premium")
+        likelihood = record.get("likelihood")
+        if max_loss is not None:
+            if not isinstance(premium, (int, float)) or premium > max_loss:
+                return False
+        if min_likelihood is not None:
+            if not isinstance(likelihood, (int, float)) or likelihood < min_likelihood:
+                return False
+        return True
+
+    def _compute_filter_options(
+        self, records: list[dict], current: dict[str, str | None]
+    ) -> dict[str, list[str]]:
+        options: dict[str, set[str]] = {"expiration": set(), "strike": set(), "type": set()}
+        for record in records:
+            expiration = record.get("expiration_date")
+            strike = format_strike(record.get("strike_price"))
+            contract_type = normalize_contract_type(record.get("contract_type"))
+            if self._record_matches_filters(record, {**current, "expiration": None}):
+                if expiration:
+                    options["expiration"].add(expiration)
+            if self._record_matches_filters(record, {**current, "strike": None}):
+                if strike:
+                    options["strike"].add(strike)
+            if self._record_matches_filters(record, {**current, "type": None}):
+                if contract_type:
+                    options["type"].add(contract_type)
         return {
-            "delta": greeks.get("delta"),
-            "gamma": greeks.get("gamma"),
-            "theta": greeks.get("theta"),
-            "vega": greeks.get("vega"),
-            "rho": greeks.get("rho"),
-            "iv": implied_vol,
+            "expiration": sorted(options["expiration"]),
+            "strike": sorted(
+                options["strike"],
+                key=lambda value: float(value) if value.replace(".", "", 1).isdigit() else value,
+            ),
+            "type": sorted(options["type"]),
         }
+
+    def _refresh_option_filters(self, reset: bool = False) -> None:
+        if reset:
+            self.expiration_var.set("All")
+            self.strike_var.set("All")
+            if self.type_var.get() not in ("CALL", "PUT"):
+                self.type_var.set("All")
+        eligible_records = [
+            record for record in self.all_option_records if self._record_matches_constraints(record)
+        ]
+        filters = {
+            "expiration": self._get_filter_value(self.expiration_var),
+            "strike": self._get_filter_value(self.strike_var),
+            "type": self._get_filter_value(self.type_var),
+        }
+        options = self._compute_filter_options(eligible_records, filters)
+        for key, dropdown, var in (
+            ("expiration", self.expiration_dropdown, self.expiration_var),
+            ("strike", self.strike_dropdown, self.strike_var),
+            ("type", self.type_dropdown, self.type_var),
+        ):
+            values = ["All"] + options[key]
+            dropdown["values"] = values
+            if var.get() not in values:
+                var.set("All")
+        self._apply_option_filters(eligible_records)
+
+    def _apply_option_filters(self, eligible_records: list[dict]) -> None:
+        filters = {
+            "expiration": self._get_filter_value(self.expiration_var),
+            "strike": self._get_filter_value(self.strike_var),
+            "type": self._get_filter_value(self.type_var),
+        }
+        self.option_records = [
+            record
+            for record in eligible_records
+            if self._record_matches_filters(record, filters)
+        ]
+        self.options_list.delete(0, tk.END)
+        if not self.option_records:
+            self.options_list.insert(tk.END, "No option contracts returned.")
+            self.option_contract = None
+        else:
+            for contract in self.option_records:
+                likelihood = contract.get("likelihood")
+                likelihood_label = (
+                    f"{likelihood * 100:.0f}%" if isinstance(likelihood, (int, float)) else "--"
+                )
+                premium = contract.get("premium")
+                premium_label = f"{premium:.2f}" if isinstance(premium, (int, float)) else "--"
+                self.options_list.insert(
+                    tk.END,
+                    "{ticker} {expiration} {type} {strike} | Loss {loss} | Likely {likelihood}".format(
+                        ticker=contract.get("ticker", "--"),
+                        expiration=contract.get("expiration_date", "--"),
+                        type=str(contract.get("contract_type", "--")).upper(),
+                        strike=contract.get("strike_price", "--"),
+                        loss=premium_label,
+                        likelihood=likelihood_label,
+                    ),
+                )
+            self.options_list.selection_set(0)
+            self.options_list.see(0)
+            self.option_contract = self.option_records[0]
+        self._sync_option_snapshot()
+        self._sync_greeks()
+
+    def _sync_option_snapshot(self) -> None:
+        contract = self.option_contract or {}
+        self._set_value(self.option_values["contract"], contract.get("ticker"))
+        self._set_value(self.option_values["expiration"], contract.get("expiration_date"))
+        contract_type = normalize_contract_type(contract.get("contract_type"))
+        self._set_value(self.option_values["type"], contract_type)
+        self._set_value(self.option_values["strike"], contract.get("strike_price"))
+        premium = contract.get("premium")
+        self._set_value(self.option_values["premium"], premium)
+        likelihood = contract.get("likelihood")
+        likelihood_label = (
+            f"{likelihood * 100:.1f}%" if isinstance(likelihood, (int, float)) else None
+        )
+        self._set_value(self.option_values["likelihood"], likelihood_label)
+
+    def _sync_greeks(self) -> None:
+        greeks = extract_greeks(self.option_contract or {})
+        self._set_value(self.greeks_values["delta"], greeks.get("delta"))
+        self._set_value(self.greeks_values["gamma"], greeks.get("gamma"))
+        self._set_value(self.greeks_values["theta"], greeks.get("theta"))
+        self._set_value(self.greeks_values["vega"], greeks.get("vega"))
+        self._set_value(self.greeks_values["rho"], greeks.get("rho"))
+        self._set_value(self.greeks_values["iv"], greeks.get("iv"))
+
+    def on_option_select(self, _event: object) -> None:
+        selection = self.options_list.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        if index >= len(self.option_records):
+            return
+        self.option_contract = self.option_records[index]
+        self._sync_option_snapshot()
+        self._sync_greeks()
+
+    def on_filter_change(self, _event: object) -> None:
+        self._refresh_option_filters()
+
+    def _show_api_error(self, exc: HTTPError, service: str, hint: str | None = None) -> None:
+        detail = format_http_error_detail(exc)
+        detail_msg = f"\nDetails: {detail}" if detail else ""
+        hint_msg = f"\n{hint}" if hint else ""
+        self._show_error_dialog(
+            "API Error",
+            f"{service} API returned an error: {exc.code} {exc.reason}.{detail_msg}{hint_msg}",
+        )
+
+    def _show_error_dialog(self, title: str, message: str) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.geometry("620x320")
+        dialog.transient(self)
+
+        dialog.rowconfigure(0, weight=1)
+        dialog.columnconfigure(0, weight=1)
+
+        text_frame = ttk.Frame(dialog)
+        text_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+
+        text_widget = tk.Text(text_frame, wrap="word")
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        text_widget.insert("1.0", message)
+        text_widget.focus_set()
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.grid(row=1, column=0, pady=(0, 10))
+
+        def copy_to_clipboard() -> None:
+            dialog.clipboard_clear()
+            dialog.clipboard_append(text_widget.get("1.0", "end-1c"))
+            dialog.update_idletasks()
+
+        ttk.Button(button_frame, text="Copy", command=copy_to_clipboard).grid(
+            row=0, column=0, padx=5
+        )
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).grid(
+            row=0, column=1, padx=5
+        )
+
+
+class SpreadAnalysisPage(ttk.Frame):
+    def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
+        super().__init__(parent)
+        self.controller = controller
+        self.api_client: MassiveApiClient | None = None
+        self.spread_records: list[dict] = []
+        self.all_spread_records: list[dict] = []
+        self.selected_spread: dict | None = None
+
+        header = ttk.Label(self, text="Spread Analysis", font=("Arial", 18, "bold"))
+        header.pack(pady=10)
+
+        self.strategy_label = ttk.Label(self, text="Strategy: --", font=("Arial", 12))
+        self.strategy_label.pack(pady=(0, 10))
+
+        self.options_frame = ttk.LabelFrame(self, text="Spread Candidates")
+        self.options_frame.pack(padx=30, pady=10, fill="both", expand=True)
+        self.options_frame.columnconfigure(0, weight=1)
+        self.options_frame.columnconfigure(1, weight=0)
+        self.options_frame.rowconfigure(0, weight=1)
+
+        list_frame = ttk.Frame(self.options_frame)
+        list_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+
+        filter_frame = ttk.Frame(self.options_frame)
+        filter_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=8)
+        filter_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(filter_frame, text="Max Loss / Spread Price").grid(
+            row=0, column=0, padx=5, pady=2, sticky="w"
+        )
+        self.max_loss_var = tk.StringVar()
+        self.max_loss_entry = ttk.Entry(filter_frame, textvariable=self.max_loss_var, width=12)
+        self.max_loss_entry.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
+        self.max_loss_entry.bind("<KeyRelease>", self.on_filter_change)
+
+        ttk.Label(filter_frame, text="Min Likelihood (%)").grid(
+            row=1, column=0, padx=5, pady=2, sticky="w"
+        )
+        self.likelihood_var = tk.StringVar()
+        self.likelihood_entry = ttk.Entry(
+            filter_frame, textvariable=self.likelihood_var, width=12
+        )
+        self.likelihood_entry.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
+        self.likelihood_entry.bind("<KeyRelease>", self.on_filter_change)
+
+        ttk.Label(filter_frame, text="Expiration").grid(
+            row=2, column=0, padx=5, pady=2, sticky="w"
+        )
+        self.expiration_var = tk.StringVar(value="All")
+        self.expiration_dropdown = ttk.Combobox(
+            filter_frame, textvariable=self.expiration_var, state="readonly", width=18
+        )
+        self.expiration_dropdown.grid(row=2, column=1, padx=5, pady=2, sticky="ew")
+        self.expiration_dropdown.bind("<<ComboboxSelected>>", self.on_filter_change)
+
+        ttk.Label(filter_frame, text="Strike").grid(
+            row=3, column=0, padx=5, pady=2, sticky="w"
+        )
+        self.strike_var = tk.StringVar(value="All")
+        self.strike_dropdown = ttk.Combobox(
+            filter_frame, textvariable=self.strike_var, state="readonly", width=12
+        )
+        self.strike_dropdown.grid(row=3, column=1, padx=5, pady=2, sticky="ew")
+        self.strike_dropdown.bind("<<ComboboxSelected>>", self.on_filter_change)
+
+        ttk.Label(filter_frame, text="Type").grid(row=4, column=0, padx=5, pady=2, sticky="w")
+        self.type_var = tk.StringVar(value="All")
+        self.type_dropdown = ttk.Combobox(
+            filter_frame, textvariable=self.type_var, state="readonly", width=10
+        )
+        self.type_dropdown.grid(row=4, column=1, padx=5, pady=2, sticky="ew")
+        self.type_dropdown.bind("<<ComboboxSelected>>", self.on_filter_change)
+
+        self.options_list = tk.Listbox(list_frame, height=12, width=48)
+        options_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.options_list.yview)
+        self.options_list.configure(yscrollcommand=options_scroll.set)
+        self.options_list.grid(row=0, column=0, sticky="nsew")
+        options_scroll.grid(row=0, column=1, sticky="ns")
+        self.options_list.bind("<<ListboxSelect>>", self.on_spread_select)
+
+        self.spread_info_frame = ttk.LabelFrame(self, text="Selected Spread")
+        self.spread_info_frame.pack(padx=30, pady=(5, 10), fill="x")
+        self.spread_values: dict[str, ttk.Label] = {}
+        self._build_info_grid(
+            self.spread_info_frame,
+            [
+                ("Strategy", "strategy"),
+                ("Expiration(s)", "expiration"),
+                ("Type", "type"),
+                ("Strikes", "strikes"),
+                ("Spread Price", "premium"),
+                ("Likelihood", "likelihood"),
+            ],
+            self.spread_values,
+            columns=3,
+        )
+
+        self.legs_frame = ttk.LabelFrame(self, text="Leg Details")
+        self.legs_frame.pack(padx=30, pady=(5, 10), fill="x")
+        self.leg_values: dict[str, ttk.Label] = {}
+        self._build_info_grid(
+            self.legs_frame,
+            [
+                ("Long Leg", "long_leg"),
+                ("Short Leg", "short_leg"),
+            ],
+            self.leg_values,
+            columns=1,
+        )
+
+        self.greeks_frame = ttk.LabelFrame(self, text="Spread Greeks")
+        self.greeks_frame.pack(padx=30, pady=(5, 10), fill="x")
+        self.greeks_values: dict[str, ttk.Label] = {}
+        self._build_info_grid(
+            self.greeks_frame,
+            [
+                ("Delta", "delta"),
+                ("Gamma", "gamma"),
+                ("Theta", "theta"),
+                ("Vega", "vega"),
+                ("Rho", "rho"),
+                ("IV", "iv"),
+            ],
+            self.greeks_values,
+            columns=3,
+        )
+
+        button_row = ttk.Frame(self)
+        button_row.pack(pady=10)
+        ttk.Button(button_row, text="Refresh", command=self.load_market_data).grid(
+            row=0, column=0, padx=10
+        )
+        ttk.Button(
+            button_row,
+            text="Select Stock",
+            command=lambda: controller.show_frame("TickerSelectPage"),
+        ).grid(row=0, column=1, padx=10)
+        ttk.Button(
+            button_row,
+            text="Back to Analysis",
+            command=lambda: controller.show_frame("AnalysisPage"),
+        ).grid(row=0, column=2, padx=10)
+        ttk.Button(
+            button_row,
+            text="Back to Main Menu",
+            command=lambda: controller.show_frame("MainMenu"),
+        ).grid(row=0, column=3, padx=10)
+
+    def _build_info_grid(
+        self,
+        parent: ttk.Frame,
+        rows: list[tuple[str, str]],
+        target: dict[str, ttk.Label],
+        columns: int = 1,
+    ) -> None:
+        for item_index, (label, key) in enumerate(rows):
+            row_index = item_index // columns
+            column_index = (item_index % columns) * 2
+            ttk.Label(parent, text=label).grid(
+                row=row_index, column=column_index, padx=10, pady=4, sticky="w"
+            )
+            value_label = ttk.Label(parent, text="--", foreground="#b00020")
+            value_label.grid(
+                row=row_index, column=column_index + 1, padx=10, pady=4, sticky="w"
+            )
+            target[key] = value_label
+        for index in range(columns * 2):
+            parent.columnconfigure(index, weight=1)
+
+    def _format_float(self, value: float) -> str:
+        decimals = 2 if abs(value) >= 1 else 4
+        multiplier = 10**decimals
+        truncated = math.trunc(value * multiplier) / multiplier
+        return f"{truncated:.{decimals}f}".rstrip("0").rstrip(".")
+
+    def _set_value(self, label: ttk.Label, value: str | int | float | None) -> None:
+        if value in (None, "", "--"):
+            label.config(text="--", foreground="#b00020")
+        else:
+            if isinstance(value, float):
+                text = self._format_float(value)
+            elif isinstance(value, int):
+                text = str(value)
+            else:
+                text = str(value)
+            label.config(text=text, foreground="#0a7a2f")
+
+    def refresh(self) -> None:
+        self.api_client = MassiveApiClient(load_api_key()) if load_api_key() else None
+        self.load_market_data()
+
+    def load_market_data(self) -> None:
+        if not self.api_client:
+            messagebox.showinfo(
+                "Missing key", "Enter or set a Massive API key to load options data."
+            )
+            return
+        ticker = self.controller.state.selected_ticker
+        if not ticker:
+            messagebox.showinfo("Missing ticker", "Select a ticker first.")
+            return
+        strategy = self.controller.state.option_strategy
+        self.strategy_label.config(text=f"Strategy: {strategy}")
+        try:
+            option_records = load_option_records(self.api_client, ticker)
+        except HTTPError as exc:
+            self._show_api_error(exc, "Massive", "Verify your Massive API key.")
+            return
+        except URLError as exc:
+            self._show_error_dialog(
+                "Connection Error",
+                f"Could not reach Massive API endpoint: {exc.reason}",
+            )
+            return
+        self.all_spread_records = self._build_spread_records(option_records, strategy)
+        self._refresh_spread_filters(reset=True)
+
+    def _build_spread_records(self, option_records: list[dict], strategy: str) -> list[dict]:
+        spreads: list[dict] = []
+        if strategy == "Calendar Spread":
+            grouped: dict[tuple[str | None, str | None], list[dict]] = {}
+            for record in option_records:
+                key = (normalize_contract_type(record.get("contract_type")), record.get("strike_price"))
+                grouped.setdefault(key, []).append(record)
+            for (contract_type, strike), records in grouped.items():
+                records_sorted = sorted(
+                    records,
+                    key=lambda r: r.get("expiration_date") or "",
+                )
+                for short_leg, long_leg in zip(records_sorted, records_sorted[1:]):
+                    premium_long = option_mid_price(long_leg)
+                    premium_short = option_mid_price(short_leg)
+                    net_premium = None
+                    if isinstance(premium_long, (int, float)) or isinstance(
+                        premium_short, (int, float)
+                    ):
+                        net_premium = (premium_long or 0) - (premium_short or 0)
+                        net_premium = abs(net_premium)
+                    likelihood_values = [
+                        option_likelihood(long_leg),
+                        option_likelihood(short_leg),
+                    ]
+                    likelihoods = [
+                        value for value in likelihood_values if isinstance(value, (int, float))
+                    ]
+                    likelihood = sum(likelihoods) / len(likelihoods) if likelihoods else None
+                    expiration_label = "{short}→{long}".format(
+                        short=short_leg.get("expiration_date", "--"),
+                        long=long_leg.get("expiration_date", "--"),
+                    )
+                    strike_label = format_strike(strike)
+                    spreads.append(
+                        {
+                            "strategy": strategy,
+                            "ticker": short_leg.get("ticker") or long_leg.get("ticker"),
+                            "expiration_label": expiration_label,
+                            "contract_type": contract_type,
+                            "strike_pair": strike_label,
+                            "long_leg": long_leg,
+                            "short_leg": short_leg,
+                            "net_premium": net_premium,
+                            "likelihood": likelihood,
+                            "greeks": combine_greeks(long_leg, short_leg),
+                        }
+                    )
+        else:
+            grouped: dict[tuple[str | None, str | None], list[dict]] = {}
+            for record in option_records:
+                key = (
+                    normalize_contract_type(record.get("contract_type")),
+                    record.get("expiration_date"),
+                )
+                grouped.setdefault(key, []).append(record)
+            for (contract_type, expiration), records in grouped.items():
+                records_sorted = sorted(
+                    records,
+                    key=lambda r: float(r.get("strike_price") or 0),
+                )
+                for lower, higher in zip(records_sorted, records_sorted[1:]):
+                    if contract_type == "PUT":
+                        long_leg = higher
+                        short_leg = lower
+                    else:
+                        long_leg = lower
+                        short_leg = higher
+                    premium_long = option_mid_price(long_leg)
+                    premium_short = option_mid_price(short_leg)
+                    net_premium = None
+                    if isinstance(premium_long, (int, float)) or isinstance(
+                        premium_short, (int, float)
+                    ):
+                        net_premium = (premium_long or 0) - (premium_short or 0)
+                        net_premium = abs(net_premium)
+                    likelihood_values = [
+                        option_likelihood(long_leg),
+                        option_likelihood(short_leg),
+                    ]
+                    likelihoods = [
+                        value for value in likelihood_values if isinstance(value, (int, float))
+                    ]
+                    likelihood = sum(likelihoods) / len(likelihoods) if likelihoods else None
+                    strike_pair = "{low}/{high}".format(
+                        low=format_strike(lower.get("strike_price")),
+                        high=format_strike(higher.get("strike_price")),
+                    )
+                    spreads.append(
+                        {
+                            "strategy": strategy,
+                            "ticker": lower.get("ticker") or higher.get("ticker"),
+                            "expiration_label": expiration,
+                            "contract_type": contract_type,
+                            "strike_pair": strike_pair,
+                            "long_leg": long_leg,
+                            "short_leg": short_leg,
+                            "net_premium": net_premium,
+                            "likelihood": likelihood,
+                            "greeks": combine_greeks(long_leg, short_leg),
+                        }
+                    )
+        return spreads
+
+    def _get_filter_value(self, var: tk.StringVar) -> str | None:
+        value = var.get()
+        return None if value == "All" else value
+
+    def _record_matches_filters(self, record: dict, filters: dict[str, str | None]) -> bool:
+        expiration = record.get("expiration_label")
+        strike = record.get("strike_pair")
+        contract_type = normalize_contract_type(record.get("contract_type"))
+        if filters.get("expiration") and filters["expiration"] != expiration:
+            return False
+        if filters.get("strike") and filters["strike"] != strike:
+            return False
+        if filters.get("type") and filters["type"] != contract_type:
+            return False
+        return True
+
+    def _record_matches_constraints(self, record: dict) -> bool:
+        max_loss = parse_float(self.max_loss_var.get())
+        min_likelihood = normalize_likelihood_threshold(self.likelihood_var.get())
+        premium = record.get("net_premium")
+        likelihood = record.get("likelihood")
+        if max_loss is not None:
+            if not isinstance(premium, (int, float)) or premium > max_loss:
+                return False
+        if min_likelihood is not None:
+            if not isinstance(likelihood, (int, float)) or likelihood < min_likelihood:
+                return False
+        return True
+
+    def _compute_filter_options(
+        self, records: list[dict], current: dict[str, str | None]
+    ) -> dict[str, list[str]]:
+        options: dict[str, set[str]] = {"expiration": set(), "strike": set(), "type": set()}
+        for record in records:
+            expiration = record.get("expiration_label")
+            strike = record.get("strike_pair")
+            contract_type = normalize_contract_type(record.get("contract_type"))
+            if self._record_matches_filters(record, {**current, "expiration": None}):
+                if expiration:
+                    options["expiration"].add(expiration)
+            if self._record_matches_filters(record, {**current, "strike": None}):
+                if strike:
+                    options["strike"].add(strike)
+            if self._record_matches_filters(record, {**current, "type": None}):
+                if contract_type:
+                    options["type"].add(contract_type)
+        return {
+            "expiration": sorted(options["expiration"]),
+            "strike": sorted(options["strike"]),
+            "type": sorted(options["type"]),
+        }
+
+    def _refresh_spread_filters(self, reset: bool = False) -> None:
+        if reset:
+            self.expiration_var.set("All")
+            self.strike_var.set("All")
+            self.type_var.set("All")
+        eligible_records = [
+            record for record in self.all_spread_records if self._record_matches_constraints(record)
+        ]
+        filters = {
+            "expiration": self._get_filter_value(self.expiration_var),
+            "strike": self._get_filter_value(self.strike_var),
+            "type": self._get_filter_value(self.type_var),
+        }
+        options = self._compute_filter_options(eligible_records, filters)
+        for key, dropdown, var in (
+            ("expiration", self.expiration_dropdown, self.expiration_var),
+            ("strike", self.strike_dropdown, self.strike_var),
+            ("type", self.type_dropdown, self.type_var),
+        ):
+            values = ["All"] + options[key]
+            dropdown["values"] = values
+            if var.get() not in values:
+                var.set("All")
+        self._apply_spread_filters(eligible_records)
+
+    def _apply_spread_filters(self, eligible_records: list[dict]) -> None:
+        filters = {
+            "expiration": self._get_filter_value(self.expiration_var),
+            "strike": self._get_filter_value(self.strike_var),
+            "type": self._get_filter_value(self.type_var),
+        }
+        self.spread_records = [
+            record
+            for record in eligible_records
+            if self._record_matches_filters(record, filters)
+        ]
+        self.options_list.delete(0, tk.END)
+        if not self.spread_records:
+            self.options_list.insert(tk.END, "No spreads returned.")
+            self.selected_spread = None
+        else:
+            for spread in self.spread_records:
+                likelihood = spread.get("likelihood")
+                likelihood_label = (
+                    f"{likelihood * 100:.0f}%" if isinstance(likelihood, (int, float)) else "--"
+                )
+                premium = spread.get("net_premium")
+                premium_label = f"{premium:.2f}" if isinstance(premium, (int, float)) else "--"
+                self.options_list.insert(
+                    tk.END,
+                    "{ticker} {expiration} {type} {strike} | Loss {loss} | Likely {likelihood}".format(
+                        ticker=spread.get("ticker", "--"),
+                        expiration=spread.get("expiration_label", "--"),
+                        type=str(spread.get("contract_type", "--")).upper(),
+                        strike=spread.get("strike_pair", "--"),
+                        loss=premium_label,
+                        likelihood=likelihood_label,
+                    ),
+                )
+            self.options_list.selection_set(0)
+            self.options_list.see(0)
+            self.selected_spread = self.spread_records[0]
+        self._sync_spread_snapshot()
+
+    def _sync_spread_snapshot(self) -> None:
+        spread = self.selected_spread or {}
+        self._set_value(self.spread_values["strategy"], spread.get("strategy"))
+        self._set_value(self.spread_values["expiration"], spread.get("expiration_label"))
+        contract_type = normalize_contract_type(spread.get("contract_type"))
+        self._set_value(self.spread_values["type"], contract_type)
+        self._set_value(self.spread_values["strikes"], spread.get("strike_pair"))
+        premium = spread.get("net_premium")
+        self._set_value(self.spread_values["premium"], premium)
+        likelihood = spread.get("likelihood")
+        likelihood_label = (
+            f"{likelihood * 100:.1f}%" if isinstance(likelihood, (int, float)) else None
+        )
+        self._set_value(self.spread_values["likelihood"], likelihood_label)
+        long_leg = spread.get("long_leg") or {}
+        short_leg = spread.get("short_leg") or {}
+        long_label = "{ticker} {exp} {type} {strike}".format(
+            ticker=long_leg.get("ticker", "--"),
+            exp=long_leg.get("expiration_date", "--"),
+            type=str(long_leg.get("contract_type", "--")).upper(),
+            strike=long_leg.get("strike_price", "--"),
+        )
+        short_label = "{ticker} {exp} {type} {strike}".format(
+            ticker=short_leg.get("ticker", "--"),
+            exp=short_leg.get("expiration_date", "--"),
+            type=str(short_leg.get("contract_type", "--")).upper(),
+            strike=short_leg.get("strike_price", "--"),
+        )
+        self._set_value(self.leg_values["long_leg"], long_label)
+        self._set_value(self.leg_values["short_leg"], short_label)
+        greeks = spread.get("greeks") or {}
+        self._set_value(self.greeks_values["delta"], greeks.get("delta"))
+        self._set_value(self.greeks_values["gamma"], greeks.get("gamma"))
+        self._set_value(self.greeks_values["theta"], greeks.get("theta"))
+        self._set_value(self.greeks_values["vega"], greeks.get("vega"))
+        self._set_value(self.greeks_values["rho"], greeks.get("rho"))
+        self._set_value(self.greeks_values["iv"], greeks.get("iv"))
+
+    def on_spread_select(self, _event: object) -> None:
+        selection = self.options_list.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        if index >= len(self.spread_records):
+            return
+        self.selected_spread = self.spread_records[index]
+        self._sync_spread_snapshot()
+
+    def on_filter_change(self, _event: object) -> None:
+        self._refresh_spread_filters()
+
+    def _show_api_error(self, exc: HTTPError, service: str, hint: str | None = None) -> None:
+        detail = format_http_error_detail(exc)
+        detail_msg = f"\nDetails: {detail}" if detail else ""
+        hint_msg = f"\n{hint}" if hint else ""
+        self._show_error_dialog(
+            "API Error",
+            f"{service} API returned an error: {exc.code} {exc.reason}.{detail_msg}{hint_msg}",
+        )
+
+    def _show_error_dialog(self, title: str, message: str) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.geometry("620x320")
+        dialog.transient(self)
+
+        dialog.rowconfigure(0, weight=1)
+        dialog.columnconfigure(0, weight=1)
+
+        text_frame = ttk.Frame(dialog)
+        text_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+
+        text_widget = tk.Text(text_frame, wrap="word")
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        text_widget.insert("1.0", message)
+        text_widget.focus_set()
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.grid(row=1, column=0, pady=(0, 10))
+
+        def copy_to_clipboard() -> None:
+            dialog.clipboard_clear()
+            dialog.clipboard_append(text_widget.get("1.0", "end-1c"))
+            dialog.update_idletasks()
+
+        ttk.Button(button_frame, text="Copy", command=copy_to_clipboard).grid(
+            row=0, column=0, padx=5
+        )
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).grid(
+            row=0, column=1, padx=5
+        )
 
 if __name__ == "__main__":
     app = StoptionsApp()
