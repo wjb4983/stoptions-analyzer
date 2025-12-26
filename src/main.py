@@ -597,29 +597,9 @@ class AnalysisPage(ttk.Frame):
             columns=3,
         )
 
-        selector_frame = ttk.Frame(self.content_frame)
-        selector_frame.pack(pady=5)
-        selector_frame.columnconfigure(1, weight=1)
-
-        ttk.Label(selector_frame, text="Analysis Mode:").grid(row=0, column=0, padx=5, sticky="w")
-        self.analysis_mode_var = tk.StringVar(value=self.controller.state.analysis_mode)
-        self.analysis_mode_dropdown = ttk.Combobox(
-            selector_frame,
-            textvariable=self.analysis_mode_var,
-            values=["Stock Analysis", "Option Analysis"],
-            state="readonly",
-            width=20,
-        )
-        self.analysis_mode_dropdown.grid(row=0, column=1, padx=5, sticky="w")
-        self.analysis_mode_dropdown.bind("<<ComboboxSelected>>", self.on_analysis_mode_change)
-
-        self.strategy_frame = ttk.Frame(self.content_frame)
-        self.strategy_frame.pack(pady=5)
-
-        ttk.Label(self.strategy_frame, text="Option Strategy:").grid(row=0, column=0, padx=5)
         self.strategy_var = tk.StringVar(value=self.controller.state.option_strategy)
         self.strategy_dropdown = ttk.Combobox(
-            self.strategy_frame,
+            filter_frame,
             textvariable=self.strategy_var,
             values=[
                 "Naked Call",
@@ -628,10 +608,14 @@ class AnalysisPage(ttk.Frame):
                 "Calendar Spread",
             ],
             state="readonly",
-            width=25,
+            width=20,
         )
-        self.strategy_dropdown.grid(row=0, column=1, padx=5)
         self.strategy_dropdown.bind("<<ComboboxSelected>>", self.on_strategy_change)
+
+        ttk.Label(filter_frame, text="Option Strategy:").grid(
+            row=3, column=0, padx=5, pady=(8, 2), sticky="w"
+        )
+        self.strategy_dropdown.grid(row=3, column=1, padx=5, pady=(8, 2), sticky="ew")
 
         button_row = ttk.Frame(self.content_frame)
         button_row.pack(pady=10)
@@ -652,6 +636,17 @@ class AnalysisPage(ttk.Frame):
             text="Back to Main Menu",
             command=lambda: controller.show_frame("MainMenu"),
         ).grid(row=0, column=3, padx=10)
+        ttk.Label(button_row, text="Analysis Mode:").grid(row=0, column=4, padx=(20, 5))
+        self.analysis_mode_var = tk.StringVar(value=self.controller.state.analysis_mode)
+        self.analysis_mode_dropdown = ttk.Combobox(
+            button_row,
+            textvariable=self.analysis_mode_var,
+            values=["Stock Analysis", "Option Analysis"],
+            state="readonly",
+            width=20,
+        )
+        self.analysis_mode_dropdown.grid(row=0, column=5, padx=5)
+        self.analysis_mode_dropdown.bind("<<ComboboxSelected>>", self.on_analysis_mode_change)
 
     def _snap_horizon(self, value: str) -> None:
         snapped = int(round(float(value)))
@@ -941,7 +936,6 @@ class AnalysisPage(ttk.Frame):
             self.option_info_frame.pack_forget()
             self.options_frame.pack_forget()
             self.greeks_frame.pack_forget()
-            self.strategy_frame.pack_forget()
         else:
             if not self.option_info_frame.winfo_ismapped():
                 self.option_info_frame.pack(padx=20, pady=(5, 15), fill="x")
@@ -949,8 +943,6 @@ class AnalysisPage(ttk.Frame):
                 self.options_frame.pack(padx=20, pady=(5, 15), fill="x")
             if not self.greeks_frame.winfo_ismapped():
                 self.greeks_frame.pack(padx=20, pady=(5, 15), fill="x")
-            if not self.strategy_frame.winfo_ismapped():
-                self.strategy_frame.pack(pady=5)
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
     def _normalize_contract_type(self, value: str | None) -> str | None:
@@ -1065,7 +1057,8 @@ class AnalysisPage(ttk.Frame):
         self._sync_greeks()
 
     def refresh(self) -> None:
-        self.analysis_mode_var.set(self.controller.state.analysis_mode)
+        self.controller.state.analysis_mode = "Option Analysis"
+        self.analysis_mode_var.set("Option Analysis")
         self.strategy_var.set(self.controller.state.option_strategy)
         api_key = load_api_key()
         self.api_client = MassiveApiClient(api_key) if api_key else None
