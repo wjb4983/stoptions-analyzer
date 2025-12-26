@@ -691,7 +691,7 @@ class AnalysisPage(ttk.Frame):
         ttk.Label(slider_frame, text="Time Horizon").grid(
             row=0, column=0, columnspan=len(HORIZON_CONFIGS), sticky="w"
         )
-        self.horizon_var = tk.IntVar(value=0)
+        self.horizon_var = tk.IntVar(value=1)
         self.horizon_slider = tk.Scale(
             slider_frame,
             from_=0,
