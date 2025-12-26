@@ -10,6 +10,7 @@ from tkinter import ttk, messagebox
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
+from zoneinfo import ZoneInfo
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
@@ -168,8 +169,14 @@ class MassiveApiClient:
         return normalized
 
     def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
-        end_date = date.today()
-        start_date = end_date - timedelta(days=days_back)
+        if days_back == 1:
+            now = datetime.now(ZoneInfo("America/New_York"))
+            market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+            end_date = (now - timedelta(days=1)).date() if now < market_open else now.date()
+            start_date = end_date
+        else:
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days_back)
         data = self._request(
             f"/v2/aggs/ticker/{ticker}/range/{minutes_per_bar}/minute/{start_date}/{end_date}",
             {"adjusted": "true", "sort": "asc", "limit": "5000"},
@@ -431,26 +438,6 @@ class AnalysisPage(ttk.Frame):
         self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
         self.scroll_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
-        ttk.Label(self.content_frame, text="Analysis", font=("Arial", 20, "bold")).pack(
-            pady=10
-        )
-
-        self.selected_label = ttk.Label(self.content_frame, text="Selected Ticker: None")
-        self.selected_label.pack(pady=5)
-
-        integration_note = ttk.Label(
-            self.content_frame,
-            text=(
-                "Massive provides both stock/aggregate data and options data (API key)."
-            ),
-            foreground="#555",
-        )
-        integration_note.pack(pady=5)
-
-        ttk.Button(self.content_frame, text="Load Data", command=self.load_market_data).pack(
-            pady=10
-        )
-
         stock_frame = ttk.LabelFrame(self.content_frame, text="Stock Analysis")
         stock_frame.pack(pady=10, fill="both", expand=True, padx=40)
 
@@ -652,20 +639,30 @@ class AnalysisPage(ttk.Frame):
             row=0, column=0, padx=10
         )
         ttk.Button(
+            button_row, text="Load Data", command=self.load_market_data
+        ).grid(row=0, column=1, padx=10)
+        ttk.Button(
             button_row,
             text="Select Stock",
             command=lambda: controller.show_frame("TickerSelectPage"),
-        ).grid(row=0, column=1, padx=10)
+        ).grid(row=0, column=2, padx=10)
         ttk.Button(
             button_row,
             text="Back to Main Menu",
             command=lambda: controller.show_frame("MainMenu"),
-        ).grid(row=0, column=2, padx=10)
+        ).grid(row=0, column=3, padx=10)
 
     def _snap_horizon(self, value: str) -> None:
         snapped = int(round(float(value)))
         self.horizon_var.set(snapped)
         self.horizon_slider.set(snapped)
+
+    def _effective_market_date(self) -> date:
+        now = datetime.now(ZoneInfo("America/New_York"))
+        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        if now < market_open:
+            return (now - timedelta(days=1)).date()
+        return now.date()
 
     def _build_info_grid(
         self,
@@ -1067,14 +1064,13 @@ class AnalysisPage(ttk.Frame):
         self._sync_greeks()
 
     def refresh(self) -> None:
-        ticker = self.controller.state.selected_ticker or "None"
-        self.selected_label.config(text=f"Selected Ticker: {ticker}")
         self.analysis_mode_var.set(self.controller.state.analysis_mode)
         self.strategy_var.set(self.controller.state.option_strategy)
         api_key = load_api_key()
         self.api_client = MassiveApiClient(api_key) if api_key else None
         self._toggle_info_panels()
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
+        self.after(0, self.load_market_data)
 
     def on_analysis_mode_change(self, _event: object) -> None:
         self.controller.state.analysis_mode = self.analysis_mode_var.get()
@@ -1101,7 +1097,7 @@ class AnalysisPage(ttk.Frame):
         _label, days_back, minutes_per_bar, _cadence_label = HORIZON_CONFIGS[horizon_index]
         cache_payload = load_cached_market_data(ticker) or {}
         cache_date = cache_payload.get("last_updated")
-        today_label = date.today().isoformat()
+        today_label = self._effective_market_date().isoformat()
         aggregates_map = cache_payload.get("aggregates", {})
         cached_stock = cache_payload.get("stock")
         cached_options = cache_payload.get("options")
