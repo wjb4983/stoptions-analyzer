@@ -267,7 +267,7 @@ class AlpacaApiClient:
         return bars
 
     def fetch_option_contracts(self, ticker: str, limit: int = 1000) -> list[dict]:
-        request = OptionChainRequest(underlying_symbols=[ticker], limit=limit)
+        request = OptionChainRequest(underlying_symbol=ticker, limit=limit)
         response = self.option_client.get_option_chain(request)
         data = getattr(response, "data", response)
         if isinstance(data, dict):
