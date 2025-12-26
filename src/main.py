@@ -508,7 +508,7 @@ class AnalysisPage(ttk.Frame):
                 ("52 Week Range", "range_52w"),
             ],
             self.stock_values,
-            columns=2,
+            columns=4,
         )
 
         self.option_info_frame = ttk.LabelFrame(stock_frame, text="Option Snapshot")
@@ -523,6 +523,7 @@ class AnalysisPage(ttk.Frame):
                 ("Strike", "strike"),
             ],
             self.option_values,
+            columns=4,
         )
 
         self.options_frame = ttk.LabelFrame(stock_frame, text="Option Contracts")
