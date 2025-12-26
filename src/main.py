@@ -746,6 +746,7 @@ class AnalysisPage(ttk.Frame):
                 ("Expiration", "expiration"),
                 ("Type", "type"),
                 ("Strike", "strike"),
+                ("Option Price", "price"),
             ],
             self.option_values,
             columns=4,
@@ -1117,6 +1118,7 @@ class AnalysisPage(ttk.Frame):
         display_type = contract_type.upper() if contract_type else None
         self._set_value(self.option_values["type"], display_type)
         self._set_value(self.option_values["strike"], contract.get("strike_price"))
+        self._set_value(self.option_values["price"], option_mid_price(contract))
 
     def _toggle_info_panels(self) -> None:
         is_stock = self.analysis_mode_var.get() == "Stock Analysis"
@@ -1418,7 +1420,9 @@ class CallPutAnalysisPage(ttk.Frame):
         filter_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=8)
         filter_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(filter_frame, text="Max Loss").grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        ttk.Label(filter_frame, text="Max Loss / Contract Price").grid(
+            row=0, column=0, padx=5, pady=2, sticky="w"
+        )
         self.max_loss_var = tk.StringVar()
         self.max_loss_entry = ttk.Entry(filter_frame, textvariable=self.max_loss_var, width=12)
         self.max_loss_entry.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
@@ -1479,7 +1483,7 @@ class CallPutAnalysisPage(ttk.Frame):
                 ("Expiration", "expiration"),
                 ("Type", "type"),
                 ("Strike", "strike"),
-                ("Max Loss", "premium"),
+                ("Contract Price", "premium"),
                 ("Likelihood", "likelihood"),
             ],
             self.option_values,
@@ -1842,7 +1846,9 @@ class SpreadAnalysisPage(ttk.Frame):
         filter_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=8)
         filter_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(filter_frame, text="Max Loss").grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        ttk.Label(filter_frame, text="Max Loss / Spread Price").grid(
+            row=0, column=0, padx=5, pady=2, sticky="w"
+        )
         self.max_loss_var = tk.StringVar()
         self.max_loss_entry = ttk.Entry(filter_frame, textvariable=self.max_loss_var, width=12)
         self.max_loss_entry.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
@@ -1903,7 +1909,7 @@ class SpreadAnalysisPage(ttk.Frame):
                 ("Expiration(s)", "expiration"),
                 ("Type", "type"),
                 ("Strikes", "strikes"),
-                ("Max Loss", "premium"),
+                ("Spread Price", "premium"),
                 ("Likelihood", "likelihood"),
             ],
             self.spread_values,
