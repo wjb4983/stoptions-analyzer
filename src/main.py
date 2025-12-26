@@ -8,20 +8,12 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
-from alpaca.data.enums import OptionsFeed
-from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
-from alpaca.data.requests import OptionChainRequest, OptionSnapshotRequest, StockBarsRequest
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-from alpaca.common.exceptions import APIError as AlpacaAPIError
-
+from urllib.request import urlopen
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
-ALPACA_CREDENTIALS_PATH = CONFIG_DIR / "alpaca_credentials.json"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://data.alpaca.markets")
 HORIZON_CONFIGS = [
     ("Day", 1, 10, "10m"),
     ("3 Day", 3, 30, "30m"),
@@ -50,31 +42,6 @@ def save_api_key(key: str) -> None:
     API_KEY_PATH.write_text(key.strip())
     try:
         API_KEY_PATH.chmod(0o600)
-    except OSError:
-        pass
-
-
-def load_alpaca_credentials() -> tuple[str, str]:
-    env_key = os.getenv("ALPACA_API_KEY", "").strip()
-    env_secret = os.getenv("ALPACA_API_SECRET", "").strip()
-    if env_key and env_secret:
-        return env_key, env_secret
-    if ALPACA_CREDENTIALS_PATH.exists():
-        try:
-            payload = json.loads(ALPACA_CREDENTIALS_PATH.read_text())
-        except json.JSONDecodeError:
-            return "", ""
-        return payload.get("key", "").strip(), payload.get("secret", "").strip()
-    return "", ""
-
-
-def save_alpaca_credentials(key: str, secret: str) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    ALPACA_CREDENTIALS_PATH.write_text(
-        json.dumps({"key": key.strip(), "secret": secret.strip()}, indent=2)
-    )
-    try:
-        ALPACA_CREDENTIALS_PATH.chmod(0o600)
     except OSError:
         pass
 
@@ -166,9 +133,18 @@ class MassiveApiClient:
         for snapshot in snapshots:
             details = snapshot.get("details", {}) or {}
             greeks = snapshot.get("greeks", {}) or {}
+            day = snapshot.get("day", {}) or {}
+            last_trade = snapshot.get("last_trade", {}) or {}
+            last_quote = snapshot.get("last_quote", {}) or {}
             implied_vol = snapshot.get("implied_volatility")
             if implied_vol is not None and "iv" not in greeks:
                 greeks = {**greeks, "iv": implied_vol}
+            volume = snapshot.get("volume")
+            if volume is None:
+                volume = day.get("volume") or day.get("v")
+            open_interest = snapshot.get("open_interest")
+            if open_interest is None:
+                open_interest = details.get("open_interest")
             normalized.append(
                 {
                     "ticker": details.get("ticker") or snapshot.get("ticker"),
@@ -176,6 +152,16 @@ class MassiveApiClient:
                     "contract_type": details.get("contract_type"),
                     "strike_price": details.get("strike_price"),
                     "greeks": greeks,
+                    "implied_volatility": implied_vol,
+                    "volume": volume,
+                    "open_interest": open_interest,
+                    "bid": last_quote.get("bid")
+                    or last_quote.get("bid_price")
+                    or last_quote.get("bp"),
+                    "ask": last_quote.get("ask")
+                    or last_quote.get("ask_price")
+                    or last_quote.get("ap"),
+                    "last": last_trade.get("price") or last_trade.get("p"),
                 }
             )
         return normalized
@@ -188,192 +174,6 @@ class MassiveApiClient:
             {"adjusted": "true", "sort": "asc", "limit": "5000"},
         )
         return data.get("results", [])
-
-
-class AlpacaApiClient:
-    def __init__(self, api_key: str, api_secret: str, base_url: str = ALPACA_BASE_URL) -> None:
-        self.api_key = api_key.strip()
-        self.api_secret = api_secret.strip()
-        self.base_url = base_url.rstrip("/")
-        self.stock_client = StockHistoricalDataClient(self.api_key, self.api_secret)
-        self.option_client = OptionHistoricalDataClient(self.api_key, self.api_secret)
-        self.options_feed = self._resolve_options_feed(
-            os.getenv("ALPACA_OPTIONS_FEED", "INDICATIVE")
-        )
-
-    def _resolve_options_feed(self, feed_name: str) -> OptionsFeed:
-        normalized = feed_name.strip().upper()
-        return getattr(OptionsFeed, normalized, OptionsFeed.OPRA)
-
-    def _fallback_options_feed(self) -> OptionsFeed | None:
-        if self.options_feed != OptionsFeed.INDICATIVE:
-            return None
-        return getattr(OptionsFeed, "OPRA", None)
-
-    def _is_unauthorized_error(self, exc: AlpacaAPIError) -> bool:
-        status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
-        if status_code == 401:
-            return True
-        detail = str(getattr(exc, "error", exc))
-        lowered = detail.lower()
-        return "401" in lowered or "unauthorized" in lowered or "authorization required" in lowered
-
-    def _build_option_chain_request(
-        self, ticker: str, limit: int, feed: OptionsFeed | None
-    ) -> OptionChainRequest:
-        payload = {"underlying_symbol": ticker, "limit": limit}
-        if feed is not None:
-            payload["feed"] = feed
-        return OptionChainRequest(**payload)
-
-    def _build_option_snapshot_request(
-        self, ticker: str, feed: OptionsFeed | None
-    ) -> OptionSnapshotRequest:
-        payload = {"underlying_symbols": [ticker]}
-        if feed is not None:
-            payload["feed"] = feed
-        return OptionSnapshotRequest(**payload)
-
-    def _fetch_option_chain(self, ticker: str, limit: int) -> tuple[object, OptionsFeed | None]:
-        feed = self.options_feed
-        request = self._build_option_chain_request(ticker, limit, feed)
-        try:
-            return self.option_client.get_option_chain(request), feed
-        except AlpacaAPIError as exc:
-            fallback = self._fallback_options_feed()
-            if fallback and self._is_unauthorized_error(exc):
-                request = self._build_option_chain_request(ticker, limit, fallback)
-                return self.option_client.get_option_chain(request), fallback
-            raise
-
-    def _fetch_option_snapshots(self, ticker: str, feed: OptionsFeed | None) -> object:
-        request = self._build_option_snapshot_request(ticker, feed)
-        try:
-            return self.option_client.get_option_snapshots(request)
-        except AlpacaAPIError as exc:
-            fallback = self._fallback_options_feed()
-            if fallback and self._is_unauthorized_error(exc):
-                request = self._build_option_snapshot_request(ticker, fallback)
-                return self.option_client.get_option_snapshots(request)
-            raise
-
-    def _extract_symbol_items(self, response: object, symbol: str) -> list:
-        data = getattr(response, "data", None)
-        if isinstance(data, dict):
-            return data.get(symbol, []) or []
-        if isinstance(data, list):
-            return data
-        if isinstance(response, dict):
-            return response.get(symbol, []) or []
-        if isinstance(response, list):
-            return response
-        return []
-
-    def fetch_previous_close(self, ticker: str) -> dict:
-        request = StockBarsRequest(
-            symbol_or_symbols=ticker,
-            timeframe=TimeFrame.Day,
-            limit=2,
-            adjustment="all",
-        )
-        response = self.stock_client.get_stock_bars(request)
-        bars = self._extract_symbol_items(response, ticker)
-        bar = bars[-1] if bars else {}
-        return {
-            "close": getattr(bar, "close", None) if not isinstance(bar, dict) else bar.get("c"),
-            "open": getattr(bar, "open", None) if not isinstance(bar, dict) else bar.get("o"),
-            "high": getattr(bar, "high", None) if not isinstance(bar, dict) else bar.get("h"),
-            "low": getattr(bar, "low", None) if not isinstance(bar, dict) else bar.get("l"),
-            "volume": getattr(bar, "volume", None) if not isinstance(bar, dict) else bar.get("v"),
-        }
-
-    def _timeframe_for_minutes(self, minutes_per_bar: int) -> TimeFrame:
-        options = [1, 5, 15, 60, 1440]
-        closest = min(options, key=lambda option: abs(option - minutes_per_bar))
-        if closest == 60:
-            return TimeFrame(1, TimeFrameUnit.Hour)
-        if closest == 1440:
-            return TimeFrame(1, TimeFrameUnit.Day)
-        return TimeFrame(closest, TimeFrameUnit.Minute)
-
-    def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
-        end_date = date.today()
-        start_date = end_date - timedelta(days=days_back)
-        request = StockBarsRequest(
-            symbol_or_symbols=ticker,
-            timeframe=self._timeframe_for_minutes(minutes_per_bar),
-            start=start_date.isoformat(),
-            end=end_date.isoformat(),
-            limit=10000,
-            adjustment="all",
-        )
-        response = self.stock_client.get_stock_bars(request)
-        bars = []
-        for bar in self._extract_symbol_items(response, ticker):
-            if isinstance(bar, dict):
-                timestamp = bar.get("t")
-                close_value = bar.get("c")
-            else:
-                timestamp = getattr(bar, "timestamp", None)
-                close_value = getattr(bar, "close", None)
-            if isinstance(timestamp, str):
-                ts_value = (
-                    datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
-                    * 1000
-                )
-            else:
-                ts_value = timestamp
-            bars.append({"c": close_value, "t": ts_value})
-        return bars
-
-    def fetch_option_contracts(self, ticker: str, limit: int = 1000) -> tuple[list[dict], OptionsFeed | None]:
-        response, feed = self._fetch_option_chain(ticker, limit)
-        data = getattr(response, "data", response)
-        if isinstance(data, dict):
-            return list(data.values()), feed
-        if isinstance(data, list):
-            return data, feed
-        return [], feed
-
-    def fetch_option_snapshots(self, ticker: str) -> list[dict]:
-        contracts, feed = self.fetch_option_contracts(ticker)
-        response = self._fetch_option_snapshots(ticker, feed)
-        snapshot_map = getattr(response, "data", response)
-        if isinstance(snapshot_map, list):
-            snapshot_map = {snapshot.get("symbol"): snapshot for snapshot in snapshot_map if snapshot.get("symbol")}
-        normalized: list[dict] = []
-        for contract in contracts:
-            symbol = (
-                contract.get("symbol")
-                if isinstance(contract, dict)
-                else getattr(contract, "symbol", None)
-            ) or (contract.get("id") if isinstance(contract, dict) else None)
-            snapshot = snapshot_map.get(symbol, {}) if isinstance(snapshot_map, dict) else {}
-            greeks = snapshot.get("greeks", {}) if isinstance(snapshot, dict) else getattr(snapshot, "greeks", {})
-            implied_vol = (
-                snapshot.get("implied_volatility")
-                if isinstance(snapshot, dict)
-                else getattr(snapshot, "implied_volatility", None)
-            )
-            if implied_vol is not None and "iv" not in greeks:
-                greeks = {**greeks, "iv": implied_vol}
-            normalized.append(
-                {
-                    "ticker": symbol,
-                    "expiration_date": contract.get("expiration_date")
-                    if isinstance(contract, dict)
-                    else getattr(contract, "expiration_date", None),
-                    "contract_type": contract.get("type")
-                    if isinstance(contract, dict)
-                    else getattr(contract, "type", None)
-                    or (contract.get("option_type") if isinstance(contract, dict) else None),
-                    "strike_price": contract.get("strike_price")
-                    if isinstance(contract, dict)
-                    else getattr(contract, "strike_price", None),
-                    "greeks": greeks,
-                }
-            )
-        return normalized
 
 
 @dataclass
@@ -416,7 +216,6 @@ class StoptionsApp(tk.Tk):
         self._maximize_window()
         self.state = AppState.load()
         self.api_key = load_api_key()
-        self.alpaca_key, self.alpaca_secret = load_alpaca_credentials()
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
@@ -476,32 +275,6 @@ class MainMenu(ttk.Frame):
             row=0, column=2, padx=10, pady=8
         )
 
-        alpaca_frame = ttk.LabelFrame(self, text="Alpaca API Credentials")
-        alpaca_frame.pack(pady=15, padx=40, fill="x")
-        alpaca_frame.columnconfigure(1, weight=1)
-
-        ttk.Label(alpaca_frame, text="API Key").grid(
-            row=0, column=0, padx=10, pady=8, sticky="w"
-        )
-        self.alpaca_key_var = tk.StringVar(value=self.controller.alpaca_key)
-        self.alpaca_key_entry = ttk.Entry(
-            alpaca_frame, textvariable=self.alpaca_key_var, show="*"
-        )
-        self.alpaca_key_entry.grid(row=0, column=1, padx=10, pady=8, sticky="ew")
-
-        ttk.Label(alpaca_frame, text="Secret Key").grid(
-            row=1, column=0, padx=10, pady=8, sticky="w"
-        )
-        self.alpaca_secret_var = tk.StringVar(value=self.controller.alpaca_secret)
-        self.alpaca_secret_entry = ttk.Entry(
-            alpaca_frame, textvariable=self.alpaca_secret_var, show="*"
-        )
-        self.alpaca_secret_entry.grid(row=1, column=1, padx=10, pady=8, sticky="ew")
-
-        ttk.Button(alpaca_frame, text="Save Keys", command=self.save_alpaca_keys).grid(
-            row=0, column=2, rowspan=2, padx=10, pady=8
-        )
-
         button_frame = ttk.Frame(self)
         button_frame.pack(pady=40)
 
@@ -528,8 +301,6 @@ class MainMenu(ttk.Frame):
 
     def refresh(self) -> None:
         self.api_key_var.set(self.controller.api_key)
-        self.alpaca_key_var.set(self.controller.alpaca_key)
-        self.alpaca_secret_var.set(self.controller.alpaca_secret)
 
     def save_api_key(self) -> None:
         key = self.api_key_var.get().strip()
@@ -542,19 +313,7 @@ class MainMenu(ttk.Frame):
             "Saved", f"API key saved to {API_KEY_PATH} (not tracked in git)."
         )
 
-    def save_alpaca_keys(self) -> None:
-        key = self.alpaca_key_var.get().strip()
-        secret = self.alpaca_secret_var.get().strip()
-        if not key or not secret:
-            messagebox.showinfo("Missing keys", "Enter the Alpaca API key and secret.")
-            return
-        save_alpaca_credentials(key, secret)
-        self.controller.alpaca_key = key
-        self.controller.alpaca_secret = secret
-        messagebox.showinfo(
-            "Saved",
-            f"Alpaca credentials saved to {ALPACA_CREDENTIALS_PATH} (not tracked in git).",
-        )
+
 
 
 class TickerEntryPage(ttk.Frame):
@@ -656,7 +415,6 @@ class AnalysisPage(ttk.Frame):
         super().__init__(parent)
         self.controller = controller
         self.api_client: MassiveApiClient | None = None
-        self.alpaca_client: AlpacaApiClient | None = None
         self.option_contract: dict | None = None
         self.filtered_option_records: list[dict] = []
         self.scroll_canvas = tk.Canvas(self, highlightthickness=0)
@@ -683,8 +441,7 @@ class AnalysisPage(ttk.Frame):
         integration_note = ttk.Label(
             self.content_frame,
             text=(
-                "Massive provides stock/aggregate data (API key), Alpaca provides option greeks "
-                "(API key + secret)."
+                "Massive provides both stock/aggregate data and options data (API key)."
             ),
             foreground="#555",
         )
@@ -1091,14 +848,6 @@ class AnalysisPage(ttk.Frame):
             or body
         )
 
-    def _format_alpaca_error_detail(self, exc: AlpacaAPIError) -> str:
-        detail = getattr(exc, "error", None)
-        if detail is None:
-            detail = str(exc)
-        if isinstance(detail, str) and "<html" in detail.lower():
-            detail = self._strip_html(detail)
-        return str(detail).strip()
-
     def _show_api_error(self, exc: HTTPError, service: str, hint: str | None = None) -> None:
         detail = self._format_http_error_detail(exc)
         detail_msg = f"\nDetails: {detail}" if detail else ""
@@ -1305,10 +1054,6 @@ class AnalysisPage(ttk.Frame):
         self.strategy_var.set(self.controller.state.option_strategy)
         api_key = load_api_key()
         self.api_client = MassiveApiClient(api_key) if api_key else None
-        alpaca_key, alpaca_secret = load_alpaca_credentials()
-        self.alpaca_client = (
-            AlpacaApiClient(alpaca_key, alpaca_secret) if alpaca_key and alpaca_secret else None
-        )
         self._toggle_info_panels()
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
@@ -1326,12 +1071,6 @@ class AnalysisPage(ttk.Frame):
         if not self.api_client:
             messagebox.showinfo(
                 "Missing key", "Enter or set a Massive API key to load stock data."
-            )
-            return
-        if not self.alpaca_client:
-            messagebox.showinfo(
-                "Missing keys",
-                "Enter or set Alpaca API credentials to load option greeks.",
             )
             return
         ticker = self.controller.state.selected_ticker
@@ -1365,43 +1104,18 @@ class AnalysisPage(ttk.Frame):
                 )
                 return
             try:
-                option_data = self.alpaca_client.fetch_option_snapshots(ticker)
+                option_data = self.api_client.fetch_option_snapshots(ticker)
             except HTTPError as exc:
                 self._show_api_error(
                     exc,
-                    "Alpaca",
-                    "Check the Alpaca API key/secret in the Main Menu settings.",
-                )
-                return
-            except AlpacaAPIError as exc:
-                detail = self._format_alpaca_error_detail(exc)
-                hint = (
-                    "Your Alpaca account may not have options market data access. "
-                    "Verify your market data subscription and ensure the API key "
-                    "has data access enabled."
-                )
-                fallback_feed = (
-                    self.alpaca_client._fallback_options_feed() if self.alpaca_client else None
-                )
-                if (
-                    fallback_feed
-                    and self.alpaca_client
-                    and self.alpaca_client.options_feed == OptionsFeed.OPRA
-                ):
-                    hint = (
-                        f"{hint} If your plan does not include OPRA, set "
-                        f"ALPACA_OPTIONS_FEED={fallback_feed.name} to request indicative data."
-                    )
-                detail_msg = f"\nDetails: {detail}" if detail else ""
-                self._show_error_dialog(
-                    "API Error",
-                    f"Alpaca API returned an error.{detail_msg}\n{hint}",
+                    "Massive",
+                    "Verify your Massive API key and options data entitlements.",
                 )
                 return
             except URLError as exc:
                 self._show_error_dialog(
                     "Connection Error",
-                    f"Could not reach Alpaca API endpoint: {exc.reason}",
+                    f"Could not reach Massive API endpoint: {exc.reason}",
                 )
                 return
             try:
@@ -1486,11 +1200,18 @@ class AnalysisPage(ttk.Frame):
                 continue
             details = record.get("details") or {}
             greeks = record.get("greeks") or {}
+            day = record.get("day") or {}
+            last_trade = record.get("last_trade") or {}
+            last_quote = record.get("last_quote") or {}
             if not isinstance(greeks, dict):
                 greeks = {}
             implied_vol = greeks.get("iv")
             if implied_vol is None:
                 implied_vol = record.get("implied_volatility") or record.get("implied_vol")
+            volume = record.get("volume")
+            if volume is None:
+                volume = day.get("volume") or day.get("v")
+            open_interest = record.get("open_interest") or details.get("open_interest")
             normalized.append(
                 {
                     "ticker": record.get("ticker") or details.get("ticker"),
@@ -1499,6 +1220,20 @@ class AnalysisPage(ttk.Frame):
                     "contract_type": record.get("contract_type")
                     or details.get("contract_type"),
                     "strike_price": record.get("strike_price") or details.get("strike_price"),
+                    "implied_volatility": implied_vol,
+                    "volume": volume,
+                    "open_interest": open_interest,
+                    "bid": record.get("bid")
+                    or last_quote.get("bid")
+                    or last_quote.get("bid_price")
+                    or last_quote.get("bp"),
+                    "ask": record.get("ask")
+                    or last_quote.get("ask")
+                    or last_quote.get("ask_price")
+                    or last_quote.get("ap"),
+                    "last": record.get("last")
+                    or last_trade.get("price")
+                    or last_trade.get("p"),
                     "greeks": {
                         "delta": greeks.get("delta"),
                         "gamma": greeks.get("gamma"),
