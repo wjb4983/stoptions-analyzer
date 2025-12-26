@@ -1,6 +1,5 @@
 import json
 import os
-import base64
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
@@ -10,6 +9,10 @@ from tkinter import ttk, messagebox
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from alpaca.data.enums import OptionsFeed
+from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
+from alpaca.data.requests import OptionContractsRequest, OptionSnapshotRequest, StockBarsRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
@@ -191,63 +194,72 @@ class AlpacaApiClient:
         self.api_key = api_key.strip()
         self.api_secret = api_secret.strip()
         self.base_url = base_url.rstrip("/")
+        self.stock_client = StockHistoricalDataClient(
+            self.api_key, self.api_secret, base_url=self.base_url
+        )
+        self.option_client = OptionHistoricalDataClient(
+            self.api_key, self.api_secret, base_url=self.base_url
+        )
 
-    def _request(self, path: str, params: dict[str, str] | None = None) -> dict:
-        params = params or {}
-        url = f"{self.base_url}{path}?{urlencode(params)}" if params else f"{self.base_url}{path}"
-        headers = {
-            "APCA-API-KEY-ID": self.api_key,
-            "APCA-API-SECRET-KEY": self.api_secret,
-            "Accept": "application/json",
-        }
-        if self.api_key and self.api_secret:
-            credentials = f"{self.api_key}:{self.api_secret}".encode("utf-8")
-            headers["Authorization"] = f"Basic {base64.b64encode(credentials).decode('utf-8')}"
-        request = Request(url, headers=headers)
-        with urlopen(request, timeout=10) as response:
-            payload = response.read().decode("utf-8")
-        return json.loads(payload)
+    def _extract_symbol_items(self, response: object, symbol: str) -> list:
+        data = getattr(response, "data", None)
+        if isinstance(data, dict):
+            return data.get(symbol, []) or []
+        if isinstance(data, list):
+            return data
+        if isinstance(response, dict):
+            return response.get(symbol, []) or []
+        if isinstance(response, list):
+            return response
+        return []
 
     def fetch_previous_close(self, ticker: str) -> dict:
-        data = self._request(
-            f"/v2/stocks/{ticker}/bars",
-            {"timeframe": "1Day", "limit": "2", "adjustment": "all"},
+        request = StockBarsRequest(
+            symbol_or_symbols=ticker,
+            timeframe=TimeFrame.Day,
+            limit=2,
+            adjustment="all",
         )
-        bars = data.get("bars", [])
+        response = self.stock_client.get_stock_bars(request)
+        bars = self._extract_symbol_items(response, ticker)
         bar = bars[-1] if bars else {}
         return {
-            "close": bar.get("c"),
-            "open": bar.get("o"),
-            "high": bar.get("h"),
-            "low": bar.get("l"),
-            "volume": bar.get("v"),
+            "close": getattr(bar, "close", None) if not isinstance(bar, dict) else bar.get("c"),
+            "open": getattr(bar, "open", None) if not isinstance(bar, dict) else bar.get("o"),
+            "high": getattr(bar, "high", None) if not isinstance(bar, dict) else bar.get("h"),
+            "low": getattr(bar, "low", None) if not isinstance(bar, dict) else bar.get("l"),
+            "volume": getattr(bar, "volume", None) if not isinstance(bar, dict) else bar.get("v"),
         }
 
-    def _timeframe_for_minutes(self, minutes_per_bar: int) -> str:
+    def _timeframe_for_minutes(self, minutes_per_bar: int) -> TimeFrame:
         options = [1, 5, 15, 60, 1440]
         closest = min(options, key=lambda option: abs(option - minutes_per_bar))
         if closest == 60:
-            return "1Hour"
+            return TimeFrame(1, TimeFrameUnit.Hour)
         if closest == 1440:
-            return "1Day"
-        return f"{closest}Min"
+            return TimeFrame(1, TimeFrameUnit.Day)
+        return TimeFrame(closest, TimeFrameUnit.Minute)
 
     def fetch_aggregates(self, ticker: str, days_back: int, minutes_per_bar: int) -> list[dict]:
         end_date = date.today()
         start_date = end_date - timedelta(days=days_back)
-        data = self._request(
-            f"/v2/stocks/{ticker}/bars",
-            {
-                "timeframe": self._timeframe_for_minutes(minutes_per_bar),
-                "start": start_date.isoformat(),
-                "end": end_date.isoformat(),
-                "limit": "10000",
-                "adjustment": "all",
-            },
+        request = StockBarsRequest(
+            symbol_or_symbols=ticker,
+            timeframe=self._timeframe_for_minutes(minutes_per_bar),
+            start=start_date.isoformat(),
+            end=end_date.isoformat(),
+            limit=10000,
+            adjustment="all",
         )
+        response = self.stock_client.get_stock_bars(request)
         bars = []
-        for bar in data.get("bars", []):
-            timestamp = bar.get("t")
+        for bar in self._extract_symbol_items(response, ticker):
+            if isinstance(bar, dict):
+                timestamp = bar.get("t")
+                close_value = bar.get("c")
+            else:
+                timestamp = getattr(bar, "timestamp", None)
+                close_value = getattr(bar, "close", None)
             if isinstance(timestamp, str):
                 ts_value = (
                     datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
@@ -255,56 +267,55 @@ class AlpacaApiClient:
                 )
             else:
                 ts_value = timestamp
-            bars.append({"c": bar.get("c"), "t": ts_value})
+            bars.append({"c": close_value, "t": ts_value})
         return bars
 
     def fetch_option_contracts(self, ticker: str, limit: int = 1000) -> list[dict]:
-        results: list[dict] = []
-        next_token = None
-        while True:
-            params = {
-                "underlying_symbols": ticker,
-                "limit": str(limit),
-            }
-            if next_token:
-                params["page_token"] = next_token
-            data = self._request("/v1beta1/options/contracts", params)
-            contracts = (
-                data.get("option_contracts")
-                or data.get("contracts")
-                or data.get("results")
-                or []
-            )
-            results.extend(contracts)
-            next_token = data.get("next_page_token")
-            if not next_token:
-                break
-        return results
+        request = OptionContractsRequest(underlying_symbols=[ticker], limit=limit)
+        response = self.option_client.get_option_contracts(request)
+        data = getattr(response, "data", response)
+        if isinstance(data, dict):
+            return list(data.values())
+        if isinstance(data, list):
+            return data
+        return []
 
     def fetch_option_snapshots(self, ticker: str) -> list[dict]:
         contracts = self.fetch_option_contracts(ticker)
-        snapshot_response = self._request(f"/v1beta1/options/snapshots/{ticker}")
-        snapshot_map = snapshot_response.get("snapshots") or snapshot_response.get(
-            "option_snapshots", {}
-        )
+        request = OptionSnapshotRequest(underlying_symbols=[ticker], feed=OptionsFeed.OPRA)
+        response = self.option_client.get_option_snapshots(request)
+        snapshot_map = getattr(response, "data", response)
         if isinstance(snapshot_map, list):
-            snapshot_map = {
-                snapshot.get("symbol"): snapshot for snapshot in snapshot_map if snapshot.get("symbol")
-            }
+            snapshot_map = {snapshot.get("symbol"): snapshot for snapshot in snapshot_map if snapshot.get("symbol")}
         normalized: list[dict] = []
         for contract in contracts:
-            symbol = contract.get("symbol") or contract.get("id")
-            snapshot = snapshot_map.get(symbol, {})
-            greeks = snapshot.get("greeks", {}) or {}
-            implied_vol = snapshot.get("implied_volatility")
+            symbol = (
+                contract.get("symbol")
+                if isinstance(contract, dict)
+                else getattr(contract, "symbol", None)
+            ) or (contract.get("id") if isinstance(contract, dict) else None)
+            snapshot = snapshot_map.get(symbol, {}) if isinstance(snapshot_map, dict) else {}
+            greeks = snapshot.get("greeks", {}) if isinstance(snapshot, dict) else getattr(snapshot, "greeks", {})
+            implied_vol = (
+                snapshot.get("implied_volatility")
+                if isinstance(snapshot, dict)
+                else getattr(snapshot, "implied_volatility", None)
+            )
             if implied_vol is not None and "iv" not in greeks:
                 greeks = {**greeks, "iv": implied_vol}
             normalized.append(
                 {
                     "ticker": symbol,
-                    "expiration_date": contract.get("expiration_date"),
-                    "contract_type": contract.get("type") or contract.get("option_type"),
-                    "strike_price": contract.get("strike_price"),
+                    "expiration_date": contract.get("expiration_date")
+                    if isinstance(contract, dict)
+                    else getattr(contract, "expiration_date", None),
+                    "contract_type": contract.get("type")
+                    if isinstance(contract, dict)
+                    else getattr(contract, "type", None)
+                    or (contract.get("option_type") if isinstance(contract, dict) else None),
+                    "strike_price": contract.get("strike_price")
+                    if isinstance(contract, dict)
+                    else getattr(contract, "strike_price", None),
                     "greeks": greeks,
                 }
             )
