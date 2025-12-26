@@ -194,12 +194,8 @@ class AlpacaApiClient:
         self.api_key = api_key.strip()
         self.api_secret = api_secret.strip()
         self.base_url = base_url.rstrip("/")
-        self.stock_client = StockHistoricalDataClient(
-            self.api_key, self.api_secret, base_url=self.base_url
-        )
-        self.option_client = OptionHistoricalDataClient(
-            self.api_key, self.api_secret, base_url=self.base_url
-        )
+        self.stock_client = StockHistoricalDataClient(self.api_key, self.api_secret)
+        self.option_client = OptionHistoricalDataClient(self.api_key, self.api_secret)
 
     def _extract_symbol_items(self, response: object, symbol: str) -> list:
         data = getattr(response, "data", None)
