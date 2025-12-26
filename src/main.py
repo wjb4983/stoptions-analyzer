@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from alpaca.data.enums import OptionsFeed
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
-from alpaca.data.requests import OptionContractsRequest, OptionSnapshotRequest, StockBarsRequest
+from alpaca.data.requests import OptionChainRequest, OptionSnapshotRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
@@ -271,8 +271,8 @@ class AlpacaApiClient:
         return bars
 
     def fetch_option_contracts(self, ticker: str, limit: int = 1000) -> list[dict]:
-        request = OptionContractsRequest(underlying_symbols=[ticker], limit=limit)
-        response = self.option_client.get_option_contracts(request)
+        request = OptionChainRequest(underlying_symbols=[ticker], limit=limit)
+        response = self.option_client.get_option_chain(request)
         data = getattr(response, "data", response)
         if isinstance(data, dict):
             return list(data.values())
