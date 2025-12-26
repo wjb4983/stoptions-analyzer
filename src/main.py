@@ -13,6 +13,7 @@ from alpaca.data.enums import OptionsFeed
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import OptionChainRequest, OptionSnapshotRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.common.exceptions import APIError as AlpacaAPIError
 
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
@@ -1033,6 +1034,14 @@ class AnalysisPage(ttk.Frame):
             or body
         )
 
+    def _format_alpaca_error_detail(self, exc: AlpacaAPIError) -> str:
+        detail = getattr(exc, "error", None)
+        if detail is None:
+            detail = str(exc)
+        if isinstance(detail, str) and "<html" in detail.lower():
+            detail = self._strip_html(detail)
+        return str(detail).strip()
+
     def _show_api_error(self, exc: HTTPError, service: str, hint: str | None = None) -> None:
         detail = self._format_http_error_detail(exc)
         detail_msg = f"\nDetails: {detail}" if detail else ""
@@ -1305,6 +1314,19 @@ class AnalysisPage(ttk.Frame):
                     exc,
                     "Alpaca",
                     "Check the Alpaca API key/secret in the Main Menu settings.",
+                )
+                return
+            except AlpacaAPIError as exc:
+                detail = self._format_alpaca_error_detail(exc)
+                hint = (
+                    "Your Alpaca account may not have options market data access. "
+                    "Verify your market data subscription and ensure the API key "
+                    "has data access enabled."
+                )
+                detail_msg = f"\nDetails: {detail}" if detail else ""
+                self._show_error_dialog(
+                    "API Error",
+                    f"Alpaca API returned an error.{detail_msg}\n{hint}",
                 )
                 return
             except URLError as exc:
