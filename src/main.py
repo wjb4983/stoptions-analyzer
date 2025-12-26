@@ -197,6 +197,63 @@ class AlpacaApiClient:
         self.base_url = base_url.rstrip("/")
         self.stock_client = StockHistoricalDataClient(self.api_key, self.api_secret)
         self.option_client = OptionHistoricalDataClient(self.api_key, self.api_secret)
+        self.options_feed = self._resolve_options_feed(os.getenv("ALPACA_OPTIONS_FEED", "OPRA"))
+
+    def _resolve_options_feed(self, feed_name: str) -> OptionsFeed:
+        normalized = feed_name.strip().upper()
+        return getattr(OptionsFeed, normalized, OptionsFeed.OPRA)
+
+    def _fallback_options_feed(self) -> OptionsFeed | None:
+        if self.options_feed != OptionsFeed.OPRA:
+            return None
+        return getattr(OptionsFeed, "INDICATIVE", None)
+
+    def _is_unauthorized_error(self, exc: AlpacaAPIError) -> bool:
+        status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+        if status_code == 401:
+            return True
+        detail = str(getattr(exc, "error", exc))
+        lowered = detail.lower()
+        return "401" in lowered or "unauthorized" in lowered or "authorization required" in lowered
+
+    def _build_option_chain_request(
+        self, ticker: str, limit: int, feed: OptionsFeed | None
+    ) -> OptionChainRequest:
+        payload = {"underlying_symbol": ticker, "limit": limit}
+        if feed is not None:
+            payload["feed"] = feed
+        return OptionChainRequest(**payload)
+
+    def _build_option_snapshot_request(
+        self, ticker: str, feed: OptionsFeed | None
+    ) -> OptionSnapshotRequest:
+        payload = {"underlying_symbols": [ticker]}
+        if feed is not None:
+            payload["feed"] = feed
+        return OptionSnapshotRequest(**payload)
+
+    def _fetch_option_chain(self, ticker: str, limit: int) -> tuple[object, OptionsFeed | None]:
+        feed = self.options_feed
+        request = self._build_option_chain_request(ticker, limit, feed)
+        try:
+            return self.option_client.get_option_chain(request), feed
+        except AlpacaAPIError as exc:
+            fallback = self._fallback_options_feed()
+            if fallback and self._is_unauthorized_error(exc):
+                request = self._build_option_chain_request(ticker, limit, fallback)
+                return self.option_client.get_option_chain(request), fallback
+            raise
+
+    def _fetch_option_snapshots(self, ticker: str, feed: OptionsFeed | None) -> object:
+        request = self._build_option_snapshot_request(ticker, feed)
+        try:
+            return self.option_client.get_option_snapshots(request)
+        except AlpacaAPIError as exc:
+            fallback = self._fallback_options_feed()
+            if fallback and self._is_unauthorized_error(exc):
+                request = self._build_option_snapshot_request(ticker, fallback)
+                return self.option_client.get_option_snapshots(request)
+            raise
 
     def _extract_symbol_items(self, response: object, symbol: str) -> list:
         data = getattr(response, "data", None)
@@ -267,20 +324,18 @@ class AlpacaApiClient:
             bars.append({"c": close_value, "t": ts_value})
         return bars
 
-    def fetch_option_contracts(self, ticker: str, limit: int = 1000) -> list[dict]:
-        request = OptionChainRequest(underlying_symbol=ticker, limit=limit)
-        response = self.option_client.get_option_chain(request)
+    def fetch_option_contracts(self, ticker: str, limit: int = 1000) -> tuple[list[dict], OptionsFeed | None]:
+        response, feed = self._fetch_option_chain(ticker, limit)
         data = getattr(response, "data", response)
         if isinstance(data, dict):
-            return list(data.values())
+            return list(data.values()), feed
         if isinstance(data, list):
-            return data
-        return []
+            return data, feed
+        return [], feed
 
     def fetch_option_snapshots(self, ticker: str) -> list[dict]:
-        contracts = self.fetch_option_contracts(ticker)
-        request = OptionSnapshotRequest(underlying_symbols=[ticker], feed=OptionsFeed.OPRA)
-        response = self.option_client.get_option_snapshots(request)
+        contracts, feed = self.fetch_option_contracts(ticker)
+        response = self._fetch_option_snapshots(ticker, feed)
         snapshot_map = getattr(response, "data", response)
         if isinstance(snapshot_map, list):
             snapshot_map = {snapshot.get("symbol"): snapshot for snapshot in snapshot_map if snapshot.get("symbol")}
@@ -1323,6 +1378,18 @@ class AnalysisPage(ttk.Frame):
                     "Verify your market data subscription and ensure the API key "
                     "has data access enabled."
                 )
+                fallback_feed = (
+                    self.alpaca_client._fallback_options_feed() if self.alpaca_client else None
+                )
+                if (
+                    fallback_feed
+                    and self.alpaca_client
+                    and self.alpaca_client.options_feed == OptionsFeed.OPRA
+                ):
+                    hint = (
+                        f"{hint} If your plan does not include OPRA, set "
+                        f"ALPACA_OPTIONS_FEED={fallback_feed.name} to request indicative data."
+                    )
                 detail_msg = f"\nDetails: {detail}" if detail else ""
                 self._show_error_dialog(
                     "API Error",
