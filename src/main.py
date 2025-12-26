@@ -451,7 +451,7 @@ class AnalysisPage(ttk.Frame):
         chart_frame = ttk.Frame(stock_frame)
         chart_frame.pack(pady=5, fill="both", expand=True)
 
-        self.chart_canvas = tk.Canvas(chart_frame, height=220, bg="#f0f0f0")
+        self.chart_canvas = tk.Canvas(chart_frame, height=180, bg="#f0f0f0")
         self.chart_canvas.pack(fill="both", expand=True, padx=10, pady=10)
         self.chart_canvas.create_text(
             220,
@@ -616,6 +616,10 @@ class AnalysisPage(ttk.Frame):
             row=3, column=0, padx=5, pady=(8, 2), sticky="w"
         )
         self.strategy_dropdown.grid(row=3, column=1, padx=5, pady=(8, 2), sticky="ew")
+
+        ttk.Button(filter_frame, text="Go", command=self.load_market_data).grid(
+            row=4, column=0, columnspan=2, padx=5, pady=(8, 2), sticky="ew"
+        )
 
         button_row = ttk.Frame(self.content_frame)
         button_row.pack(pady=10)
