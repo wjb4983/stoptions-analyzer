@@ -75,6 +75,9 @@ def compute_cross_sectional_momentum(
     ranking = [(tickers[idx], float(returns_array[idx])) for idx in order[::-1]]
     longs = [tickers[idx] for idx in top_idx[::-1]]
     shorts = [tickers[idx] for idx in bottom_idx]
+    if longs and shorts:
+        long_set = set(longs)
+        shorts = [ticker for ticker in shorts if ticker not in long_set]
 
     weights: dict[str, float] = {}
     if longs:

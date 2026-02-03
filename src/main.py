@@ -2,6 +2,7 @@ import json
 import math
 import os
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -1450,6 +1451,9 @@ class GeneralAnalysisPage(ttk.Frame):
         super().__init__(parent)
         self.controller = controller
         self.api_client: MassiveApiClient | None = None
+        self._rate_lock = threading.Lock()
+        self._last_request_time = 0.0
+        self._min_request_interval = 0.35
 
         header = ttk.Label(self, text="General Analysis", font=("Arial", 18, "bold"))
         header.pack(pady=10)
@@ -1664,7 +1668,7 @@ class GeneralAnalysisPage(ttk.Frame):
         prices_by_ticker: dict[str, list[float]] = {}
         skipped: dict[str, str] = {}
 
-        max_workers = min(8, max(1, len(tickers)))
+        max_workers = min(4, max(1, len(tickers)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
@@ -1705,6 +1709,7 @@ class GeneralAnalysisPage(ttk.Frame):
         max_retries = 3
         backoff_seconds = 2.0
         while current_days_back <= max_days_back:
+            self._throttle_request()
             try:
                 aggregates = self.api_client.fetch_daily_aggregates(
                     ticker, days_back=current_days_back
@@ -1740,6 +1745,14 @@ class GeneralAnalysisPage(ttk.Frame):
         if len(closes) < min_points:
             return ticker, None, "insufficient_history"
         return ticker, closes, None
+
+    def _throttle_request(self) -> None:
+        with self._rate_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_request_time
+            if elapsed < self._min_request_interval:
+                time.sleep(self._min_request_interval - elapsed)
+            self._last_request_time = time.monotonic()
 
     def _write_report(self, report: str, output_dir: str) -> Path:
         directory = Path(output_dir)

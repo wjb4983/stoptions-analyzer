@@ -29,7 +29,7 @@ def format_cross_sectional_report(
 
     lines.append("Top Winners:")
     if result.longs:
-        for ticker in result.longs:
+        for ticker in sorted(result.longs, key=lambda t: result.scores.get(t, 0.0), reverse=True):
             lines.append(f"  - {ticker}: {result.scores.get(ticker, 0.0):.4f}")
     else:
         lines.append("  (none)")
@@ -37,7 +37,7 @@ def format_cross_sectional_report(
 
     lines.append("Top Losers:")
     if result.shorts:
-        for ticker in result.shorts:
+        for ticker in sorted(result.shorts, key=lambda t: result.scores.get(t, 0.0)):
             lines.append(f"  - {ticker}: {result.scores.get(ticker, 0.0):.4f}")
     else:
         lines.append("  (none)")
@@ -50,10 +50,21 @@ def format_cross_sectional_report(
     else:
         lines.append("  (none)")
 
-    if result.skipped:
-        lines.append("")
-        lines.append("Skipped:")
-        for ticker, reason in result.skipped.items():
-            lines.append(f"  - {ticker}: {reason}")
+    lines.append("")
+    lines.append("All Surveyed (best to worst, including skipped):")
+    scored = {**{ticker: score for ticker, score in result.ranking}}
+    skipped = dict(result.skipped)
+    for ticker in sorted(universe_list):
+        if ticker not in scored and ticker not in skipped:
+            skipped[ticker] = "no_data"
+    surveyed_scores = [
+        (ticker, scored.get(ticker)) for ticker in universe_list if ticker in scored
+    ]
+    surveyed_scores.sort(key=lambda item: item[1], reverse=True)
+    for ticker, score in surveyed_scores:
+        lines.append(f"  - {ticker}: {score:.4f}")
+    for ticker, reason in sorted(skipped.items()):
+        if ticker not in scored:
+            lines.append(f"  - {ticker}: skipped ({reason})")
 
     return "\n".join(lines)
