@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -1566,6 +1567,12 @@ class GeneralAnalysisPage(ttk.Frame):
         if skip_days is None or skip_days < 0:
             messagebox.showinfo("Invalid input", "Skip days must be zero or a positive integer.")
             return
+        if skip_days >= lookback_days:
+            messagebox.showinfo(
+                "Invalid input",
+                "Skip days must be less than lookback days to compute momentum.",
+            )
+            return
         if top_quantile is None or not (0 < top_quantile <= 1):
             messagebox.showinfo("Invalid input", "Top quantile must be between 0 and 1.")
             return
@@ -1679,12 +1686,20 @@ class GeneralAnalysisPage(ttk.Frame):
         max_days_back = max(days_back * 3, min_points * 4)
         closes: list[float] = []
 
+        retry_count = 0
+        max_retries = 3
+        backoff_seconds = 2.0
         while current_days_back <= max_days_back:
             try:
                 aggregates = self.api_client.fetch_aggregates(
                     ticker, days_back=current_days_back, minutes_per_bar=1440
                 )
             except HTTPError as exc:
+                if exc.code == 429 and retry_count < max_retries:
+                    time.sleep(backoff_seconds)
+                    retry_count += 1
+                    backoff_seconds *= 2
+                    continue
                 return ticker, None, f"http_error_{exc.code}"
             except URLError as exc:
                 return ticker, None, f"url_error_{exc.reason}"
