@@ -426,6 +426,21 @@ class MassiveApiClient:
         )
         return data.get("results", [])
 
+    def fetch_daily_aggregates(self, ticker: str, days_back: int) -> list[dict]:
+        if days_back == 1:
+            now = datetime.now(ZoneInfo("America/New_York"))
+            market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+            end_date = (now - timedelta(days=1)).date() if now < market_close else now.date()
+            start_date = end_date
+        else:
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days_back)
+        data = self._request(
+            f"/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}",
+            {"adjusted": "true", "sort": "asc", "limit": "5000"},
+        )
+        return data.get("results", [])
+
 
 @dataclass
 class AppState:
@@ -1691,8 +1706,8 @@ class GeneralAnalysisPage(ttk.Frame):
         backoff_seconds = 2.0
         while current_days_back <= max_days_back:
             try:
-                aggregates = self.api_client.fetch_aggregates(
-                    ticker, days_back=current_days_back, minutes_per_bar=1440
+                aggregates = self.api_client.fetch_daily_aggregates(
+                    ticker, days_back=current_days_back
                 )
             except HTTPError as exc:
                 if exc.code == 429 and retry_count < max_retries:
