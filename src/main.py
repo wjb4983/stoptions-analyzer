@@ -1,6 +1,7 @@
 import json
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
@@ -11,6 +12,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
+
+from analysis.cross_sectional import MomentumSettings, compute_cross_sectional_momentum
+from analysis.reporting import format_cross_sectional_report
 
 
 def effective_market_date() -> date:
@@ -172,6 +176,16 @@ def parse_float(value: str) -> float | None:
         return None
 
 
+def parse_int(value: str) -> int | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
 def normalize_likelihood_threshold(value: str) -> float | None:
     raw = parse_float(value)
     if raw is None:
@@ -245,6 +259,16 @@ HORIZON_CONFIGS = [
     ("5Y", 1825, 7200, "5d"),
     ("10Y", 3650, 10080, "7d"),
 ]
+ANALYSIS_OUTPUT_DIR = DATA_DIR / "analysis_outputs"
+DEFAULT_GENERAL_ANALYSIS_SETTINGS = {
+    "analysis_type": "Cross-Sectional",
+    "cross_sectional_strategy": "Momentum",
+    "lookback_days": 90,
+    "skip_days": 5,
+    "top_quantile": 0.2,
+    "bottom_quantile": 0.2,
+    "output_dir": str(ANALYSIS_OUTPUT_DIR),
+}
 
 
 def load_api_key() -> str:
@@ -408,6 +432,9 @@ class AppState:
     selected_ticker: str | None = None
     analysis_mode: str = "Stock Analysis"
     option_strategy: str = "Naked Call"
+    general_analysis_settings: dict[str, object] = field(
+        default_factory=lambda: dict(DEFAULT_GENERAL_ANALYSIS_SETTINGS)
+    )
 
     def save(self) -> None:
         payload = {
@@ -415,6 +442,7 @@ class AppState:
             "selected_ticker": self.selected_ticker,
             "analysis_mode": self.analysis_mode,
             "option_strategy": self.option_strategy,
+            "general_analysis_settings": self.general_analysis_settings,
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2))
 
@@ -431,6 +459,9 @@ class AppState:
             selected_ticker=payload.get("selected_ticker"),
             analysis_mode=payload.get("analysis_mode", payload.get("analysis_type", "Stock Analysis")),
             option_strategy=payload.get("option_strategy", "Naked Call"),
+            general_analysis_settings=payload.get(
+                "general_analysis_settings", dict(DEFAULT_GENERAL_ANALYSIS_SETTINGS)
+            ),
         )
 
 
@@ -454,6 +485,7 @@ class StoptionsApp(tk.Tk):
             TickerEntryPage,
             TickerSelectPage,
             AnalysisPage,
+            GeneralAnalysisPage,
             CallPutAnalysisPage,
             SpreadAnalysisPage,
         ):
@@ -531,6 +563,13 @@ class MainMenu(ttk.Frame):
             command=lambda: controller.show_frame("AnalysisPage"),
             width=30,
         ).grid(row=2, column=0, pady=10)
+
+        ttk.Button(
+            button_frame,
+            text="General Analysis",
+            command=lambda: controller.show_frame("GeneralAnalysisPage"),
+            width=30,
+        ).grid(row=3, column=0, pady=10)
 
     def refresh(self) -> None:
         self.api_key_var.set(self.controller.api_key)
@@ -1388,6 +1427,288 @@ class AnalysisPage(ttk.Frame):
         self._set_value(self.greeks_values["vega"], greeks.get("vega"))
         self._set_value(self.greeks_values["rho"], greeks.get("rho"))
         self._set_value(self.greeks_values["iv"], greeks.get("iv"))
+
+
+class GeneralAnalysisPage(ttk.Frame):
+    def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
+        super().__init__(parent)
+        self.controller = controller
+        self.api_client: MassiveApiClient | None = None
+
+        header = ttk.Label(self, text="General Analysis", font=("Arial", 18, "bold"))
+        header.pack(pady=10)
+
+        description = ttk.Label(
+            self,
+            text=(
+                "Run cross-sectional, time-series, and factor analysis across your current "
+                "stock universe. Tune parameters and export results to a text file."
+            ),
+            wraplength=700,
+            justify="center",
+        )
+        description.pack(pady=(0, 15))
+
+        form_frame = ttk.LabelFrame(self, text="Analysis Settings")
+        form_frame.pack(padx=40, pady=10, fill="x")
+        form_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(form_frame, text="Analysis Type").grid(
+            row=0, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.analysis_type_var = tk.StringVar()
+        self.analysis_type_dropdown = ttk.Combobox(
+            form_frame,
+            textvariable=self.analysis_type_var,
+            values=[
+                "Cross-Sectional",
+                "Time-Series",
+                "Cross-Sectional + Time-Series",
+                "Value",
+                "Volatility",
+                "Risk",
+            ],
+            state="readonly",
+            width=30,
+        )
+        self.analysis_type_dropdown.grid(row=0, column=1, padx=10, pady=6, sticky="ew")
+
+        ttk.Label(form_frame, text="Cross-Sectional Strategy").grid(
+            row=1, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.cross_sectional_var = tk.StringVar()
+        self.cross_sectional_dropdown = ttk.Combobox(
+            form_frame,
+            textvariable=self.cross_sectional_var,
+            values=["Momentum"],
+            state="readonly",
+            width=30,
+        )
+        self.cross_sectional_dropdown.grid(row=1, column=1, padx=10, pady=6, sticky="ew")
+
+        ttk.Label(form_frame, text="Lookback (days)").grid(
+            row=2, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.lookback_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.lookback_var).grid(
+            row=2, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        ttk.Label(form_frame, text="Skip (days)").grid(
+            row=3, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.skip_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.skip_var).grid(
+            row=3, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        ttk.Label(form_frame, text="Top Quantile (0-1)").grid(
+            row=4, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.top_quantile_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.top_quantile_var).grid(
+            row=4, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        ttk.Label(form_frame, text="Bottom Quantile (0-1)").grid(
+            row=5, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.bottom_quantile_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.bottom_quantile_var).grid(
+            row=5, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        ttk.Label(form_frame, text="Output Directory").grid(
+            row=6, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.output_dir_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.output_dir_var).grid(
+            row=6, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        button_row = ttk.Frame(self)
+        button_row.pack(pady=15)
+
+        ttk.Button(button_row, text="Run Analysis", command=self.run_analysis).grid(
+            row=0, column=0, padx=10
+        )
+        ttk.Button(
+            button_row,
+            text="Back to Main Menu",
+            command=lambda: controller.show_frame("MainMenu"),
+        ).grid(row=0, column=1, padx=10)
+
+    def refresh(self) -> None:
+        settings = dict(DEFAULT_GENERAL_ANALYSIS_SETTINGS)
+        settings.update(self.controller.state.general_analysis_settings or {})
+        self.analysis_type_var.set(settings.get("analysis_type", "Cross-Sectional"))
+        self.cross_sectional_var.set(settings.get("cross_sectional_strategy", "Momentum"))
+        self.lookback_var.set(str(settings.get("lookback_days", 90)))
+        self.skip_var.set(str(settings.get("skip_days", 5)))
+        self.top_quantile_var.set(str(settings.get("top_quantile", 0.2)))
+        self.bottom_quantile_var.set(str(settings.get("bottom_quantile", 0.2)))
+        self.output_dir_var.set(settings.get("output_dir", str(ANALYSIS_OUTPUT_DIR)))
+
+    def run_analysis(self) -> None:
+        if not self.controller.api_key:
+            messagebox.showinfo("Missing key", "Enter a Massive API key first.")
+            return
+        if not self.controller.state.tickers:
+            messagebox.showinfo("Missing universe", "Please add tickers first.")
+            return
+        lookback_days = parse_int(self.lookback_var.get())
+        skip_days = parse_int(self.skip_var.get())
+        top_quantile = parse_float(self.top_quantile_var.get())
+        bottom_quantile = parse_float(self.bottom_quantile_var.get())
+        if lookback_days is None or lookback_days <= 0:
+            messagebox.showinfo("Invalid input", "Lookback days must be a positive integer.")
+            return
+        if skip_days is None or skip_days < 0:
+            messagebox.showinfo("Invalid input", "Skip days must be zero or a positive integer.")
+            return
+        if top_quantile is None or not (0 < top_quantile <= 1):
+            messagebox.showinfo("Invalid input", "Top quantile must be between 0 and 1.")
+            return
+        if bottom_quantile is None or not (0 < bottom_quantile <= 1):
+            messagebox.showinfo("Invalid input", "Bottom quantile must be between 0 and 1.")
+            return
+        output_dir = self.output_dir_var.get().strip() or str(ANALYSIS_OUTPUT_DIR)
+
+        settings_payload = {
+            "analysis_type": self.analysis_type_var.get(),
+            "cross_sectional_strategy": self.cross_sectional_var.get(),
+            "lookback_days": lookback_days,
+            "skip_days": skip_days,
+            "top_quantile": top_quantile,
+            "bottom_quantile": bottom_quantile,
+            "output_dir": output_dir,
+        }
+        self.controller.state.general_analysis_settings = settings_payload
+        self.controller.persist_state()
+
+        if settings_payload["analysis_type"] != "Cross-Sectional":
+            messagebox.showinfo(
+                "Not implemented",
+                "Only cross-sectional momentum is implemented right now.",
+            )
+            return
+        if settings_payload["cross_sectional_strategy"] != "Momentum":
+            messagebox.showinfo(
+                "Not implemented",
+                "Only cross-sectional momentum is implemented right now.",
+            )
+            return
+
+        if self.api_client is None:
+            self.api_client = MassiveApiClient(self.controller.api_key)
+
+        as_of = effective_market_date().isoformat()
+        universe = list(self.controller.state.tickers)
+        price_history, fetch_skipped = self._collect_price_history(
+            universe, lookback_days, skip_days
+        )
+
+        momentum_settings = MomentumSettings(
+            lookback_days=lookback_days,
+            skip_days=skip_days,
+            top_quantile=top_quantile,
+            bottom_quantile=bottom_quantile,
+        )
+        result = compute_cross_sectional_momentum(price_history, momentum_settings)
+        result.skipped.update(fetch_skipped)
+
+        report = format_cross_sectional_report(
+            title="Cross-Sectional Momentum Report",
+            as_of=as_of,
+            universe=universe,
+            settings=settings_payload,
+            result=result,
+        )
+
+        output_path = self._write_report(report, output_dir)
+        messagebox.showinfo(
+            "Analysis complete",
+            f"Cross-sectional momentum results written to:\n{output_path}",
+        )
+
+    def _collect_price_history(
+        self, tickers: list[str], lookback_days: int, skip_days: int
+    ) -> tuple[dict[str, list[float]], dict[str, str]]:
+        min_points = lookback_days + skip_days + 1
+        buffer_days = max(5, int(min_points * 0.5))
+        days_back = min_points + buffer_days
+        as_of = effective_market_date().isoformat()
+
+        prices_by_ticker: dict[str, list[float]] = {}
+        skipped: dict[str, str] = {}
+
+        max_workers = min(8, max(1, len(tickers)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    self._load_daily_closes, ticker, days_back, min_points, as_of
+                )
+                for ticker in tickers
+            ]
+            for future in as_completed(futures):
+                ticker, prices, reason = future.result()
+                if prices:
+                    prices_by_ticker[ticker] = prices
+                else:
+                    skipped[ticker] = reason or "no_data"
+        return prices_by_ticker, skipped
+
+    def _load_daily_closes(
+        self, ticker: str, days_back: int, min_points: int, as_of: str
+    ) -> tuple[str, list[float] | None, str | None]:
+        cache_payload = load_cached_market_data(ticker) or {}
+        daily_cache = cache_payload.get("daily_closes") or {}
+        cached_as_of = daily_cache.get("as_of")
+        cached_prices = daily_cache.get("prices")
+        if (
+            cached_as_of == as_of
+            and isinstance(cached_prices, list)
+            and len(cached_prices) >= min_points
+        ):
+            return ticker, [float(value) for value in cached_prices], None
+
+        if self.api_client is None:
+            self.api_client = MassiveApiClient(self.controller.api_key)
+
+        try:
+            aggregates = self.api_client.fetch_aggregates(
+                ticker, days_back=days_back, minutes_per_bar=1440
+            )
+        except HTTPError as exc:
+            return ticker, None, f"http_error_{exc.code}"
+        except URLError as exc:
+            return ticker, None, f"url_error_{exc.reason}"
+
+        closes: list[float] = []
+        for item in sorted(aggregates, key=lambda row: row.get("t", 0)):
+            close_value = item.get("c")
+            if isinstance(close_value, (int, float)) and close_value > 0:
+                closes.append(float(close_value))
+
+        if closes:
+            cache_payload["daily_closes"] = {
+                "as_of": as_of,
+                "prices": closes,
+                "days_back": days_back,
+            }
+            save_cached_market_data(ticker, cache_payload)
+
+        if len(closes) < min_points:
+            return ticker, None, "insufficient_history"
+        return ticker, closes, None
+
+    def _write_report(self, report: str, output_dir: str) -> Path:
+        directory = Path(output_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = directory / f"cross_sectional_momentum_{timestamp}.txt"
+        output_path.write_text(report)
+        return output_path
 
 
 class CallPutAnalysisPage(ttk.Frame):
