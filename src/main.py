@@ -1453,7 +1453,7 @@ class GeneralAnalysisPage(ttk.Frame):
         self.api_client: MassiveApiClient | None = None
         self._rate_lock = threading.Lock()
         self._last_request_time = 0.0
-        self._min_request_interval = 0.35
+        self._min_request_interval = 0.6
 
         header = ttk.Label(self, text="General Analysis", font=("Arial", 18, "bold"))
         header.pack(pady=10)
@@ -1668,7 +1668,7 @@ class GeneralAnalysisPage(ttk.Frame):
         prices_by_ticker: dict[str, list[float]] = {}
         skipped: dict[str, str] = {}
 
-        max_workers = min(4, max(1, len(tickers)))
+        max_workers = min(2, max(1, len(tickers)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
@@ -1706,8 +1706,8 @@ class GeneralAnalysisPage(ttk.Frame):
         closes: list[float] = []
 
         retry_count = 0
-        max_retries = 3
-        backoff_seconds = 2.0
+        max_retries = 6
+        backoff_seconds = 3.0
         while current_days_back <= max_days_back:
             self._throttle_request()
             try:
@@ -1716,7 +1716,14 @@ class GeneralAnalysisPage(ttk.Frame):
                 )
             except HTTPError as exc:
                 if exc.code == 429 and retry_count < max_retries:
-                    time.sleep(backoff_seconds)
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    wait_seconds = backoff_seconds
+                    if retry_after:
+                        try:
+                            wait_seconds = max(wait_seconds, float(retry_after))
+                        except ValueError:
+                            pass
+                    time.sleep(wait_seconds)
                     retry_count += 1
                     backoff_seconds *= 2
                     continue
