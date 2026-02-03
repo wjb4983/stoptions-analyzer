@@ -1635,7 +1635,7 @@ class GeneralAnalysisPage(ttk.Frame):
         self, tickers: list[str], lookback_days: int, skip_days: int
     ) -> tuple[dict[str, list[float]], dict[str, str]]:
         min_points = lookback_days + skip_days + 1
-        buffer_days = max(5, int(min_points * 0.5))
+        buffer_days = max(10, int(min_points * 1.5))
         days_back = min_points + buffer_days
         as_of = effective_market_date().isoformat()
 
@@ -1675,26 +1675,35 @@ class GeneralAnalysisPage(ttk.Frame):
         if self.api_client is None:
             self.api_client = MassiveApiClient(self.controller.api_key)
 
-        try:
-            aggregates = self.api_client.fetch_aggregates(
-                ticker, days_back=days_back, minutes_per_bar=1440
-            )
-        except HTTPError as exc:
-            return ticker, None, f"http_error_{exc.code}"
-        except URLError as exc:
-            return ticker, None, f"url_error_{exc.reason}"
-
+        current_days_back = days_back
+        max_days_back = max(days_back * 3, min_points * 4)
         closes: list[float] = []
-        for item in sorted(aggregates, key=lambda row: row.get("t", 0)):
-            close_value = item.get("c")
-            if isinstance(close_value, (int, float)) and close_value > 0:
-                closes.append(float(close_value))
+
+        while current_days_back <= max_days_back:
+            try:
+                aggregates = self.api_client.fetch_aggregates(
+                    ticker, days_back=current_days_back, minutes_per_bar=1440
+                )
+            except HTTPError as exc:
+                return ticker, None, f"http_error_{exc.code}"
+            except URLError as exc:
+                return ticker, None, f"url_error_{exc.reason}"
+
+            closes = []
+            for item in sorted(aggregates, key=lambda row: row.get("t", 0)):
+                close_value = item.get("c")
+                if isinstance(close_value, (int, float)) and close_value > 0:
+                    closes.append(float(close_value))
+
+            if len(closes) >= min_points:
+                break
+            current_days_back = int(current_days_back * 1.5) + 1
 
         if closes:
             cache_payload["daily_closes"] = {
                 "as_of": as_of,
                 "prices": closes,
-                "days_back": days_back,
+                "days_back": current_days_back,
             }
             save_cached_market_data(ticker, cache_payload)
 
