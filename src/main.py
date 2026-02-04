@@ -4,6 +4,7 @@ import os
 import socket
 import time
 import threading
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -1462,6 +1463,7 @@ class GeneralAnalysisPage(ttk.Frame):
         self._rate_lock = threading.Lock()
         self._last_request_time = 0.0
         self._min_request_interval = 0.6
+        self._grouped_ticker_pattern = re.compile(r"^[A-Z0-9]+$")
 
         header = ttk.Label(self, text="General Analysis", font=("Arial", 18, "bold"))
         header.pack(pady=10)
@@ -1679,9 +1681,38 @@ class GeneralAnalysisPage(ttk.Frame):
         if len(tickers) >= 200:
             if self.api_client is None:
                 self.api_client = MassiveApiClient(self.controller.api_key)
-            return self._collect_grouped_history(tickers, min_points)
+            grouped = [ticker for ticker in tickers if self._is_grouped_eligible(ticker)]
+            special = [ticker for ticker in tickers if ticker not in grouped]
+            prices_by_ticker, skipped = self._collect_grouped_history(grouped, min_points)
+            if special:
+                special_prices, special_skipped = self._collect_ticker_history(
+                    special, days_back, min_points, as_of
+                )
+                prices_by_ticker.update(special_prices)
+                skipped.update(special_skipped)
+            fallback_tickers = [
+                ticker
+                for ticker, reason in skipped.items()
+                if reason == "insufficient_history" and ticker not in special
+            ]
+            if fallback_tickers:
+                fallback_prices, fallback_skipped = self._collect_ticker_history(
+                    fallback_tickers, days_back, min_points, as_of
+                )
+                prices_by_ticker.update(fallback_prices)
+                for ticker in fallback_tickers:
+                    skipped.pop(ticker, None)
+                skipped.update(fallback_skipped)
+            return prices_by_ticker, skipped
 
-        max_workers = min(2, max(1, len(tickers)))
+        return self._collect_ticker_history(tickers, days_back, min_points, as_of)
+
+    def _collect_ticker_history(
+        self, tickers: list[str], days_back: int, min_points: int, as_of: str
+    ) -> tuple[dict[str, list[float]], dict[str, str]]:
+        prices_by_ticker: dict[str, list[float]] = {}
+        skipped: dict[str, str] = {}
+        max_workers = min(4, max(1, len(tickers)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
@@ -1789,6 +1820,9 @@ class GeneralAnalysisPage(ttk.Frame):
                 skipped[ticker] = "insufficient_history"
 
         return prices_by_ticker, skipped
+
+    def _is_grouped_eligible(self, ticker: str) -> bool:
+        return bool(self._grouped_ticker_pattern.fullmatch(ticker))
 
     def _load_daily_closes(
         self, ticker: str, days_back: int, min_points: int, as_of: str
