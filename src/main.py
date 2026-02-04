@@ -442,6 +442,13 @@ class MassiveApiClient:
         )
         return data.get("results", [])
 
+    def fetch_grouped_daily_aggregates(self, on_date: date) -> list[dict]:
+        payload = self._request(
+            f"/v2/aggs/grouped/locale/us/market/stocks/{on_date}",
+            {"adjusted": "true"},
+        )
+        return payload.get("results", [])
+
 
 @dataclass
 class AppState:
@@ -1668,6 +1675,11 @@ class GeneralAnalysisPage(ttk.Frame):
         prices_by_ticker: dict[str, list[float]] = {}
         skipped: dict[str, str] = {}
 
+        if len(tickers) >= 200:
+            if self.api_client is None:
+                self.api_client = MassiveApiClient(self.controller.api_key)
+            return self._collect_grouped_history(tickers, min_points)
+
         max_workers = min(2, max(1, len(tickers)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
@@ -1682,6 +1694,79 @@ class GeneralAnalysisPage(ttk.Frame):
                     prices_by_ticker[ticker] = prices
                 else:
                     skipped[ticker] = reason or "no_data"
+        return prices_by_ticker, skipped
+
+    def _collect_grouped_history(
+        self, tickers: list[str], min_points: int
+    ) -> tuple[dict[str, list[float]], dict[str, str]]:
+        if self.api_client is None:
+            self.api_client = MassiveApiClient(self.controller.api_key)
+        universe = set(tickers)
+        closes: dict[str, list[float]] = {ticker: [] for ticker in tickers}
+        skipped: dict[str, str] = {}
+        pending = set(tickers)
+
+        end_date = effective_market_date()
+        max_calendar_days = max(30, min_points * 4)
+        current_date = end_date
+        days_checked = 0
+
+        retry_count = 0
+        max_retries = 6
+        backoff_seconds = 3.0
+
+        while pending and days_checked < max_calendar_days:
+            if current_date.weekday() >= 5:
+                current_date -= timedelta(days=1)
+                days_checked += 1
+                continue
+
+            self._throttle_request()
+            try:
+                aggregates = self.api_client.fetch_grouped_daily_aggregates(current_date)
+            except HTTPError as exc:
+                if exc.code == 429 and retry_count < max_retries:
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    wait_seconds = backoff_seconds
+                    if retry_after:
+                        try:
+                            wait_seconds = max(wait_seconds, float(retry_after))
+                        except ValueError:
+                            pass
+                    time.sleep(wait_seconds)
+                    retry_count += 1
+                    backoff_seconds *= 2
+                    continue
+                for ticker in pending:
+                    skipped[ticker] = f"http_error_{exc.code}"
+                break
+            except URLError as exc:
+                for ticker in pending:
+                    skipped[ticker] = f"url_error_{exc.reason}"
+                break
+
+            retry_count = 0
+            backoff_seconds = 3.0
+            for item in aggregates:
+                ticker = item.get("T")
+                if ticker not in universe:
+                    continue
+                close_value = item.get("c")
+                if isinstance(close_value, (int, float)) and close_value > 0:
+                    closes[ticker].append(float(close_value))
+                    if len(closes[ticker]) >= min_points:
+                        pending.discard(ticker)
+
+            current_date -= timedelta(days=1)
+            days_checked += 1
+
+        prices_by_ticker: dict[str, list[float]] = {}
+        for ticker, values in closes.items():
+            if len(values) >= min_points:
+                prices_by_ticker[ticker] = list(reversed(values))
+            elif ticker not in skipped:
+                skipped[ticker] = "insufficient_history"
+
         return prices_by_ticker, skipped
 
     def _load_daily_closes(
