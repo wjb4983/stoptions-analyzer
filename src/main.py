@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import socket
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1740,6 +1741,15 @@ class GeneralAnalysisPage(ttk.Frame):
                 for ticker in pending:
                     skipped[ticker] = f"http_error_{exc.code}"
                 break
+            except (TimeoutError, socket.timeout):
+                if retry_count < max_retries:
+                    time.sleep(backoff_seconds)
+                    retry_count += 1
+                    backoff_seconds *= 2
+                    continue
+                for ticker in pending:
+                    skipped[ticker] = "timeout"
+                break
             except URLError as exc:
                 for ticker in pending:
                     skipped[ticker] = f"url_error_{exc.reason}"
@@ -1813,6 +1823,13 @@ class GeneralAnalysisPage(ttk.Frame):
                     backoff_seconds *= 2
                     continue
                 return ticker, None, f"http_error_{exc.code}"
+            except (TimeoutError, socket.timeout):
+                if retry_count < max_retries:
+                    time.sleep(backoff_seconds)
+                    retry_count += 1
+                    backoff_seconds *= 2
+                    continue
+                return ticker, None, "timeout"
             except URLError as exc:
                 return ticker, None, f"url_error_{exc.reason}"
 
