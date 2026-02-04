@@ -1708,6 +1708,8 @@ class GeneralAnalysisPage(ttk.Frame):
         pending = set(tickers)
 
         end_date = effective_market_date()
+        cache_dir = DATA_DIR / "grouped_cache" / end_date.isoformat()
+        cache_dir.mkdir(parents=True, exist_ok=True)
         max_calendar_days = max(30, min_points * 4)
         current_date = end_date
         days_checked = 0
@@ -1722,9 +1724,22 @@ class GeneralAnalysisPage(ttk.Frame):
                 days_checked += 1
                 continue
 
-            self._throttle_request()
             try:
-                aggregates = self.api_client.fetch_grouped_daily_aggregates(current_date)
+                day_cache_path = cache_dir / f"{current_date}.json"
+                if day_cache_path.exists():
+                    day_payload = json.loads(day_cache_path.read_text())
+                else:
+                    self._throttle_request()
+                    aggregates = self.api_client.fetch_grouped_daily_aggregates(current_date)
+                    day_payload = {}
+                    for item in aggregates:
+                        ticker = item.get("T")
+                        if ticker not in universe:
+                            continue
+                        close_value = item.get("c")
+                        if isinstance(close_value, (int, float)) and close_value > 0:
+                            day_payload[ticker] = float(close_value)
+                    day_cache_path.write_text(json.dumps(day_payload))
             except HTTPError as exc:
                 if exc.code == 429 and retry_count < max_retries:
                     retry_after = exc.headers.get("Retry-After") if exc.headers else None
@@ -1757,13 +1772,9 @@ class GeneralAnalysisPage(ttk.Frame):
 
             retry_count = 0
             backoff_seconds = 3.0
-            for item in aggregates:
-                ticker = item.get("T")
-                if ticker not in universe:
-                    continue
-                close_value = item.get("c")
-                if isinstance(close_value, (int, float)) and close_value > 0:
-                    closes[ticker].append(float(close_value))
+            for ticker, close_value in day_payload.items():
+                if ticker in pending:
+                    closes[ticker].append(close_value)
                     if len(closes[ticker]) >= min_points:
                         pending.discard(ticker)
 
