@@ -1462,7 +1462,7 @@ class GeneralAnalysisPage(ttk.Frame):
         self.api_client: MassiveApiClient | None = None
         self._rate_lock = threading.Lock()
         self._last_request_time = 0.0
-        self._min_request_interval = 0.6
+        self._min_request_interval = 0.05
         self._grouped_ticker_pattern = re.compile(r"^[A-Z0-9]+$")
 
         header = ttk.Label(self, text="General Analysis", font=("Arial", 18, "bold"))
@@ -1712,7 +1712,7 @@ class GeneralAnalysisPage(ttk.Frame):
     ) -> tuple[dict[str, list[float]], dict[str, str]]:
         prices_by_ticker: dict[str, list[float]] = {}
         skipped: dict[str, str] = {}
-        max_workers = min(4, max(1, len(tickers)))
+        max_workers = min(12, max(1, len(tickers)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
@@ -1746,8 +1746,8 @@ class GeneralAnalysisPage(ttk.Frame):
         days_checked = 0
 
         retry_count = 0
-        max_retries = 6
-        backoff_seconds = 3.0
+        max_retries = 4
+        backoff_seconds = 1.0
 
         while pending and days_checked < max_calendar_days:
             if current_date.weekday() >= 5:
@@ -1846,8 +1846,8 @@ class GeneralAnalysisPage(ttk.Frame):
         closes: list[float] = []
 
         retry_count = 0
-        max_retries = 6
-        backoff_seconds = 3.0
+        max_retries = 4
+        backoff_seconds = 1.0
         while current_days_back <= max_days_back:
             self._throttle_request()
             try:
