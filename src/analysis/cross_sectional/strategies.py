@@ -15,6 +15,14 @@ class CrossSectionalSettings:
     bottom_quantile: float = 0.2
 
 
+@dataclass(frozen=True)
+class StrategySpec:
+    name: str
+    compute: Callable[[dict[str, list[float] | list[dict] | tuple[float, ...]], CrossSectionalSettings], CrossSectionalResult]
+    required_data: list[str]
+    description: str
+
+
 def compute_cross_sectional_low_volatility(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
     settings: CrossSectionalSettings,
@@ -98,6 +106,58 @@ def compute_cross_sectional_carry(
     settings: CrossSectionalSettings,
 ) -> CrossSectionalResult:
     return _missing_data_result(prices_by_ticker, settings, "missing_fundamentals", "carry")
+
+
+STRATEGY_REGISTRY = {
+    "Value": StrategySpec(
+        name="Value",
+        compute=compute_cross_sectional_value,
+        required_data=["fundamentals"],
+        description="Ranks on valuation metrics like book-to-market or earnings yield.",
+    ),
+    "Size": StrategySpec(
+        name="Size",
+        compute=compute_cross_sectional_size,
+        required_data=["market_cap"],
+        description="Ranks on market capitalization (small vs large).",
+    ),
+    "Quality": StrategySpec(
+        name="Quality",
+        compute=compute_cross_sectional_quality,
+        required_data=["fundamentals"],
+        description="Ranks on profitability or quality metrics (e.g., ROE).",
+    ),
+    "Investment": StrategySpec(
+        name="Investment",
+        compute=compute_cross_sectional_investment,
+        required_data=["fundamentals"],
+        description="Ranks on asset growth or investment rates.",
+    ),
+    "Low Volatility": StrategySpec(
+        name="Low Volatility",
+        compute=compute_cross_sectional_low_volatility,
+        required_data=["prices"],
+        description="Ranks by trailing volatility; long low-vol names.",
+    ),
+    "Liquidity": StrategySpec(
+        name="Liquidity",
+        compute=compute_cross_sectional_liquidity,
+        required_data=["prices", "volume"],
+        description="Ranks by average dollar volume / liquidity.",
+    ),
+    "Earnings Momentum": StrategySpec(
+        name="Earnings Momentum",
+        compute=compute_cross_sectional_earnings_momentum,
+        required_data=["earnings", "analyst_revisions"],
+        description="Ranks on earnings surprises or analyst revisions.",
+    ),
+    "Carry / Yield": StrategySpec(
+        name="Carry / Yield",
+        compute=compute_cross_sectional_carry,
+        required_data=["fundamentals"],
+        description="Ranks on dividend yield or other carry signals.",
+    ),
+}
 
 
 def _missing_data_result(

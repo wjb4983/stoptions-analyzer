@@ -20,15 +20,8 @@ from zoneinfo import ZoneInfo
 from analysis.cross_sectional import (
     CrossSectionalSettings,
     MomentumSettings,
-    compute_cross_sectional_carry,
-    compute_cross_sectional_earnings_momentum,
-    compute_cross_sectional_investment,
-    compute_cross_sectional_liquidity,
-    compute_cross_sectional_low_volatility,
+    STRATEGY_REGISTRY,
     compute_cross_sectional_momentum,
-    compute_cross_sectional_quality,
-    compute_cross_sectional_size,
-    compute_cross_sectional_value,
 )
 from analysis.reporting import format_cross_sectional_report
 
@@ -1509,9 +1502,6 @@ class GeneralAnalysisPage(ttk.Frame):
                 "Cross-Sectional",
                 "Time-Series",
                 "Cross-Sectional + Time-Series",
-                "Value",
-                "Volatility",
-                "Risk",
             ],
             state="readonly",
             width=30,
@@ -1525,78 +1515,76 @@ class GeneralAnalysisPage(ttk.Frame):
         self.cross_sectional_dropdown = ttk.Combobox(
             form_frame,
             textvariable=self.cross_sectional_var,
-            values=[
-                "Momentum",
-                "Value",
-                "Size",
-                "Quality",
-                "Investment",
-                "Low Volatility",
-                "Liquidity",
-                "Earnings Momentum",
-                "Carry / Yield",
-            ],
+            values=["Momentum", *sorted(STRATEGY_REGISTRY.keys())],
             state="readonly",
             width=30,
         )
         self.cross_sectional_dropdown.grid(row=1, column=1, padx=10, pady=6, sticky="ew")
+        self.cross_sectional_dropdown.bind("<<ComboboxSelected>>", self._on_strategy_change)
+
+        self.strategy_detail_var = tk.StringVar(value="Required data: prices")
+        self.strategy_detail_label = ttk.Label(form_frame, textvariable=self.strategy_detail_var)
+        self.strategy_detail_label.grid(row=2, column=0, columnspan=2, padx=10, pady=2, sticky="w")
 
         ttk.Label(form_frame, text="Lookback (days)").grid(
-            row=2, column=0, padx=10, pady=6, sticky="w"
+            row=3, column=0, padx=10, pady=6, sticky="w"
         )
         self.lookback_var = tk.StringVar()
         ttk.Entry(form_frame, textvariable=self.lookback_var).grid(
-            row=2, column=1, padx=10, pady=6, sticky="ew"
-        )
-
-        ttk.Label(form_frame, text="Skip (days)").grid(
-            row=3, column=0, padx=10, pady=6, sticky="w"
-        )
-        self.skip_var = tk.StringVar()
-        ttk.Entry(form_frame, textvariable=self.skip_var).grid(
             row=3, column=1, padx=10, pady=6, sticky="ew"
         )
 
-        ttk.Label(form_frame, text="Top Quantile (0-1)").grid(
+        ttk.Label(form_frame, text="Skip (days)").grid(
             row=4, column=0, padx=10, pady=6, sticky="w"
         )
-        self.top_quantile_var = tk.StringVar()
-        ttk.Entry(form_frame, textvariable=self.top_quantile_var).grid(
+        self.skip_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.skip_var).grid(
             row=4, column=1, padx=10, pady=6, sticky="ew"
         )
 
-        ttk.Label(form_frame, text="Bottom Quantile (0-1)").grid(
+        ttk.Label(form_frame, text="Top Quantile (0-1)").grid(
             row=5, column=0, padx=10, pady=6, sticky="w"
         )
-        self.bottom_quantile_var = tk.StringVar()
-        ttk.Entry(form_frame, textvariable=self.bottom_quantile_var).grid(
+        self.top_quantile_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.top_quantile_var).grid(
             row=5, column=1, padx=10, pady=6, sticky="ew"
         )
 
-        ttk.Label(form_frame, text="Momentum Toggles").grid(
+        ttk.Label(form_frame, text="Bottom Quantile (0-1)").grid(
             row=6, column=0, padx=10, pady=6, sticky="w"
         )
+        self.bottom_quantile_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.bottom_quantile_var).grid(
+            row=6, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        ttk.Label(form_frame, text="Momentum Toggles").grid(
+            row=7, column=0, padx=10, pady=6, sticky="w"
+        )
         toggles_frame = ttk.Frame(form_frame)
-        toggles_frame.grid(row=6, column=1, padx=10, pady=6, sticky="w")
+        toggles_frame.grid(row=7, column=1, padx=10, pady=6, sticky="w")
         self.momentum_volatility_var = tk.BooleanVar()
         self.momentum_residual_var = tk.BooleanVar()
         self.momentum_multi_horizon_var = tk.BooleanVar()
-        ttk.Checkbutton(
+        self.momentum_volatility_check = ttk.Checkbutton(
             toggles_frame, text="Volatility Scaling", variable=self.momentum_volatility_var
-        ).grid(row=0, column=0, padx=5, sticky="w")
-        ttk.Checkbutton(
+        )
+        self.momentum_residual_check = ttk.Checkbutton(
             toggles_frame, text="Residual Momentum", variable=self.momentum_residual_var
-        ).grid(row=0, column=1, padx=5, sticky="w")
-        ttk.Checkbutton(
+        )
+        self.momentum_multi_horizon_check = ttk.Checkbutton(
             toggles_frame, text="Multi-Horizon", variable=self.momentum_multi_horizon_var
-        ).grid(row=0, column=2, padx=5, sticky="w")
+        )
+        self.momentum_volatility_check.grid(row=0, column=0, padx=5, sticky="w")
+        self.momentum_residual_check.grid(row=0, column=1, padx=5, sticky="w")
+        self.momentum_multi_horizon_check.grid(row=0, column=2, padx=5, sticky="w")
 
         ttk.Label(form_frame, text="Output Directory").grid(
-            row=7, column=0, padx=10, pady=6, sticky="w"
+            row=8, column=0, padx=10, pady=6, sticky="w"
         )
         self.output_dir_var = tk.StringVar()
         ttk.Entry(form_frame, textvariable=self.output_dir_var).grid(
-            row=7, column=1, padx=10, pady=6, sticky="ew"
+            row=8, column=1, padx=10, pady=6, sticky="ew"
         )
 
         button_row = ttk.Frame(self)
@@ -1616,6 +1604,7 @@ class GeneralAnalysisPage(ttk.Frame):
         settings.update(self.controller.state.general_analysis_settings or {})
         self.analysis_type_var.set(settings.get("analysis_type", "Cross-Sectional"))
         self.cross_sectional_var.set(settings.get("cross_sectional_strategy", "Momentum"))
+        self._update_strategy_detail()
         self.lookback_var.set(str(settings.get("lookback_days", 90)))
         self.skip_var.set(str(settings.get("skip_days", 5)))
         self.top_quantile_var.set(str(settings.get("top_quantile", 0.2)))
@@ -1624,6 +1613,36 @@ class GeneralAnalysisPage(ttk.Frame):
         self.momentum_residual_var.set(settings.get("momentum_use_residual", False))
         self.momentum_multi_horizon_var.set(settings.get("momentum_use_multi_horizon", False))
         self.output_dir_var.set(settings.get("output_dir", str(ANALYSIS_OUTPUT_DIR)))
+
+    def _on_strategy_change(self, _event: object) -> None:
+        self._update_strategy_detail()
+
+    def _update_strategy_detail(self) -> None:
+        strategy = self.cross_sectional_var.get()
+        if strategy == "Momentum":
+            self.strategy_detail_var.set("Required data: prices (with optional volume)")
+            self._set_momentum_toggles_state(enabled=True)
+            return
+        spec = STRATEGY_REGISTRY.get(strategy)
+        if spec:
+            required = ", ".join(spec.required_data)
+            self.strategy_detail_var.set(f"Required data: {required}")
+        else:
+            self.strategy_detail_var.set("Required data: prices")
+        self._set_momentum_toggles_state(enabled=False)
+
+    def _set_momentum_toggles_state(self, *, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        if not enabled:
+            self.momentum_volatility_var.set(False)
+            self.momentum_residual_var.set(False)
+            self.momentum_multi_horizon_var.set(False)
+        for widget in (
+            self.momentum_volatility_check,
+            self.momentum_residual_check,
+            self.momentum_multi_horizon_check,
+        ):
+            widget.configure(state=state)
 
     def run_analysis(self) -> None:
         if not self.controller.api_key:
@@ -1703,17 +1722,7 @@ class GeneralAnalysisPage(ttk.Frame):
             factor_settings = CrossSectionalSettings(
                 top_quantile=top_quantile, bottom_quantile=bottom_quantile
             )
-            strategy_map = {
-                "Value": compute_cross_sectional_value,
-                "Size": compute_cross_sectional_size,
-                "Quality": compute_cross_sectional_quality,
-                "Investment": compute_cross_sectional_investment,
-                "Low Volatility": compute_cross_sectional_low_volatility,
-                "Liquidity": compute_cross_sectional_liquidity,
-                "Earnings Momentum": compute_cross_sectional_earnings_momentum,
-                "Carry / Yield": compute_cross_sectional_carry,
-            }
-            result = strategy_map.get(strategy, compute_cross_sectional_value)(
+            result = STRATEGY_REGISTRY.get(strategy, STRATEGY_REGISTRY["Value"]).compute(
                 price_history, factor_settings
             )
         result.skipped.update(fetch_skipped)
