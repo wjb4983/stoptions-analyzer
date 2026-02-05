@@ -27,10 +27,12 @@ def format_cross_sectional_report(
         lines.append(f"  - {key}: {value}")
     lines.append("")
 
+    max_ticker_len = _max_ticker_len(universe_list, result)
+
     lines.append("Top Winners:")
     if result.longs:
         for ticker in sorted(result.longs, key=lambda t: result.scores.get(t, 0.0), reverse=True):
-            lines.append(_format_ticker_line(ticker, result))
+            lines.append(_format_ticker_line(ticker, result, max_ticker_len))
     else:
         lines.append("  (none)")
     lines.append("")
@@ -38,7 +40,7 @@ def format_cross_sectional_report(
     lines.append("Top Losers:")
     if result.shorts:
         for ticker in sorted(result.shorts, key=lambda t: result.scores.get(t, 0.0)):
-            lines.append(_format_ticker_line(ticker, result))
+            lines.append(_format_ticker_line(ticker, result, max_ticker_len))
     else:
         lines.append("  (none)")
     lines.append("")
@@ -46,7 +48,7 @@ def format_cross_sectional_report(
     lines.append("Ranking (best to worst):")
     if result.ranking:
         for ticker, score in result.ranking:
-            lines.append(_format_ticker_line(ticker, result, score_override=score))
+            lines.append(_format_ticker_line(ticker, result, max_ticker_len, score_override=score))
     else:
         lines.append("  (none)")
 
@@ -62,7 +64,7 @@ def format_cross_sectional_report(
     ]
     surveyed_scores.sort(key=lambda item: item[1], reverse=True)
     for ticker, score in surveyed_scores:
-        lines.append(_format_ticker_line(ticker, result, score_override=score))
+        lines.append(_format_ticker_line(ticker, result, max_ticker_len, score_override=score))
     for ticker, reason in sorted(skipped.items()):
         if ticker not in scored:
             lines.append(f"  - {ticker}: skipped ({reason})")
@@ -71,7 +73,10 @@ def format_cross_sectional_report(
 
 
 def _format_ticker_line(
-    ticker: str, result: CrossSectionalResult, score_override: float | None = None
+    ticker: str,
+    result: CrossSectionalResult,
+    max_ticker_len: int,
+    score_override: float | None = None,
 ) -> str:
     score = score_override if score_override is not None else result.scores.get(ticker, 0.0)
     metrics = result.metrics.get(ticker, {})
@@ -79,4 +84,14 @@ def _format_ticker_line(
     for key, value in metrics.items():
         metric_parts.append(f"{key}={value:.4f}")
     metric_text = ", ".join(metric_parts)
-    return f"  - {ticker}: {metric_text}"
+    padded_ticker = ticker.ljust(max_ticker_len)
+    return f"  - {padded_ticker}: {metric_text}"
+
+
+def _max_ticker_len(universe: list[str], result: CrossSectionalResult) -> int:
+    candidates = list(universe)
+    candidates.extend(result.skipped.keys())
+    candidates.extend(result.scores.keys())
+    if not candidates:
+        return 1
+    return max(1, max(len(ticker) for ticker in candidates))

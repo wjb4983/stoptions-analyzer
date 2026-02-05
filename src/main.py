@@ -1719,12 +1719,23 @@ class GeneralAnalysisPage(ttk.Frame):
             )
             result = compute_cross_sectional_momentum(price_history, momentum_settings)
         else:
+            spec = STRATEGY_REGISTRY.get(strategy, STRATEGY_REGISTRY["Value"])
+            missing_requirements = [
+                requirement
+                for requirement in spec.required_data
+                if requirement not in {"prices", "volume"}
+            ]
+            if missing_requirements:
+                messagebox.showinfo(
+                    "Missing data",
+                    "This strategy requires additional data sources that are not yet wired: "
+                    f"{', '.join(missing_requirements)}.",
+                )
+                return
             factor_settings = CrossSectionalSettings(
                 top_quantile=top_quantile, bottom_quantile=bottom_quantile
             )
-            result = STRATEGY_REGISTRY.get(strategy, STRATEGY_REGISTRY["Value"]).compute(
-                price_history, factor_settings
-            )
+            result = spec.compute(price_history, factor_settings)
         result.skipped.update(fetch_skipped)
 
         report = format_cross_sectional_report(
