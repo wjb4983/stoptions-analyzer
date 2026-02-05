@@ -1623,22 +1623,27 @@ class GeneralAnalysisPage(ttk.Frame):
             row=6, column=1, padx=10, pady=6, sticky="ew"
         )
 
-        ttk.Label(form_frame, text="Momentum Toggles").grid(
-            row=7, column=0, padx=10, pady=6, sticky="w"
-        )
-        toggles_frame = ttk.Frame(form_frame)
-        toggles_frame.grid(row=7, column=1, padx=10, pady=6, sticky="w")
+        self.momentum_label = ttk.Label(form_frame, text="Momentum Toggles")
+        self.momentum_label.grid(row=7, column=0, padx=10, pady=6, sticky="w")
+        self.momentum_toggles_frame = ttk.Frame(form_frame)
+        self.momentum_toggles_frame.grid(row=7, column=1, padx=10, pady=6, sticky="w")
         self.momentum_volatility_var = tk.BooleanVar()
         self.momentum_residual_var = tk.BooleanVar()
         self.momentum_multi_horizon_var = tk.BooleanVar()
         self.momentum_volatility_check = ttk.Checkbutton(
-            toggles_frame, text="Volatility Scaling", variable=self.momentum_volatility_var
+            self.momentum_toggles_frame,
+            text="Volatility Scaling",
+            variable=self.momentum_volatility_var,
         )
         self.momentum_residual_check = ttk.Checkbutton(
-            toggles_frame, text="Residual Momentum", variable=self.momentum_residual_var
+            self.momentum_toggles_frame,
+            text="Residual Momentum",
+            variable=self.momentum_residual_var,
         )
         self.momentum_multi_horizon_check = ttk.Checkbutton(
-            toggles_frame, text="Multi-Horizon", variable=self.momentum_multi_horizon_var
+            self.momentum_toggles_frame,
+            text="Multi-Horizon",
+            variable=self.momentum_multi_horizon_var,
         )
         self.momentum_volatility_check.grid(row=0, column=0, padx=5, sticky="w")
         self.momentum_residual_check.grid(row=0, column=1, padx=5, sticky="w")
@@ -1702,6 +1707,11 @@ class GeneralAnalysisPage(ttk.Frame):
             self.momentum_volatility_var.set(False)
             self.momentum_residual_var.set(False)
             self.momentum_multi_horizon_var.set(False)
+            self.momentum_label.grid_remove()
+            self.momentum_toggles_frame.grid_remove()
+        else:
+            self.momentum_label.grid()
+            self.momentum_toggles_frame.grid()
         for widget in (
             self.momentum_volatility_check,
             self.momentum_residual_check,
@@ -1823,18 +1833,19 @@ class GeneralAnalysisPage(ttk.Frame):
         result.skipped.update(fetch_skipped)
         result.skipped.update(fundamentals_skipped)
 
+        report_title = f"Cross-Sectional {strategy} Report"
         report = format_cross_sectional_report(
-            title="Cross-Sectional Momentum Report",
+            title=report_title,
             as_of=as_of,
             universe=universe,
             settings=settings_payload,
             result=result,
         )
 
-        output_path = self._write_report(report, output_dir)
+        output_path = self._write_report(report, output_dir, strategy)
         messagebox.showinfo(
             "Analysis complete",
-            f"Cross-sectional momentum results written to:\n{output_path}",
+            f"Cross-sectional {strategy.lower()} results written to:\n{output_path}",
         )
 
     def _missing_data_guidance(self, missing_requirements: list[str]) -> str:
@@ -2366,11 +2377,12 @@ class GeneralAnalysisPage(ttk.Frame):
                 time.sleep(self._min_request_interval - elapsed)
             self._last_request_time = time.monotonic()
 
-    def _write_report(self, report: str, output_dir: str) -> Path:
+    def _write_report(self, report: str, output_dir: str, strategy: str) -> Path:
         directory = Path(output_dir)
         directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = directory / f"cross_sectional_momentum_{timestamp}.txt"
+        strategy_slug = re.sub(r"[^a-z0-9]+", "_", strategy.strip().lower()).strip("_")
+        output_path = directory / f"cross_sectional_{strategy_slug}_{timestamp}.txt"
         output_path.write_text(report)
         return output_path
 
