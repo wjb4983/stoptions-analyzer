@@ -77,6 +77,6 @@ def _format_ticker_line(
     metrics = result.metrics.get(ticker, {})
     metric_parts = [f"score={score:.4f}"]
     for key, value in metrics.items():
-        metric_parts.append(f\"{key}={value:.4f}\")
+        metric_parts.append(f"{key}={value:.4f}")
     metric_text = ", ".join(metric_parts)
-    return f\"  - {ticker}: {metric_text}\"
+    return f"  - {ticker}: {metric_text}"
