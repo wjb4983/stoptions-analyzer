@@ -17,7 +17,19 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
-from analysis.cross_sectional import MomentumSettings, compute_cross_sectional_momentum
+from analysis.cross_sectional import (
+    CrossSectionalSettings,
+    MomentumSettings,
+    compute_cross_sectional_carry,
+    compute_cross_sectional_earnings_momentum,
+    compute_cross_sectional_investment,
+    compute_cross_sectional_liquidity,
+    compute_cross_sectional_low_volatility,
+    compute_cross_sectional_momentum,
+    compute_cross_sectional_quality,
+    compute_cross_sectional_size,
+    compute_cross_sectional_value,
+)
 from analysis.reporting import format_cross_sectional_report
 
 
@@ -271,6 +283,9 @@ DEFAULT_GENERAL_ANALYSIS_SETTINGS = {
     "skip_days": 5,
     "top_quantile": 0.2,
     "bottom_quantile": 0.2,
+    "momentum_use_volatility_scaling": False,
+    "momentum_use_residual": False,
+    "momentum_use_multi_horizon": False,
     "output_dir": str(ANALYSIS_OUTPUT_DIR),
 }
 
@@ -1510,7 +1525,17 @@ class GeneralAnalysisPage(ttk.Frame):
         self.cross_sectional_dropdown = ttk.Combobox(
             form_frame,
             textvariable=self.cross_sectional_var,
-            values=["Momentum"],
+            values=[
+                "Momentum",
+                "Value",
+                "Size",
+                "Quality",
+                "Investment",
+                "Low Volatility",
+                "Liquidity",
+                "Earnings Momentum",
+                "Carry / Yield",
+            ],
             state="readonly",
             width=30,
         )
@@ -1548,12 +1573,30 @@ class GeneralAnalysisPage(ttk.Frame):
             row=5, column=1, padx=10, pady=6, sticky="ew"
         )
 
-        ttk.Label(form_frame, text="Output Directory").grid(
+        ttk.Label(form_frame, text="Momentum Toggles").grid(
             row=6, column=0, padx=10, pady=6, sticky="w"
+        )
+        toggles_frame = ttk.Frame(form_frame)
+        toggles_frame.grid(row=6, column=1, padx=10, pady=6, sticky="w")
+        self.momentum_volatility_var = tk.BooleanVar()
+        self.momentum_residual_var = tk.BooleanVar()
+        self.momentum_multi_horizon_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            toggles_frame, text="Volatility Scaling", variable=self.momentum_volatility_var
+        ).grid(row=0, column=0, padx=5, sticky="w")
+        ttk.Checkbutton(
+            toggles_frame, text="Residual Momentum", variable=self.momentum_residual_var
+        ).grid(row=0, column=1, padx=5, sticky="w")
+        ttk.Checkbutton(
+            toggles_frame, text="Multi-Horizon", variable=self.momentum_multi_horizon_var
+        ).grid(row=0, column=2, padx=5, sticky="w")
+
+        ttk.Label(form_frame, text="Output Directory").grid(
+            row=7, column=0, padx=10, pady=6, sticky="w"
         )
         self.output_dir_var = tk.StringVar()
         ttk.Entry(form_frame, textvariable=self.output_dir_var).grid(
-            row=6, column=1, padx=10, pady=6, sticky="ew"
+            row=7, column=1, padx=10, pady=6, sticky="ew"
         )
 
         button_row = ttk.Frame(self)
@@ -1577,6 +1620,9 @@ class GeneralAnalysisPage(ttk.Frame):
         self.skip_var.set(str(settings.get("skip_days", 5)))
         self.top_quantile_var.set(str(settings.get("top_quantile", 0.2)))
         self.bottom_quantile_var.set(str(settings.get("bottom_quantile", 0.2)))
+        self.momentum_volatility_var.set(settings.get("momentum_use_volatility_scaling", False))
+        self.momentum_residual_var.set(settings.get("momentum_use_residual", False))
+        self.momentum_multi_horizon_var.set(settings.get("momentum_use_multi_horizon", False))
         self.output_dir_var.set(settings.get("output_dir", str(ANALYSIS_OUTPUT_DIR)))
 
     def run_analysis(self) -> None:
@@ -1617,6 +1663,9 @@ class GeneralAnalysisPage(ttk.Frame):
             "skip_days": skip_days,
             "top_quantile": top_quantile,
             "bottom_quantile": bottom_quantile,
+            "momentum_use_volatility_scaling": self.momentum_volatility_var.get(),
+            "momentum_use_residual": self.momentum_residual_var.get(),
+            "momentum_use_multi_horizon": self.momentum_multi_horizon_var.get(),
             "output_dir": output_dir,
         }
         self.controller.state.general_analysis_settings = settings_payload
@@ -1625,13 +1674,7 @@ class GeneralAnalysisPage(ttk.Frame):
         if settings_payload["analysis_type"] != "Cross-Sectional":
             messagebox.showinfo(
                 "Not implemented",
-                "Only cross-sectional momentum is implemented right now.",
-            )
-            return
-        if settings_payload["cross_sectional_strategy"] != "Momentum":
-            messagebox.showinfo(
-                "Not implemented",
-                "Only cross-sectional momentum is implemented right now.",
+                "Only cross-sectional analysis is implemented right now.",
             )
             return
 
@@ -1644,13 +1687,35 @@ class GeneralAnalysisPage(ttk.Frame):
             universe, lookback_days, skip_days
         )
 
-        momentum_settings = MomentumSettings(
-            lookback_days=lookback_days,
-            skip_days=skip_days,
-            top_quantile=top_quantile,
-            bottom_quantile=bottom_quantile,
-        )
-        result = compute_cross_sectional_momentum(price_history, momentum_settings)
+        strategy = settings_payload["cross_sectional_strategy"]
+        if strategy == "Momentum":
+            momentum_settings = MomentumSettings(
+                lookback_days=lookback_days,
+                skip_days=skip_days,
+                top_quantile=top_quantile,
+                bottom_quantile=bottom_quantile,
+                use_volatility_scaling=settings_payload["momentum_use_volatility_scaling"],
+                use_residual=settings_payload["momentum_use_residual"],
+                use_multi_horizon=settings_payload["momentum_use_multi_horizon"],
+            )
+            result = compute_cross_sectional_momentum(price_history, momentum_settings)
+        else:
+            factor_settings = CrossSectionalSettings(
+                top_quantile=top_quantile, bottom_quantile=bottom_quantile
+            )
+            strategy_map = {
+                "Value": compute_cross_sectional_value,
+                "Size": compute_cross_sectional_size,
+                "Quality": compute_cross_sectional_quality,
+                "Investment": compute_cross_sectional_investment,
+                "Low Volatility": compute_cross_sectional_low_volatility,
+                "Liquidity": compute_cross_sectional_liquidity,
+                "Earnings Momentum": compute_cross_sectional_earnings_momentum,
+                "Carry / Yield": compute_cross_sectional_carry,
+            }
+            result = strategy_map.get(strategy, compute_cross_sectional_value)(
+                price_history, factor_settings
+            )
         result.skipped.update(fetch_skipped)
 
         report = format_cross_sectional_report(
@@ -1759,6 +1824,13 @@ class GeneralAnalysisPage(ttk.Frame):
                 day_cache_path = cache_dir / f"{current_date}.json"
                 if day_cache_path.exists():
                     day_payload = json.loads(day_cache_path.read_text())
+                    if day_payload:
+                        sample_value = next(iter(day_payload.values()))
+                        if isinstance(sample_value, (int, float)):
+                            day_payload = {
+                                ticker: {"close": float(value), "volume": None}
+                                for ticker, value in day_payload.items()
+                            }
                 else:
                     self._throttle_request()
                     aggregates = self.api_client.fetch_grouped_daily_aggregates(current_date)
@@ -1768,8 +1840,14 @@ class GeneralAnalysisPage(ttk.Frame):
                         if ticker not in universe:
                             continue
                         close_value = item.get("c")
+                        volume_value = item.get("v")
                         if isinstance(close_value, (int, float)) and close_value > 0:
-                            day_payload[ticker] = float(close_value)
+                            day_payload[ticker] = {
+                                "close": float(close_value),
+                                "volume": float(volume_value)
+                                if isinstance(volume_value, (int, float))
+                                else None,
+                            }
                     day_cache_path.write_text(json.dumps(day_payload))
             except HTTPError as exc:
                 if exc.code == 429 and retry_count < max_retries:
@@ -1803,9 +1881,9 @@ class GeneralAnalysisPage(ttk.Frame):
 
             retry_count = 0
             backoff_seconds = 3.0
-            for ticker, close_value in day_payload.items():
+            for ticker, payload in day_payload.items():
                 if ticker in pending:
-                    closes[ticker].append(close_value)
+                    closes[ticker].append(payload)
                     if len(closes[ticker]) >= min_points:
                         pending.discard(ticker)
 
@@ -1836,14 +1914,16 @@ class GeneralAnalysisPage(ttk.Frame):
             and isinstance(cached_prices, list)
             and len(cached_prices) >= min_points
         ):
-            return ticker, [float(value) for value in cached_prices], None
+            if cached_prices and isinstance(cached_prices[0], dict):
+                return ticker, cached_prices, None
+            return ticker, [{"close": float(value), "volume": None} for value in cached_prices], None
 
         if self.api_client is None:
             self.api_client = MassiveApiClient(self.controller.api_key)
 
         current_days_back = days_back
         max_days_back = max(days_back * 3, min_points * 4)
-        closes: list[float] = []
+        closes: list[dict] = []
 
         retry_count = 0
         max_retries = 4
@@ -1881,8 +1961,16 @@ class GeneralAnalysisPage(ttk.Frame):
             closes = []
             for item in sorted(aggregates, key=lambda row: row.get("t", 0)):
                 close_value = item.get("c")
+                volume_value = item.get("v")
                 if isinstance(close_value, (int, float)) and close_value > 0:
-                    closes.append(float(close_value))
+                    closes.append(
+                        {
+                            "close": float(close_value),
+                            "volume": float(volume_value)
+                            if isinstance(volume_value, (int, float))
+                            else None,
+                        }
+                    )
 
             if len(closes) >= min_points:
                 break

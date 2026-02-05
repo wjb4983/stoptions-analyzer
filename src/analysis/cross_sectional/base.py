@@ -11,5 +11,6 @@ class CrossSectionalResult:
     longs: list[str]
     shorts: list[str]
     weights: dict[str, float]
+    metrics: dict[str, dict[str, float]] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
