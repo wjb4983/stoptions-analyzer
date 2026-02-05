@@ -238,6 +238,13 @@ def _get_nested_value(payload: dict, paths: list[tuple[str, ...]]) -> float | No
     return None
 
 
+def _has_fundamentals_data(payload: dict) -> bool:
+    for value in payload.values():
+        if value is not None:
+            return True
+    return False
+
+
 def load_option_records(api_client: "MassiveApiClient", ticker: str) -> list[dict]:
     cache_payload = load_cached_market_data(ticker) or {}
     cache_date = cache_payload.get("last_updated")
@@ -1860,10 +1867,12 @@ class GeneralAnalysisPage(ttk.Frame):
             futures = [executor.submit(self._load_fundamentals, ticker, as_of) for ticker in tickers]
             for future in as_completed(futures):
                 ticker, payload, reason = future.result()
-                if payload:
+                if payload and _has_fundamentals_data(payload):
                     fundamentals_by_ticker[ticker] = payload
                 if reason:
                     skipped[ticker] = reason
+                elif not payload or not _has_fundamentals_data(payload):
+                    skipped[ticker] = "missing_fundamentals"
         return fundamentals_by_ticker, skipped
 
     def _load_fundamentals(
@@ -1935,6 +1944,8 @@ class GeneralAnalysisPage(ttk.Frame):
         }
         save_cached_market_data(ticker, cache_payload)
         reason = errors[0] if errors else None
+        if reason is None and not _has_fundamentals_data(payload):
+            reason = "missing_fundamentals"
         return ticker, payload, reason
 
     def _build_fundamentals_payload(
