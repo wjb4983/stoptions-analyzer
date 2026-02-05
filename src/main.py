@@ -204,6 +204,40 @@ def normalize_likelihood_threshold(value: str) -> float | None:
     return max(0.0, min(1.0, raw))
 
 
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).date()
+    except ValueError:
+        return None
+
+
+def _coerce_number(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, dict):
+        nested = value.get("value")
+        if isinstance(nested, (int, float)):
+            return float(nested)
+    return None
+
+
+def _get_nested_value(payload: dict, paths: list[tuple[str, ...]]) -> float | None:
+    for path in paths:
+        current: object = payload
+        for key in path:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(key)
+        value = _coerce_number(current)
+        if value is not None:
+            return value
+    return None
+
+
 def load_option_records(api_client: "MassiveApiClient", ticker: str) -> list[dict]:
     cache_payload = load_cached_market_data(ticker) or {}
     cache_date = cache_payload.get("last_updated")
@@ -336,6 +370,30 @@ class MassiveApiClient:
         with urlopen(url, timeout=10) as response:
             payload = response.read().decode("utf-8")
         return json.loads(payload)
+
+    def fetch_ticker_details(self, ticker: str) -> dict:
+        data = self._request(f"/v3/reference/tickers/{ticker}", {})
+        result = data.get("results") or {}
+        return {
+            "market_cap": result.get("market_cap"),
+            "share_class_shares_outstanding": result.get("share_class_shares_outstanding"),
+            "weighted_shares_outstanding": result.get("weighted_shares_outstanding"),
+        }
+
+    def fetch_financials(self, ticker: str, period: str = "annual") -> list[dict]:
+        data = self._request(
+            "/v3/reference/financials",
+            {"ticker": ticker, "period": period, "limit": "4"},
+        )
+        return data.get("results", [])
+
+    def fetch_dividends(self, ticker: str) -> list[dict]:
+        data = self._request("/v3/reference/dividends", {"ticker": ticker, "limit": "100"})
+        return data.get("results", [])
+
+    def fetch_earnings(self, ticker: str) -> list[dict]:
+        data = self._request("/v3/reference/earnings", {"ticker": ticker, "limit": "8"})
+        return data.get("results", [])
 
     def fetch_previous_close(self, ticker: str) -> dict:
         data = self._request(f"/v2/aggs/ticker/{ticker}/prev", {"adjusted": "true"})
@@ -1705,6 +1763,9 @@ class GeneralAnalysisPage(ttk.Frame):
         price_history, fetch_skipped = self._collect_price_history(
             universe, lookback_days, skip_days
         )
+        fundamentals_by_ticker, fundamentals_skipped = self._collect_fundamentals(
+            universe, as_of
+        )
 
         strategy = settings_payload["cross_sectional_strategy"]
         if strategy == "Momentum":
@@ -1717,13 +1778,28 @@ class GeneralAnalysisPage(ttk.Frame):
                 use_residual=settings_payload["momentum_use_residual"],
                 use_multi_horizon=settings_payload["momentum_use_multi_horizon"],
             )
-            result = compute_cross_sectional_momentum(price_history, momentum_settings)
+            result = compute_cross_sectional_momentum(
+                price_history, fundamentals_by_ticker, momentum_settings
+            )
         else:
             spec = STRATEGY_REGISTRY.get(strategy, STRATEGY_REGISTRY["Value"])
+            data_availability = {
+                "fundamentals": bool(fundamentals_by_ticker),
+                "market_cap": any(
+                    payload.get("market_cap") is not None
+                    for payload in fundamentals_by_ticker.values()
+                ),
+                "earnings": any(
+                    payload.get("earnings_actual") is not None
+                    for payload in fundamentals_by_ticker.values()
+                ),
+                "analyst_revisions": False,
+            }
             missing_requirements = [
                 requirement
                 for requirement in spec.required_data
                 if requirement not in {"prices", "volume"}
+                and not data_availability.get(requirement, False)
             ]
             if missing_requirements:
                 guidance = self._missing_data_guidance(missing_requirements)
@@ -1736,8 +1812,9 @@ class GeneralAnalysisPage(ttk.Frame):
             factor_settings = CrossSectionalSettings(
                 top_quantile=top_quantile, bottom_quantile=bottom_quantile
             )
-            result = spec.compute(price_history, factor_settings)
+            result = spec.compute(price_history, fundamentals_by_ticker, factor_settings)
         result.skipped.update(fetch_skipped)
+        result.skipped.update(fundamentals_skipped)
 
         report = format_cross_sectional_report(
             title="Cross-Sectional Momentum Report",
@@ -1770,6 +1847,249 @@ class GeneralAnalysisPage(ttk.Frame):
         if not suggestions:
             suggestions.append("Provide the missing data in a local file and wire it into the analysis pipeline.")
         return "\n".join(f"- {item}" for item in suggestions)
+
+    def _collect_fundamentals(
+        self, tickers: list[str], as_of: str
+    ) -> tuple[dict[str, dict], dict[str, str]]:
+        fundamentals_by_ticker: dict[str, dict] = {}
+        skipped: dict[str, str] = {}
+        if not tickers:
+            return fundamentals_by_ticker, skipped
+        max_workers = min(8, max(1, len(tickers)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(self._load_fundamentals, ticker, as_of) for ticker in tickers]
+            for future in as_completed(futures):
+                ticker, payload, reason = future.result()
+                if payload:
+                    fundamentals_by_ticker[ticker] = payload
+                if reason:
+                    skipped[ticker] = reason
+        return fundamentals_by_ticker, skipped
+
+    def _load_fundamentals(
+        self, ticker: str, as_of: str
+    ) -> tuple[str, dict | None, str | None]:
+        cache_payload = load_cached_market_data(ticker) or {}
+        fundamentals_cache = cache_payload.get("fundamentals") or {}
+        cached_as_of = fundamentals_cache.get("as_of")
+        cached_payload = fundamentals_cache.get("payload")
+        if cached_as_of == as_of and isinstance(cached_payload, dict):
+            return ticker, cached_payload, None
+
+        if self.api_client is None:
+            self.api_client = MassiveApiClient(self.controller.api_key)
+
+        errors: list[str] = []
+        ticker_details: dict = {}
+        financials: list[dict] = []
+        dividends: list[dict] = []
+        earnings: list[dict] = []
+
+        try:
+            self._throttle_request()
+            ticker_details = self.api_client.fetch_ticker_details(ticker)
+        except HTTPError as exc:
+            errors.append(f"ticker_details_http_error_{exc.code}")
+        except (TimeoutError, socket.timeout):
+            errors.append("ticker_details_timeout")
+        except URLError as exc:
+            errors.append(f"ticker_details_url_error_{exc.reason}")
+
+        try:
+            self._throttle_request()
+            financials = self.api_client.fetch_financials(ticker, period="annual")
+        except HTTPError as exc:
+            errors.append(f"financials_http_error_{exc.code}")
+        except (TimeoutError, socket.timeout):
+            errors.append("financials_timeout")
+        except URLError as exc:
+            errors.append(f"financials_url_error_{exc.reason}")
+
+        try:
+            self._throttle_request()
+            dividends = self.api_client.fetch_dividends(ticker)
+        except HTTPError as exc:
+            errors.append(f"dividends_http_error_{exc.code}")
+        except (TimeoutError, socket.timeout):
+            errors.append("dividends_timeout")
+        except URLError as exc:
+            errors.append(f"dividends_url_error_{exc.reason}")
+
+        try:
+            self._throttle_request()
+            earnings = self.api_client.fetch_earnings(ticker)
+        except HTTPError as exc:
+            if exc.code not in {403, 404}:
+                errors.append(f"earnings_http_error_{exc.code}")
+        except (TimeoutError, socket.timeout):
+            errors.append("earnings_timeout")
+        except URLError as exc:
+            errors.append(f"earnings_url_error_{exc.reason}")
+
+        payload = self._build_fundamentals_payload(
+            ticker_details, financials, dividends, earnings
+        )
+        cache_payload["fundamentals"] = {
+            "as_of": as_of,
+            "payload": payload,
+        }
+        save_cached_market_data(ticker, cache_payload)
+        reason = errors[0] if errors else None
+        return ticker, payload, reason
+
+    def _build_fundamentals_payload(
+        self,
+        ticker_details: dict,
+        financials: list[dict],
+        dividends: list[dict],
+        earnings: list[dict],
+    ) -> dict:
+        financials_record = self._select_latest_by_date(
+            financials,
+            ["fiscal_period_end_date", "reporting_date", "filing_date", "calendar_date"],
+        )
+        financials_record = financials_record or {}
+
+        book_value = _get_nested_value(
+            financials_record,
+            [
+                ("financials", "balance_sheet", "equity"),
+                ("financials", "balance_sheet", "stockholders_equity"),
+                ("financials", "balance_sheet", "total_equity"),
+                ("financials", "balance_sheet", "shareholders_equity"),
+            ],
+        )
+        total_assets = _get_nested_value(
+            financials_record,
+            [
+                ("financials", "balance_sheet", "assets"),
+                ("financials", "balance_sheet", "total_assets"),
+            ],
+        )
+        total_equity = _get_nested_value(
+            financials_record,
+            [
+                ("financials", "balance_sheet", "equity"),
+                ("financials", "balance_sheet", "total_equity"),
+                ("financials", "balance_sheet", "stockholders_equity"),
+            ],
+        )
+        net_income = _get_nested_value(
+            financials_record,
+            [
+                ("financials", "income_statement", "net_income_loss"),
+                ("financials", "income_statement", "net_income"),
+            ],
+        )
+        eps = _get_nested_value(
+            financials_record,
+            [
+                ("financials", "income_statement", "basic_earnings_per_share"),
+                ("financials", "income_statement", "diluted_earnings_per_share"),
+                ("financials", "income_statement", "eps"),
+            ],
+        )
+        shares_outstanding = (
+            _coerce_number(ticker_details.get("weighted_shares_outstanding"))
+            or _coerce_number(ticker_details.get("share_class_shares_outstanding"))
+            or _get_nested_value(
+                financials_record,
+                [
+                    ("financials", "income_statement", "weighted_average_shares_outstanding"),
+                    ("financials", "income_statement", "weighted_average_shares_outstanding_diluted"),
+                ],
+            )
+        )
+        market_cap = _coerce_number(ticker_details.get("market_cap"))
+
+        dividends_ttm, last_dividend_date, last_dividend_amount = self._summarize_dividends(
+            dividends
+        )
+        earnings_record = self._select_latest_by_date(
+            earnings,
+            ["reporting_date", "fiscal_period_end_date", "publish_date", "date"],
+        )
+        earnings_record = earnings_record or {}
+        earnings_actual = _coerce_number(
+            earnings_record.get("actual_eps")
+            or earnings_record.get("eps_actual")
+            or earnings_record.get("eps")
+        )
+        earnings_estimate = _coerce_number(
+            earnings_record.get("estimated_eps") or earnings_record.get("eps_estimate")
+        )
+        if earnings_actual is None:
+            earnings_actual = eps
+        earnings_surprise = (
+            earnings_actual - earnings_estimate
+            if earnings_actual is not None and earnings_estimate is not None
+            else None
+        )
+
+        return {
+            "market_cap": market_cap,
+            "book_value": book_value or total_equity,
+            "total_assets": total_assets,
+            "total_equity": total_equity,
+            "net_income": net_income,
+            "eps": eps,
+            "dividends_ttm": dividends_ttm,
+            "shares_outstanding": shares_outstanding,
+            "earnings_actual": earnings_actual,
+            "earnings_estimate": earnings_estimate,
+            "earnings_surprise": earnings_surprise,
+            "last_ex_dividend_date": last_dividend_date.isoformat()
+            if last_dividend_date
+            else None,
+            "last_dividend_amount": last_dividend_amount,
+        }
+
+    def _select_latest_by_date(
+        self, records: list[dict], date_fields: list[str]
+    ) -> dict | None:
+        best_record: dict | None = None
+        best_date: date | None = None
+        for record in records:
+            record_date: date | None = None
+            for field in date_fields:
+                record_date = _parse_iso_date(record.get(field))
+                if record_date:
+                    break
+            if record_date and (best_date is None or record_date > best_date):
+                best_date = record_date
+                best_record = record
+        if best_record is None and records:
+            return records[0]
+        return best_record
+
+    def _summarize_dividends(
+        self, dividends: list[dict]
+    ) -> tuple[float | None, date | None, float | None]:
+        as_of_date = effective_market_date()
+        ttm_start = as_of_date - timedelta(days=365)
+        total = 0.0
+        total_found = False
+        last_date: date | None = None
+        last_amount: float | None = None
+        for record in dividends:
+            ex_date = _parse_iso_date(
+                record.get("ex_dividend_date")
+                or record.get("ex_date")
+                or record.get("pay_date")
+                or record.get("payment_date")
+            )
+            amount = _coerce_number(
+                record.get("cash_amount") or record.get("dividend") or record.get("amount")
+            )
+            if ex_date and amount is not None:
+                if ex_date >= ttm_start:
+                    total += amount
+                    total_found = True
+                if last_date is None or ex_date > last_date:
+                    last_date = ex_date
+                    last_amount = amount
+        dividends_ttm = total if total_found else None
+        return dividends_ttm, last_date, last_amount
 
     def _collect_price_history(
         self, tickers: list[str], lookback_days: int, skip_days: int

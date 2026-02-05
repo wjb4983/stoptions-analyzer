@@ -22,6 +22,7 @@ class MomentumSettings:
 
 def compute_cross_sectional_momentum(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
+    fundamentals_by_ticker: dict[str, dict] | None,
     settings: MomentumSettings,
 ) -> CrossSectionalResult:
     min_points = settings.lookback_days + settings.skip_days + 1

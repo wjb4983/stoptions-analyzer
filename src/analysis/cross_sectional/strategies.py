@@ -18,13 +18,17 @@ class CrossSectionalSettings:
 @dataclass(frozen=True)
 class StrategySpec:
     name: str
-    compute: Callable[[dict[str, list[float] | list[dict] | tuple[float, ...]], CrossSectionalSettings], CrossSectionalResult]
+    compute: Callable[
+        [dict[str, list[float] | list[dict] | tuple[float, ...]], dict[str, dict] | None, CrossSectionalSettings],
+        CrossSectionalResult,
+    ]
     required_data: list[str]
     description: str
 
 
 def compute_cross_sectional_low_volatility(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
+    fundamentals_by_ticker: dict[str, dict] | None,
     settings: CrossSectionalSettings,
 ) -> CrossSectionalResult:
     scores: dict[str, float] = {}
@@ -48,6 +52,7 @@ def compute_cross_sectional_low_volatility(
 
 def compute_cross_sectional_liquidity(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
+    fundamentals_by_ticker: dict[str, dict] | None,
     settings: CrossSectionalSettings,
 ) -> CrossSectionalResult:
     scores: dict[str, float] = {}
@@ -68,6 +73,7 @@ def compute_cross_sectional_liquidity(
 
 def compute_cross_sectional_value(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
+    fundamentals_by_ticker: dict[str, dict] | None,
     settings: CrossSectionalSettings,
 ) -> CrossSectionalResult:
     return _missing_data_result(prices_by_ticker, settings, "missing_fundamentals", "value")
@@ -75,6 +81,7 @@ def compute_cross_sectional_value(
 
 def compute_cross_sectional_size(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
+    fundamentals_by_ticker: dict[str, dict] | None,
     settings: CrossSectionalSettings,
 ) -> CrossSectionalResult:
     return _missing_data_result(prices_by_ticker, settings, "missing_market_cap", "size")
@@ -82,6 +89,7 @@ def compute_cross_sectional_size(
 
 def compute_cross_sectional_quality(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
+    fundamentals_by_ticker: dict[str, dict] | None,
     settings: CrossSectionalSettings,
 ) -> CrossSectionalResult:
     return _missing_data_result(prices_by_ticker, settings, "missing_fundamentals", "quality")
@@ -89,6 +97,7 @@ def compute_cross_sectional_quality(
 
 def compute_cross_sectional_investment(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
+    fundamentals_by_ticker: dict[str, dict] | None,
     settings: CrossSectionalSettings,
 ) -> CrossSectionalResult:
     return _missing_data_result(prices_by_ticker, settings, "missing_fundamentals", "investment")
@@ -96,6 +105,7 @@ def compute_cross_sectional_investment(
 
 def compute_cross_sectional_earnings_momentum(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
+    fundamentals_by_ticker: dict[str, dict] | None,
     settings: CrossSectionalSettings,
 ) -> CrossSectionalResult:
     return _missing_data_result(prices_by_ticker, settings, "missing_earnings_data", "earnings_momentum")
@@ -103,6 +113,7 @@ def compute_cross_sectional_earnings_momentum(
 
 def compute_cross_sectional_carry(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
+    fundamentals_by_ticker: dict[str, dict] | None,
     settings: CrossSectionalSettings,
 ) -> CrossSectionalResult:
     return _missing_data_result(prices_by_ticker, settings, "missing_fundamentals", "carry")
