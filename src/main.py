@@ -1577,10 +1577,28 @@ class GeneralAnalysisPage(ttk.Frame):
             row=1, column=0, padx=10, pady=6, sticky="w"
         )
         self.cross_sectional_var = tk.StringVar()
+        working_strategies = ["Momentum", "Low Volatility", "Liquidity", "Size"]
+        non_working = [
+            "Value",
+            "Quality",
+            "Investment",
+            "Earnings Momentum",
+            "Carry / Yield",
+        ]
+        self.strategy_label_to_key: dict[str, str] = {
+            name: name for name in working_strategies
+        }
+        self.strategy_label_to_key.update(
+            {f"{name} (no work)": name for name in non_working}
+        )
+        self.strategy_key_to_label = {
+            key: label for label, key in self.strategy_label_to_key.items()
+        }
+        dropdown_values = list(self.strategy_label_to_key.keys())
         self.cross_sectional_dropdown = ttk.Combobox(
             form_frame,
             textvariable=self.cross_sectional_var,
-            values=["Momentum", *sorted(STRATEGY_REGISTRY.keys())],
+            values=dropdown_values,
             state="readonly",
             width=30,
         )
@@ -1673,7 +1691,10 @@ class GeneralAnalysisPage(ttk.Frame):
         settings = dict(DEFAULT_GENERAL_ANALYSIS_SETTINGS)
         settings.update(self.controller.state.general_analysis_settings or {})
         self.analysis_type_var.set(settings.get("analysis_type", "Cross-Sectional"))
-        self.cross_sectional_var.set(settings.get("cross_sectional_strategy", "Momentum"))
+        strategy_key = settings.get("cross_sectional_strategy", "Momentum")
+        self.cross_sectional_var.set(
+            self.strategy_key_to_label.get(strategy_key, "Momentum")
+        )
         self._update_strategy_detail()
         self.lookback_var.set(str(settings.get("lookback_days", 90)))
         self.skip_var.set(str(settings.get("skip_days", 5)))
@@ -1688,7 +1709,7 @@ class GeneralAnalysisPage(ttk.Frame):
         self._update_strategy_detail()
 
     def _update_strategy_detail(self) -> None:
-        strategy = self.cross_sectional_var.get()
+        strategy = self._selected_strategy_key()
         if strategy == "Momentum":
             self.strategy_detail_var.set("Required data: prices (with optional volume)")
             self._set_momentum_toggles_state(enabled=True)
@@ -1750,9 +1771,10 @@ class GeneralAnalysisPage(ttk.Frame):
             return
         output_dir = self.output_dir_var.get().strip() or str(ANALYSIS_OUTPUT_DIR)
 
+        strategy = self._selected_strategy_key()
         settings_payload = {
             "analysis_type": self.analysis_type_var.get(),
-            "cross_sectional_strategy": self.cross_sectional_var.get(),
+            "cross_sectional_strategy": strategy,
             "lookback_days": lookback_days,
             "skip_days": skip_days,
             "top_quantile": top_quantile,
@@ -1784,7 +1806,6 @@ class GeneralAnalysisPage(ttk.Frame):
             universe, as_of
         )
 
-        strategy = settings_payload["cross_sectional_strategy"]
         if strategy == "Momentum":
             momentum_settings = MomentumSettings(
                 lookback_days=lookback_days,
@@ -1847,6 +1868,10 @@ class GeneralAnalysisPage(ttk.Frame):
             "Analysis complete",
             f"Cross-sectional {strategy.lower()} results written to:\n{output_path}",
         )
+
+    def _selected_strategy_key(self) -> str:
+        label = self.cross_sectional_var.get()
+        return self.strategy_label_to_key.get(label, "Momentum")
 
     def _missing_data_guidance(self, missing_requirements: list[str]) -> str:
         suggestions: list[str] = []
