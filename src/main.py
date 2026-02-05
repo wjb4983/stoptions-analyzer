@@ -1,6 +1,11 @@
 import json
 import math
 import os
+import socket
+import time
+import threading
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
@@ -11,6 +16,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
+
+from analysis.cross_sectional import (
+    CrossSectionalSettings,
+    MomentumSettings,
+    STRATEGY_REGISTRY,
+    compute_cross_sectional_momentum,
+)
+from analysis.reporting import format_cross_sectional_report
 
 
 def effective_market_date() -> date:
@@ -172,6 +185,16 @@ def parse_float(value: str) -> float | None:
         return None
 
 
+def parse_int(value: str) -> int | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
 def normalize_likelihood_threshold(value: str) -> float | None:
     raw = parse_float(value)
     if raw is None:
@@ -245,6 +268,19 @@ HORIZON_CONFIGS = [
     ("5Y", 1825, 7200, "5d"),
     ("10Y", 3650, 10080, "7d"),
 ]
+ANALYSIS_OUTPUT_DIR = DATA_DIR / "analysis_outputs"
+DEFAULT_GENERAL_ANALYSIS_SETTINGS = {
+    "analysis_type": "Cross-Sectional",
+    "cross_sectional_strategy": "Momentum",
+    "lookback_days": 90,
+    "skip_days": 5,
+    "top_quantile": 0.2,
+    "bottom_quantile": 0.2,
+    "momentum_use_volatility_scaling": False,
+    "momentum_use_residual": False,
+    "momentum_use_multi_horizon": False,
+    "output_dir": str(ANALYSIS_OUTPUT_DIR),
+}
 
 
 def load_api_key() -> str:
@@ -401,6 +437,28 @@ class MassiveApiClient:
         )
         return data.get("results", [])
 
+    def fetch_daily_aggregates(self, ticker: str, days_back: int) -> list[dict]:
+        if days_back == 1:
+            now = datetime.now(ZoneInfo("America/New_York"))
+            market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+            end_date = (now - timedelta(days=1)).date() if now < market_close else now.date()
+            start_date = end_date
+        else:
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days_back)
+        data = self._request(
+            f"/v2/aggs/ticker/{ticker}/range/1/day/{start_date}/{end_date}",
+            {"adjusted": "true", "sort": "asc", "limit": "5000"},
+        )
+        return data.get("results", [])
+
+    def fetch_grouped_daily_aggregates(self, on_date: date) -> list[dict]:
+        payload = self._request(
+            f"/v2/aggs/grouped/locale/us/market/stocks/{on_date}",
+            {"adjusted": "true"},
+        )
+        return payload.get("results", [])
+
 
 @dataclass
 class AppState:
@@ -408,6 +466,9 @@ class AppState:
     selected_ticker: str | None = None
     analysis_mode: str = "Stock Analysis"
     option_strategy: str = "Naked Call"
+    general_analysis_settings: dict[str, object] = field(
+        default_factory=lambda: dict(DEFAULT_GENERAL_ANALYSIS_SETTINGS)
+    )
 
     def save(self) -> None:
         payload = {
@@ -415,6 +476,7 @@ class AppState:
             "selected_ticker": self.selected_ticker,
             "analysis_mode": self.analysis_mode,
             "option_strategy": self.option_strategy,
+            "general_analysis_settings": self.general_analysis_settings,
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2))
 
@@ -431,6 +493,9 @@ class AppState:
             selected_ticker=payload.get("selected_ticker"),
             analysis_mode=payload.get("analysis_mode", payload.get("analysis_type", "Stock Analysis")),
             option_strategy=payload.get("option_strategy", "Naked Call"),
+            general_analysis_settings=payload.get(
+                "general_analysis_settings", dict(DEFAULT_GENERAL_ANALYSIS_SETTINGS)
+            ),
         )
 
 
@@ -454,6 +519,7 @@ class StoptionsApp(tk.Tk):
             TickerEntryPage,
             TickerSelectPage,
             AnalysisPage,
+            GeneralAnalysisPage,
             CallPutAnalysisPage,
             SpreadAnalysisPage,
         ):
@@ -531,6 +597,13 @@ class MainMenu(ttk.Frame):
             command=lambda: controller.show_frame("AnalysisPage"),
             width=30,
         ).grid(row=2, column=0, pady=10)
+
+        ttk.Button(
+            button_frame,
+            text="General Analysis",
+            command=lambda: controller.show_frame("GeneralAnalysisPage"),
+            width=30,
+        ).grid(row=3, column=0, pady=10)
 
     def refresh(self) -> None:
         self.api_key_var.set(self.controller.api_key)
@@ -1388,6 +1461,587 @@ class AnalysisPage(ttk.Frame):
         self._set_value(self.greeks_values["vega"], greeks.get("vega"))
         self._set_value(self.greeks_values["rho"], greeks.get("rho"))
         self._set_value(self.greeks_values["iv"], greeks.get("iv"))
+
+
+class GeneralAnalysisPage(ttk.Frame):
+    def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
+        super().__init__(parent)
+        self.controller = controller
+        self.api_client: MassiveApiClient | None = None
+        self._rate_lock = threading.Lock()
+        self._last_request_time = 0.0
+        self._min_request_interval = 0.05
+        self._grouped_ticker_pattern = re.compile(r"^[A-Z0-9]+$")
+
+        header = ttk.Label(self, text="General Analysis", font=("Arial", 18, "bold"))
+        header.pack(pady=10)
+
+        description = ttk.Label(
+            self,
+            text=(
+                "Run cross-sectional, time-series, and factor analysis across your current "
+                "stock universe. Tune parameters and export results to a text file."
+            ),
+            wraplength=700,
+            justify="center",
+        )
+        description.pack(pady=(0, 15))
+
+        form_frame = ttk.LabelFrame(self, text="Analysis Settings")
+        form_frame.pack(padx=40, pady=10, fill="x")
+        form_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(form_frame, text="Analysis Type").grid(
+            row=0, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.analysis_type_var = tk.StringVar()
+        self.analysis_type_dropdown = ttk.Combobox(
+            form_frame,
+            textvariable=self.analysis_type_var,
+            values=[
+                "Cross-Sectional",
+                "Time-Series",
+                "Cross-Sectional + Time-Series",
+            ],
+            state="readonly",
+            width=30,
+        )
+        self.analysis_type_dropdown.grid(row=0, column=1, padx=10, pady=6, sticky="ew")
+
+        ttk.Label(form_frame, text="Cross-Sectional Strategy").grid(
+            row=1, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.cross_sectional_var = tk.StringVar()
+        self.cross_sectional_dropdown = ttk.Combobox(
+            form_frame,
+            textvariable=self.cross_sectional_var,
+            values=["Momentum", *sorted(STRATEGY_REGISTRY.keys())],
+            state="readonly",
+            width=30,
+        )
+        self.cross_sectional_dropdown.grid(row=1, column=1, padx=10, pady=6, sticky="ew")
+        self.cross_sectional_dropdown.bind("<<ComboboxSelected>>", self._on_strategy_change)
+
+        self.strategy_detail_var = tk.StringVar(value="Required data: prices")
+        self.strategy_detail_label = ttk.Label(form_frame, textvariable=self.strategy_detail_var)
+        self.strategy_detail_label.grid(row=2, column=0, columnspan=2, padx=10, pady=2, sticky="w")
+
+        ttk.Label(form_frame, text="Lookback (days)").grid(
+            row=3, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.lookback_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.lookback_var).grid(
+            row=3, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        ttk.Label(form_frame, text="Skip (days)").grid(
+            row=4, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.skip_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.skip_var).grid(
+            row=4, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        ttk.Label(form_frame, text="Top Quantile (0-1)").grid(
+            row=5, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.top_quantile_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.top_quantile_var).grid(
+            row=5, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        ttk.Label(form_frame, text="Bottom Quantile (0-1)").grid(
+            row=6, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.bottom_quantile_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.bottom_quantile_var).grid(
+            row=6, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        ttk.Label(form_frame, text="Momentum Toggles").grid(
+            row=7, column=0, padx=10, pady=6, sticky="w"
+        )
+        toggles_frame = ttk.Frame(form_frame)
+        toggles_frame.grid(row=7, column=1, padx=10, pady=6, sticky="w")
+        self.momentum_volatility_var = tk.BooleanVar()
+        self.momentum_residual_var = tk.BooleanVar()
+        self.momentum_multi_horizon_var = tk.BooleanVar()
+        self.momentum_volatility_check = ttk.Checkbutton(
+            toggles_frame, text="Volatility Scaling", variable=self.momentum_volatility_var
+        )
+        self.momentum_residual_check = ttk.Checkbutton(
+            toggles_frame, text="Residual Momentum", variable=self.momentum_residual_var
+        )
+        self.momentum_multi_horizon_check = ttk.Checkbutton(
+            toggles_frame, text="Multi-Horizon", variable=self.momentum_multi_horizon_var
+        )
+        self.momentum_volatility_check.grid(row=0, column=0, padx=5, sticky="w")
+        self.momentum_residual_check.grid(row=0, column=1, padx=5, sticky="w")
+        self.momentum_multi_horizon_check.grid(row=0, column=2, padx=5, sticky="w")
+
+        ttk.Label(form_frame, text="Output Directory").grid(
+            row=8, column=0, padx=10, pady=6, sticky="w"
+        )
+        self.output_dir_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.output_dir_var).grid(
+            row=8, column=1, padx=10, pady=6, sticky="ew"
+        )
+
+        button_row = ttk.Frame(self)
+        button_row.pack(pady=15)
+
+        ttk.Button(button_row, text="Run Analysis", command=self.run_analysis).grid(
+            row=0, column=0, padx=10
+        )
+        ttk.Button(
+            button_row,
+            text="Back to Main Menu",
+            command=lambda: controller.show_frame("MainMenu"),
+        ).grid(row=0, column=1, padx=10)
+
+    def refresh(self) -> None:
+        settings = dict(DEFAULT_GENERAL_ANALYSIS_SETTINGS)
+        settings.update(self.controller.state.general_analysis_settings or {})
+        self.analysis_type_var.set(settings.get("analysis_type", "Cross-Sectional"))
+        self.cross_sectional_var.set(settings.get("cross_sectional_strategy", "Momentum"))
+        self._update_strategy_detail()
+        self.lookback_var.set(str(settings.get("lookback_days", 90)))
+        self.skip_var.set(str(settings.get("skip_days", 5)))
+        self.top_quantile_var.set(str(settings.get("top_quantile", 0.2)))
+        self.bottom_quantile_var.set(str(settings.get("bottom_quantile", 0.2)))
+        self.momentum_volatility_var.set(settings.get("momentum_use_volatility_scaling", False))
+        self.momentum_residual_var.set(settings.get("momentum_use_residual", False))
+        self.momentum_multi_horizon_var.set(settings.get("momentum_use_multi_horizon", False))
+        self.output_dir_var.set(settings.get("output_dir", str(ANALYSIS_OUTPUT_DIR)))
+
+    def _on_strategy_change(self, _event: object) -> None:
+        self._update_strategy_detail()
+
+    def _update_strategy_detail(self) -> None:
+        strategy = self.cross_sectional_var.get()
+        if strategy == "Momentum":
+            self.strategy_detail_var.set("Required data: prices (with optional volume)")
+            self._set_momentum_toggles_state(enabled=True)
+            return
+        spec = STRATEGY_REGISTRY.get(strategy)
+        if spec:
+            required = ", ".join(spec.required_data)
+            self.strategy_detail_var.set(f"Required data: {required}")
+        else:
+            self.strategy_detail_var.set("Required data: prices")
+        self._set_momentum_toggles_state(enabled=False)
+
+    def _set_momentum_toggles_state(self, *, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        if not enabled:
+            self.momentum_volatility_var.set(False)
+            self.momentum_residual_var.set(False)
+            self.momentum_multi_horizon_var.set(False)
+        for widget in (
+            self.momentum_volatility_check,
+            self.momentum_residual_check,
+            self.momentum_multi_horizon_check,
+        ):
+            widget.configure(state=state)
+
+    def run_analysis(self) -> None:
+        if not self.controller.api_key:
+            messagebox.showinfo("Missing key", "Enter a Massive API key first.")
+            return
+        if not self.controller.state.tickers:
+            messagebox.showinfo("Missing universe", "Please add tickers first.")
+            return
+        lookback_days = parse_int(self.lookback_var.get())
+        skip_days = parse_int(self.skip_var.get())
+        top_quantile = parse_float(self.top_quantile_var.get())
+        bottom_quantile = parse_float(self.bottom_quantile_var.get())
+        if lookback_days is None or lookback_days <= 0:
+            messagebox.showinfo("Invalid input", "Lookback days must be a positive integer.")
+            return
+        if skip_days is None or skip_days < 0:
+            messagebox.showinfo("Invalid input", "Skip days must be zero or a positive integer.")
+            return
+        if skip_days >= lookback_days:
+            messagebox.showinfo(
+                "Invalid input",
+                "Skip days must be less than lookback days to compute momentum.",
+            )
+            return
+        if top_quantile is None or not (0 < top_quantile <= 1):
+            messagebox.showinfo("Invalid input", "Top quantile must be between 0 and 1.")
+            return
+        if bottom_quantile is None or not (0 < bottom_quantile <= 1):
+            messagebox.showinfo("Invalid input", "Bottom quantile must be between 0 and 1.")
+            return
+        output_dir = self.output_dir_var.get().strip() or str(ANALYSIS_OUTPUT_DIR)
+
+        settings_payload = {
+            "analysis_type": self.analysis_type_var.get(),
+            "cross_sectional_strategy": self.cross_sectional_var.get(),
+            "lookback_days": lookback_days,
+            "skip_days": skip_days,
+            "top_quantile": top_quantile,
+            "bottom_quantile": bottom_quantile,
+            "momentum_use_volatility_scaling": self.momentum_volatility_var.get(),
+            "momentum_use_residual": self.momentum_residual_var.get(),
+            "momentum_use_multi_horizon": self.momentum_multi_horizon_var.get(),
+            "output_dir": output_dir,
+        }
+        self.controller.state.general_analysis_settings = settings_payload
+        self.controller.persist_state()
+
+        if settings_payload["analysis_type"] != "Cross-Sectional":
+            messagebox.showinfo(
+                "Not implemented",
+                "Only cross-sectional analysis is implemented right now.",
+            )
+            return
+
+        if self.api_client is None:
+            self.api_client = MassiveApiClient(self.controller.api_key)
+
+        as_of = effective_market_date().isoformat()
+        universe = list(self.controller.state.tickers)
+        price_history, fetch_skipped = self._collect_price_history(
+            universe, lookback_days, skip_days
+        )
+
+        strategy = settings_payload["cross_sectional_strategy"]
+        if strategy == "Momentum":
+            momentum_settings = MomentumSettings(
+                lookback_days=lookback_days,
+                skip_days=skip_days,
+                top_quantile=top_quantile,
+                bottom_quantile=bottom_quantile,
+                use_volatility_scaling=settings_payload["momentum_use_volatility_scaling"],
+                use_residual=settings_payload["momentum_use_residual"],
+                use_multi_horizon=settings_payload["momentum_use_multi_horizon"],
+            )
+            result = compute_cross_sectional_momentum(price_history, momentum_settings)
+        else:
+            spec = STRATEGY_REGISTRY.get(strategy, STRATEGY_REGISTRY["Value"])
+            missing_requirements = [
+                requirement
+                for requirement in spec.required_data
+                if requirement not in {"prices", "volume"}
+            ]
+            if missing_requirements:
+                guidance = self._missing_data_guidance(missing_requirements)
+                messagebox.showinfo(
+                    "Missing data",
+                    "This strategy requires additional data sources that are not yet wired: "
+                    f"{', '.join(missing_requirements)}.\n\n{guidance}",
+                )
+                return
+            factor_settings = CrossSectionalSettings(
+                top_quantile=top_quantile, bottom_quantile=bottom_quantile
+            )
+            result = spec.compute(price_history, factor_settings)
+        result.skipped.update(fetch_skipped)
+
+        report = format_cross_sectional_report(
+            title="Cross-Sectional Momentum Report",
+            as_of=as_of,
+            universe=universe,
+            settings=settings_payload,
+            result=result,
+        )
+
+        output_path = self._write_report(report, output_dir)
+        messagebox.showinfo(
+            "Analysis complete",
+            f"Cross-sectional momentum results written to:\n{output_path}",
+        )
+
+    def _missing_data_guidance(self, missing_requirements: list[str]) -> str:
+        suggestions: list[str] = []
+        if "fundamentals" in missing_requirements:
+            suggestions.append(
+                "Fundamentals: import a fundamentals file (CSV/JSON) with fields like book value, earnings, dividends, and market cap."
+            )
+        if "market_cap" in missing_requirements:
+            suggestions.append(
+                "Market cap: compute from price * shares outstanding if shares data is available, or ingest a market-cap file."
+            )
+        if "earnings" in missing_requirements or "analyst_revisions" in missing_requirements:
+            suggestions.append(
+                "Earnings/revisions: ingest analyst estimates or earnings surprise data from a data vendor or your own CSV export."
+            )
+        if not suggestions:
+            suggestions.append("Provide the missing data in a local file and wire it into the analysis pipeline.")
+        return "\n".join(f"- {item}" for item in suggestions)
+
+    def _collect_price_history(
+        self, tickers: list[str], lookback_days: int, skip_days: int
+    ) -> tuple[dict[str, list[float]], dict[str, str]]:
+        min_points = lookback_days + skip_days + 1
+        buffer_days = max(10, int(min_points * 1.5))
+        days_back = min_points + buffer_days
+        as_of = effective_market_date().isoformat()
+
+        prices_by_ticker: dict[str, list[float]] = {}
+        skipped: dict[str, str] = {}
+
+        if len(tickers) >= 200:
+            if self.api_client is None:
+                self.api_client = MassiveApiClient(self.controller.api_key)
+            grouped = [ticker for ticker in tickers if self._is_grouped_eligible(ticker)]
+            special = [ticker for ticker in tickers if ticker not in grouped]
+            prices_by_ticker, skipped = self._collect_grouped_history(grouped, min_points)
+            if special:
+                special_prices, special_skipped = self._collect_ticker_history(
+                    special, days_back, min_points, as_of
+                )
+                prices_by_ticker.update(special_prices)
+                skipped.update(special_skipped)
+            fallback_tickers = [
+                ticker
+                for ticker, reason in skipped.items()
+                if reason == "insufficient_history" and ticker not in special
+            ]
+            if fallback_tickers:
+                fallback_prices, fallback_skipped = self._collect_ticker_history(
+                    fallback_tickers, days_back, min_points, as_of
+                )
+                prices_by_ticker.update(fallback_prices)
+                for ticker in fallback_tickers:
+                    skipped.pop(ticker, None)
+                skipped.update(fallback_skipped)
+            return prices_by_ticker, skipped
+
+        return self._collect_ticker_history(tickers, days_back, min_points, as_of)
+
+    def _collect_ticker_history(
+        self, tickers: list[str], days_back: int, min_points: int, as_of: str
+    ) -> tuple[dict[str, list[float]], dict[str, str]]:
+        prices_by_ticker: dict[str, list[float]] = {}
+        skipped: dict[str, str] = {}
+        max_workers = min(12, max(1, len(tickers)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    self._load_daily_closes, ticker, days_back, min_points, as_of
+                )
+                for ticker in tickers
+            ]
+            for future in as_completed(futures):
+                ticker, prices, reason = future.result()
+                if prices:
+                    prices_by_ticker[ticker] = prices
+                else:
+                    skipped[ticker] = reason or "no_data"
+        return prices_by_ticker, skipped
+
+    def _collect_grouped_history(
+        self, tickers: list[str], min_points: int
+    ) -> tuple[dict[str, list[float]], dict[str, str]]:
+        if self.api_client is None:
+            self.api_client = MassiveApiClient(self.controller.api_key)
+        universe = set(tickers)
+        closes: dict[str, list[float]] = {ticker: [] for ticker in tickers}
+        skipped: dict[str, str] = {}
+        pending = set(tickers)
+
+        end_date = effective_market_date()
+        cache_dir = DATA_DIR / "grouped_cache" / end_date.isoformat()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        max_calendar_days = max(30, min_points * 4)
+        current_date = end_date
+        days_checked = 0
+
+        retry_count = 0
+        max_retries = 4
+        backoff_seconds = 1.0
+
+        while pending and days_checked < max_calendar_days:
+            if current_date.weekday() >= 5:
+                current_date -= timedelta(days=1)
+                days_checked += 1
+                continue
+
+            try:
+                day_cache_path = cache_dir / f"{current_date}.json"
+                if day_cache_path.exists():
+                    day_payload = json.loads(day_cache_path.read_text())
+                    if day_payload:
+                        sample_value = next(iter(day_payload.values()))
+                        if isinstance(sample_value, (int, float)):
+                            day_payload = {
+                                ticker: {"close": float(value), "volume": None}
+                                for ticker, value in day_payload.items()
+                            }
+                else:
+                    self._throttle_request()
+                    aggregates = self.api_client.fetch_grouped_daily_aggregates(current_date)
+                    day_payload = {}
+                    for item in aggregates:
+                        ticker = item.get("T")
+                        if ticker not in universe:
+                            continue
+                        close_value = item.get("c")
+                        volume_value = item.get("v")
+                        if isinstance(close_value, (int, float)) and close_value > 0:
+                            day_payload[ticker] = {
+                                "close": float(close_value),
+                                "volume": float(volume_value)
+                                if isinstance(volume_value, (int, float))
+                                else None,
+                            }
+                    day_cache_path.write_text(json.dumps(day_payload))
+            except HTTPError as exc:
+                if exc.code == 429 and retry_count < max_retries:
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    wait_seconds = backoff_seconds
+                    if retry_after:
+                        try:
+                            wait_seconds = max(wait_seconds, float(retry_after))
+                        except ValueError:
+                            pass
+                    time.sleep(wait_seconds)
+                    retry_count += 1
+                    backoff_seconds *= 2
+                    continue
+                for ticker in pending:
+                    skipped[ticker] = f"http_error_{exc.code}"
+                break
+            except (TimeoutError, socket.timeout):
+                if retry_count < max_retries:
+                    time.sleep(backoff_seconds)
+                    retry_count += 1
+                    backoff_seconds *= 2
+                    continue
+                for ticker in pending:
+                    skipped[ticker] = "timeout"
+                break
+            except URLError as exc:
+                for ticker in pending:
+                    skipped[ticker] = f"url_error_{exc.reason}"
+                break
+
+            retry_count = 0
+            backoff_seconds = 3.0
+            for ticker, payload in day_payload.items():
+                if ticker in pending:
+                    closes[ticker].append(payload)
+                    if len(closes[ticker]) >= min_points:
+                        pending.discard(ticker)
+
+            current_date -= timedelta(days=1)
+            days_checked += 1
+
+        prices_by_ticker: dict[str, list[float]] = {}
+        for ticker, values in closes.items():
+            if len(values) >= min_points:
+                prices_by_ticker[ticker] = list(reversed(values))
+            elif ticker not in skipped:
+                skipped[ticker] = "insufficient_history"
+
+        return prices_by_ticker, skipped
+
+    def _is_grouped_eligible(self, ticker: str) -> bool:
+        return bool(self._grouped_ticker_pattern.fullmatch(ticker))
+
+    def _load_daily_closes(
+        self, ticker: str, days_back: int, min_points: int, as_of: str
+    ) -> tuple[str, list[float] | None, str | None]:
+        cache_payload = load_cached_market_data(ticker) or {}
+        daily_cache = cache_payload.get("daily_closes") or {}
+        cached_as_of = daily_cache.get("as_of")
+        cached_prices = daily_cache.get("prices")
+        if (
+            cached_as_of == as_of
+            and isinstance(cached_prices, list)
+            and len(cached_prices) >= min_points
+        ):
+            if cached_prices and isinstance(cached_prices[0], dict):
+                return ticker, cached_prices, None
+            return ticker, [{"close": float(value), "volume": None} for value in cached_prices], None
+
+        if self.api_client is None:
+            self.api_client = MassiveApiClient(self.controller.api_key)
+
+        current_days_back = days_back
+        max_days_back = max(days_back * 3, min_points * 4)
+        closes: list[dict] = []
+
+        retry_count = 0
+        max_retries = 4
+        backoff_seconds = 1.0
+        while current_days_back <= max_days_back:
+            self._throttle_request()
+            try:
+                aggregates = self.api_client.fetch_daily_aggregates(
+                    ticker, days_back=current_days_back
+                )
+            except HTTPError as exc:
+                if exc.code == 429 and retry_count < max_retries:
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    wait_seconds = backoff_seconds
+                    if retry_after:
+                        try:
+                            wait_seconds = max(wait_seconds, float(retry_after))
+                        except ValueError:
+                            pass
+                    time.sleep(wait_seconds)
+                    retry_count += 1
+                    backoff_seconds *= 2
+                    continue
+                return ticker, None, f"http_error_{exc.code}"
+            except (TimeoutError, socket.timeout):
+                if retry_count < max_retries:
+                    time.sleep(backoff_seconds)
+                    retry_count += 1
+                    backoff_seconds *= 2
+                    continue
+                return ticker, None, "timeout"
+            except URLError as exc:
+                return ticker, None, f"url_error_{exc.reason}"
+
+            closes = []
+            for item in sorted(aggregates, key=lambda row: row.get("t", 0)):
+                close_value = item.get("c")
+                volume_value = item.get("v")
+                if isinstance(close_value, (int, float)) and close_value > 0:
+                    closes.append(
+                        {
+                            "close": float(close_value),
+                            "volume": float(volume_value)
+                            if isinstance(volume_value, (int, float))
+                            else None,
+                        }
+                    )
+
+            if len(closes) >= min_points:
+                break
+            current_days_back = int(current_days_back * 1.5) + 1
+
+        if closes:
+            cache_payload["daily_closes"] = {
+                "as_of": as_of,
+                "prices": closes,
+                "days_back": current_days_back,
+            }
+            save_cached_market_data(ticker, cache_payload)
+
+        if len(closes) < min_points:
+            return ticker, None, "insufficient_history"
+        return ticker, closes, None
+
+    def _throttle_request(self) -> None:
+        with self._rate_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_request_time
+            if elapsed < self._min_request_interval:
+                time.sleep(self._min_request_interval - elapsed)
+            self._last_request_time = time.monotonic()
+
+    def _write_report(self, report: str, output_dir: str) -> Path:
+        directory = Path(output_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = directory / f"cross_sectional_momentum_{timestamp}.txt"
+        output_path.write_text(report)
+        return output_path
 
 
 class CallPutAnalysisPage(ttk.Frame):
