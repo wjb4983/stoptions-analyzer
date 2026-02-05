@@ -67,7 +67,7 @@ def compute_cross_sectional_liquidity(
         if dollar_volume.size == 0:
             skipped[ticker] = "missing_volume"
             continue
-        scores[ticker] = float(np.mean(dollar_volume))
+        scores[ticker] = float(np.mean(np.log1p(dollar_volume)))
     return _rank_scores(scores, skipped, settings, metadata={"strategy": "liquidity"})
 
 
@@ -84,7 +84,23 @@ def compute_cross_sectional_size(
     fundamentals_by_ticker: dict[str, dict] | None,
     settings: CrossSectionalSettings,
 ) -> CrossSectionalResult:
-    return _missing_data_result(prices_by_ticker, settings, "missing_market_cap", "size")
+    scores: dict[str, float] = {}
+    skipped: dict[str, str] = {}
+    for ticker, series in prices_by_ticker.items():
+        fundamentals = (fundamentals_by_ticker or {}).get(ticker, {})
+        market_cap = _coerce_number(fundamentals.get("market_cap"))
+        if market_cap is None:
+            shares_outstanding = _coerce_number(fundamentals.get("shares_outstanding"))
+            last_close = _latest_close(series)
+            if shares_outstanding is None or last_close is None:
+                skipped[ticker] = "missing_market_cap"
+                continue
+            market_cap = shares_outstanding * last_close
+        if market_cap <= 0:
+            skipped[ticker] = "missing_market_cap"
+            continue
+        scores[ticker] = -float(np.log(market_cap))
+    return _rank_scores(scores, skipped, settings, metadata={"strategy": "size"})
 
 
 def compute_cross_sectional_quality(
@@ -179,6 +195,20 @@ def _missing_data_result(
 ) -> CrossSectionalResult:
     skipped = {ticker: reason for ticker in prices_by_ticker}
     return _rank_scores({}, skipped, settings, metadata={"strategy": strategy})
+
+
+def _latest_close(series: list[float] | list[dict] | tuple[float, ...]) -> float | None:
+    values = list(series)
+    closes, _volumes = _extract_close_volume(values)
+    if not closes:
+        return None
+    return float(closes[-1])
+
+
+def _coerce_number(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
 
 
 def _rank_scores(
