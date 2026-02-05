@@ -1726,10 +1726,11 @@ class GeneralAnalysisPage(ttk.Frame):
                 if requirement not in {"prices", "volume"}
             ]
             if missing_requirements:
+                guidance = self._missing_data_guidance(missing_requirements)
                 messagebox.showinfo(
                     "Missing data",
                     "This strategy requires additional data sources that are not yet wired: "
-                    f"{', '.join(missing_requirements)}.",
+                    f"{', '.join(missing_requirements)}.\n\n{guidance}",
                 )
                 return
             factor_settings = CrossSectionalSettings(
@@ -1751,6 +1752,24 @@ class GeneralAnalysisPage(ttk.Frame):
             "Analysis complete",
             f"Cross-sectional momentum results written to:\n{output_path}",
         )
+
+    def _missing_data_guidance(self, missing_requirements: list[str]) -> str:
+        suggestions: list[str] = []
+        if "fundamentals" in missing_requirements:
+            suggestions.append(
+                "Fundamentals: import a fundamentals file (CSV/JSON) with fields like book value, earnings, dividends, and market cap."
+            )
+        if "market_cap" in missing_requirements:
+            suggestions.append(
+                "Market cap: compute from price * shares outstanding if shares data is available, or ingest a market-cap file."
+            )
+        if "earnings" in missing_requirements or "analyst_revisions" in missing_requirements:
+            suggestions.append(
+                "Earnings/revisions: ingest analyst estimates or earnings surprise data from a data vendor or your own CSV export."
+            )
+        if not suggestions:
+            suggestions.append("Provide the missing data in a local file and wire it into the analysis pipeline.")
+        return "\n".join(f"- {item}" for item in suggestions)
 
     def _collect_price_history(
         self, tickers: list[str], lookback_days: int, skip_days: int
