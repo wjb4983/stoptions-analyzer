@@ -1687,6 +1687,18 @@ class GeneralAnalysisPage(ttk.Frame):
             command=lambda: controller.show_frame("MainMenu"),
         ).grid(row=0, column=1, padx=10)
 
+        output_frame = ttk.LabelFrame(self, text="Latest Analysis Output")
+        output_frame.pack(padx=40, pady=(5, 15), fill="both", expand=True)
+        output_frame.rowconfigure(0, weight=1)
+        output_frame.columnconfigure(0, weight=1)
+        self.output_text = tk.Text(output_frame, height=12, wrap="word")
+        output_scrollbar = ttk.Scrollbar(
+            output_frame, orient="vertical", command=self.output_text.yview
+        )
+        self.output_text.configure(yscrollcommand=output_scrollbar.set)
+        self.output_text.grid(row=0, column=0, sticky="nsew")
+        output_scrollbar.grid(row=0, column=1, sticky="ns")
+
     def refresh(self) -> None:
         settings = dict(DEFAULT_GENERAL_ANALYSIS_SETTINGS)
         settings.update(self.controller.state.general_analysis_settings or {})
@@ -1862,6 +1874,8 @@ class GeneralAnalysisPage(ttk.Frame):
             settings=settings_payload,
             result=result,
         )
+        self.output_text.delete("1.0", tk.END)
+        self.output_text.insert(tk.END, report)
 
         output_path = self._write_report(report, output_dir, strategy)
         messagebox.showinfo(
