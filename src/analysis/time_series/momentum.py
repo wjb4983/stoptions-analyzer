@@ -11,11 +11,11 @@ from ..common import (
     multi_horizon_return,
     quantile_bucket_sizes,
 )
-from .base import CrossSectionalResult
+from .base import TimeSeriesResult
 
 
 @dataclass(frozen=True)
-class MomentumSettings:
+class TimeSeriesMomentumSettings:
     lookback_days: int = 90
     skip_days: int = 5
     top_quantile: float = 0.2
@@ -23,13 +23,15 @@ class MomentumSettings:
     use_volatility_scaling: bool = False
     use_residual: bool = False
     use_multi_horizon: bool = False
+    use_zscore: bool = False
+    winsorize_sigma: float | None = None
 
 
-def compute_cross_sectional_momentum(
+def compute_time_series_momentum(
     prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
     fundamentals_by_ticker: dict[str, dict] | None,
-    settings: MomentumSettings,
-) -> CrossSectionalResult:
+    settings: TimeSeriesMomentumSettings,
+) -> TimeSeriesResult:
     min_points = settings.lookback_days + settings.skip_days + 1
     returns: list[float] = []
     tickers: list[str] = []
@@ -38,7 +40,7 @@ def compute_cross_sectional_momentum(
 
     for ticker, prices in prices_by_ticker.items():
         series = list(prices)
-        closes, volumes = extract_close_volume(series)
+        closes, _volumes = extract_close_volume(series)
         if len(closes) < min_points:
             skipped[ticker] = "insufficient_history"
             continue
@@ -67,7 +69,7 @@ def compute_cross_sectional_momentum(
         returns.append(float(momentum_return))
 
     if not returns:
-        return CrossSectionalResult(
+        return TimeSeriesResult(
             scores={},
             ranking=[],
             longs=[],
@@ -84,30 +86,14 @@ def compute_cross_sectional_momentum(
             skipped=skipped,
         )
 
-    returns_array = np.asarray(returns, dtype=float)
-    if settings.use_residual:
-        residual = returns_array - float(np.mean(returns_array))
-        for ticker, value in zip(tickers, residual):
-            metrics.setdefault(ticker, {})["residual"] = float(value)
-
-    combined_scores = []
-    for ticker, base_score in zip(tickers, returns_array):
-        selected_scores = []
-        if settings.use_volatility_scaling:
-            selected_scores.append(metrics.get(ticker, {}).get("vol_scaled"))
-        if settings.use_residual:
-            selected_scores.append(metrics.get(ticker, {}).get("residual"))
-        if settings.use_multi_horizon:
-            selected_scores.append(metrics.get(ticker, {}).get("multi_horizon"))
-        selected_scores = [value for value in selected_scores if value is not None]
-        if selected_scores:
-            combined_scores.append(float(np.mean(selected_scores)))
-            metrics.setdefault(ticker, {})["combined"] = combined_scores[-1]
-        else:
-            combined_scores.append(float(base_score))
-    score_array = np.asarray(combined_scores, dtype=float)
-    order = np.argsort(score_array)
-    total = score_array.shape[0]
+    scores = _combine_scores(
+        tickers=tickers,
+        base_scores=np.asarray(returns, dtype=float),
+        metrics=metrics,
+        settings=settings,
+    )
+    order = np.argsort(scores)
+    total = scores.shape[0]
     top_n, bottom_n = quantile_bucket_sizes(
         total, settings.top_quantile, settings.bottom_quantile
     )
@@ -115,7 +101,7 @@ def compute_cross_sectional_momentum(
     bottom_idx = order[:bottom_n]
     top_idx = order[-top_n:] if top_n > 0 else np.array([], dtype=int)
 
-    ranking = [(tickers[idx], float(score_array[idx])) for idx in order[::-1]]
+    ranking = [(tickers[idx], float(scores[idx])) for idx in order[::-1]]
     longs = [tickers[idx] for idx in top_idx[::-1]]
     shorts = [tickers[idx] for idx in bottom_idx]
     if longs and shorts:
@@ -130,10 +116,10 @@ def compute_cross_sectional_momentum(
         short_weight = -1.0 / len(shorts)
         weights.update({ticker: short_weight for ticker in shorts})
 
-    scores = {ticker: float(score) for ticker, score in zip(tickers, score_array)}
+    score_map = {ticker: float(score) for ticker, score in zip(tickers, scores)}
 
-    return CrossSectionalResult(
-        scores=scores,
+    return TimeSeriesResult(
+        scores=score_map,
         ranking=ranking,
         longs=longs,
         shorts=shorts,
@@ -147,7 +133,60 @@ def compute_cross_sectional_momentum(
             "use_volatility_scaling": settings.use_volatility_scaling,
             "use_residual": settings.use_residual,
             "use_multi_horizon": settings.use_multi_horizon,
+            "use_zscore": settings.use_zscore,
+            "winsorize_sigma": settings.winsorize_sigma,
         },
         metrics=metrics,
         skipped=skipped,
     )
+
+
+def _combine_scores(
+    *,
+    tickers: list[str],
+    base_scores: np.ndarray,
+    metrics: dict[str, dict[str, float]],
+    settings: TimeSeriesMomentumSettings,
+) -> np.ndarray:
+    if settings.use_residual:
+        residual = base_scores - float(np.mean(base_scores))
+        for ticker, value in zip(tickers, residual):
+            metrics.setdefault(ticker, {})["residual"] = float(value)
+
+    combined_scores: list[float] = []
+    for ticker, base_score in zip(tickers, base_scores):
+        selected_scores = []
+        if settings.use_volatility_scaling:
+            selected_scores.append(metrics.get(ticker, {}).get("vol_scaled"))
+        if settings.use_residual:
+            selected_scores.append(metrics.get(ticker, {}).get("residual"))
+        if settings.use_multi_horizon:
+            selected_scores.append(metrics.get(ticker, {}).get("multi_horizon"))
+        selected_scores = [value for value in selected_scores if value is not None]
+        if selected_scores:
+            combined_scores.append(float(np.mean(selected_scores)))
+            metrics.setdefault(ticker, {})["combined"] = combined_scores[-1]
+        else:
+            combined_scores.append(float(base_score))
+
+    score_array = np.asarray(combined_scores, dtype=float)
+    score_array = _winsorize_and_zscore(score_array, settings)
+    return score_array
+
+
+def _winsorize_and_zscore(
+    scores: np.ndarray,
+    settings: TimeSeriesMomentumSettings,
+) -> np.ndarray:
+    if scores.size == 0:
+        return scores
+    adjusted = scores.astype(float)
+    mean = float(np.mean(adjusted))
+    std = float(np.std(adjusted))
+    if settings.winsorize_sigma is not None and std > 0:
+        lower = mean - settings.winsorize_sigma * std
+        upper = mean + settings.winsorize_sigma * std
+        adjusted = np.clip(adjusted, lower, upper)
+    if settings.use_zscore and std > 0:
+        adjusted = (adjusted - mean) / std
+    return adjusted
