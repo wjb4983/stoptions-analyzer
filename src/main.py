@@ -23,7 +23,13 @@ from analysis.cross_sectional import (
     STRATEGY_REGISTRY,
     compute_cross_sectional_momentum,
 )
-from analysis.reporting import format_cross_sectional_report
+from analysis.reporting import format_cross_sectional_report, format_time_series_report
+from analysis.time_series import (
+    TIME_SERIES_STRATEGY_REGISTRY,
+    TimeSeriesMomentumSettings,
+    TimeSeriesSettings,
+    compute_time_series_momentum,
+)
 
 
 def effective_market_date() -> date:
@@ -313,6 +319,7 @@ ANALYSIS_OUTPUT_DIR = DATA_DIR / "analysis_outputs"
 DEFAULT_GENERAL_ANALYSIS_SETTINGS = {
     "analysis_type": "Cross-Sectional",
     "cross_sectional_strategy": "Momentum",
+    "time_series_strategy": "Momentum",
     "lookback_days": 90,
     "skip_days": 5,
     "top_quantile": 0.2,
@@ -320,6 +327,11 @@ DEFAULT_GENERAL_ANALYSIS_SETTINGS = {
     "momentum_use_volatility_scaling": False,
     "momentum_use_residual": False,
     "momentum_use_multi_horizon": False,
+    "time_series_use_volatility_scaling": False,
+    "time_series_use_residual": False,
+    "time_series_use_multi_horizon": False,
+    "time_series_use_zscore": False,
+    "time_series_winsorize_sigma": None,
     "output_dir": str(ANALYSIS_OUTPUT_DIR),
 }
 
@@ -1787,6 +1799,7 @@ class GeneralAnalysisPage(ttk.Frame):
         settings_payload = {
             "analysis_type": self.analysis_type_var.get(),
             "cross_sectional_strategy": strategy,
+            "time_series_strategy": strategy,
             "lookback_days": lookback_days,
             "skip_days": skip_days,
             "top_quantile": top_quantile,
@@ -1794,17 +1807,15 @@ class GeneralAnalysisPage(ttk.Frame):
             "momentum_use_volatility_scaling": self.momentum_volatility_var.get(),
             "momentum_use_residual": self.momentum_residual_var.get(),
             "momentum_use_multi_horizon": self.momentum_multi_horizon_var.get(),
+            "time_series_use_volatility_scaling": self.momentum_volatility_var.get(),
+            "time_series_use_residual": self.momentum_residual_var.get(),
+            "time_series_use_multi_horizon": self.momentum_multi_horizon_var.get(),
+            "time_series_use_zscore": False,
+            "time_series_winsorize_sigma": None,
             "output_dir": output_dir,
         }
         self.controller.state.general_analysis_settings = settings_payload
         self.controller.persist_state()
-
-        if settings_payload["analysis_type"] != "Cross-Sectional":
-            messagebox.showinfo(
-                "Not implemented",
-                "Only cross-sectional analysis is implemented right now.",
-            )
-            return
 
         if self.api_client is None:
             self.api_client = MassiveApiClient(self.controller.api_key)
@@ -1818,6 +1829,96 @@ class GeneralAnalysisPage(ttk.Frame):
             universe, as_of
         )
 
+        analysis_type = settings_payload["analysis_type"]
+        reports: list[str] = []
+        report_labels: list[str] = []
+        if analysis_type in {"Cross-Sectional", "Cross-Sectional + Time-Series"}:
+            cross_result = self._run_cross_sectional_analysis(
+                strategy,
+                price_history,
+                fundamentals_by_ticker,
+                fetch_skipped,
+                fundamentals_skipped,
+                lookback_days,
+                skip_days,
+                top_quantile,
+                bottom_quantile,
+                settings_payload,
+                universe,
+                as_of,
+            )
+            if cross_result is None:
+                return
+            reports.append(cross_result)
+            report_labels.append("cross_sectional")
+        if analysis_type in {"Time-Series", "Cross-Sectional + Time-Series"}:
+            time_series_result = self._run_time_series_analysis(
+                strategy,
+                price_history,
+                fundamentals_by_ticker,
+                fetch_skipped,
+                fundamentals_skipped,
+                lookback_days,
+                skip_days,
+                top_quantile,
+                bottom_quantile,
+                settings_payload,
+                universe,
+                as_of,
+            )
+            if time_series_result is None:
+                return
+            reports.append(time_series_result)
+            report_labels.append("time_series")
+
+        combined_report = "\n\n".join(reports)
+        self.output_text.delete("1.0", tk.END)
+        self.output_text.insert(tk.END, combined_report)
+
+        analysis_slug = "combined" if len(report_labels) > 1 else report_labels[0]
+        output_path = self._write_report(combined_report, output_dir, strategy, analysis_slug)
+        messagebox.showinfo(
+            "Analysis complete",
+            f"{analysis_type} {strategy.lower()} results written to:\n{output_path}",
+        )
+
+    def _selected_strategy_key(self) -> str:
+        label = self.cross_sectional_var.get()
+        return self.strategy_label_to_key.get(label, "Momentum")
+
+    def _missing_data_guidance(self, missing_requirements: list[str]) -> str:
+        suggestions: list[str] = []
+        if "fundamentals" in missing_requirements:
+            suggestions.append(
+                "Fundamentals: import a fundamentals file (CSV/JSON) with fields like book value, earnings, dividends, and market cap."
+            )
+        if "market_cap" in missing_requirements:
+            suggestions.append(
+                "Market cap: compute from price * shares outstanding if shares data is available, or ingest a market-cap file."
+            )
+        if "earnings" in missing_requirements or "analyst_revisions" in missing_requirements:
+            suggestions.append(
+                "Earnings/revisions: ingest analyst estimates or earnings surprise data from a data vendor or your own CSV export."
+            )
+        if not suggestions:
+            suggestions.append("Provide the missing data in a local file and wire it into the analysis pipeline.")
+        return "\n".join(f"- {item}" for item in suggestions)
+
+    def _run_cross_sectional_analysis(
+        self,
+        strategy: str,
+        price_history: dict[str, list[dict]],
+        fundamentals_by_ticker: dict[str, dict],
+        fetch_skipped: dict[str, str],
+        fundamentals_skipped: dict[str, str],
+        lookback_days: int,
+        skip_days: int,
+        top_quantile: float,
+        bottom_quantile: float,
+        settings_payload: dict[str, object],
+        universe: list[str],
+        as_of: str,
+    ) -> str | None:
         if strategy == "Momentum":
             momentum_settings = MomentumSettings(
                 lookback_days=lookback_days,
@@ -1858,7 +1959,7 @@ class GeneralAnalysisPage(ttk.Frame):
                     "This strategy requires additional data sources that are not yet wired: "
                     f"{', '.join(missing_requirements)}.\n\n{guidance}",
                 )
-                return
+                return None
             factor_settings = CrossSectionalSettings(
                 top_quantile=top_quantile, bottom_quantile=bottom_quantile
             )
@@ -1867,43 +1968,97 @@ class GeneralAnalysisPage(ttk.Frame):
         result.skipped.update(fundamentals_skipped)
 
         report_title = f"Cross-Sectional {strategy} Report"
-        report = format_cross_sectional_report(
+        return format_cross_sectional_report(
             title=report_title,
             as_of=as_of,
             universe=universe,
             settings=settings_payload,
             result=result,
         )
-        self.output_text.delete("1.0", tk.END)
-        self.output_text.insert(tk.END, report)
 
-        output_path = self._write_report(report, output_dir, strategy)
-        messagebox.showinfo(
-            "Analysis complete",
-            f"Cross-sectional {strategy.lower()} results written to:\n{output_path}",
+    def _run_time_series_analysis(
+        self,
+        strategy: str,
+        price_history: dict[str, list[dict]],
+        fundamentals_by_ticker: dict[str, dict],
+        fetch_skipped: dict[str, str],
+        fundamentals_skipped: dict[str, str],
+        lookback_days: int,
+        skip_days: int,
+        top_quantile: float,
+        bottom_quantile: float,
+        settings_payload: dict[str, object],
+        universe: list[str],
+        as_of: str,
+    ) -> str | None:
+        if strategy == "Momentum":
+            momentum_settings = TimeSeriesMomentumSettings(
+                lookback_days=lookback_days,
+                skip_days=skip_days,
+                top_quantile=top_quantile,
+                bottom_quantile=bottom_quantile,
+                use_volatility_scaling=settings_payload["time_series_use_volatility_scaling"],
+                use_residual=settings_payload["time_series_use_residual"],
+                use_multi_horizon=settings_payload["time_series_use_multi_horizon"],
+                use_zscore=settings_payload["time_series_use_zscore"],
+                winsorize_sigma=settings_payload["time_series_winsorize_sigma"],
+            )
+            result = compute_time_series_momentum(
+                price_history, fundamentals_by_ticker, momentum_settings
+            )
+        else:
+            spec = TIME_SERIES_STRATEGY_REGISTRY.get(
+                strategy, TIME_SERIES_STRATEGY_REGISTRY["Value"]
+            )
+            data_availability = {
+                "fundamentals": bool(fundamentals_by_ticker),
+                "market_cap": any(
+                    payload.get("market_cap") is not None
+                    for payload in fundamentals_by_ticker.values()
+                ),
+                "earnings": any(
+                    payload.get("earnings_actual") is not None
+                    for payload in fundamentals_by_ticker.values()
+                ),
+                "analyst_revisions": False,
+            }
+            missing_requirements = [
+                requirement
+                for requirement in spec.required_data
+                if requirement not in {"prices", "volume"}
+                and not data_availability.get(requirement, False)
+            ]
+            if missing_requirements:
+                guidance = self._missing_data_guidance(missing_requirements)
+                messagebox.showinfo(
+                    "Missing data",
+                    "This strategy requires additional data sources that are not yet wired: "
+                    f"{', '.join(missing_requirements)}.\n\n{guidance}",
+                )
+                return None
+            factor_settings = TimeSeriesSettings(
+                lookback_days=lookback_days,
+                skip_days=skip_days,
+                top_quantile=top_quantile,
+                bottom_quantile=bottom_quantile,
+                use_volatility_scaling=settings_payload["time_series_use_volatility_scaling"],
+                use_residual=settings_payload["time_series_use_residual"],
+                use_multi_horizon=settings_payload["time_series_use_multi_horizon"],
+                use_zscore=settings_payload["time_series_use_zscore"],
+                winsorize_sigma=settings_payload["time_series_winsorize_sigma"],
+            )
+            result = spec.compute(price_history, fundamentals_by_ticker, factor_settings)
+        result.skipped.update(fetch_skipped)
+        result.skipped.update(fundamentals_skipped)
+
+        report_title = f"Time-Series {strategy} Report"
+        return format_time_series_report(
+            title=report_title,
+            as_of=as_of,
+            universe=universe,
+            settings=settings_payload,
+            result=result,
         )
-
-    def _selected_strategy_key(self) -> str:
-        label = self.cross_sectional_var.get()
-        return self.strategy_label_to_key.get(label, "Momentum")
-
-    def _missing_data_guidance(self, missing_requirements: list[str]) -> str:
-        suggestions: list[str] = []
-        if "fundamentals" in missing_requirements:
-            suggestions.append(
-                "Fundamentals: import a fundamentals file (CSV/JSON) with fields like book value, earnings, dividends, and market cap."
-            )
-        if "market_cap" in missing_requirements:
-            suggestions.append(
-                "Market cap: compute from price * shares outstanding if shares data is available, or ingest a market-cap file."
-            )
-        if "earnings" in missing_requirements or "analyst_revisions" in missing_requirements:
-            suggestions.append(
-                "Earnings/revisions: ingest analyst estimates or earnings surprise data from a data vendor or your own CSV export."
-            )
-        if not suggestions:
-            suggestions.append("Provide the missing data in a local file and wire it into the analysis pipeline.")
-        return "\n".join(f"- {item}" for item in suggestions)
 
     def _collect_fundamentals(
         self, tickers: list[str], as_of: str
@@ -2416,12 +2571,14 @@ class GeneralAnalysisPage(ttk.Frame):
                 time.sleep(self._min_request_interval - elapsed)
             self._last_request_time = time.monotonic()
 
-    def _write_report(self, report: str, output_dir: str, strategy: str) -> Path:
+    def _write_report(
+        self, report: str, output_dir: str, strategy: str, analysis_slug: str
+    ) -> Path:
         directory = Path(output_dir)
         directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         strategy_slug = re.sub(r"[^a-z0-9]+", "_", strategy.strip().lower()).strip("_")
-        output_path = directory / f"cross_sectional_{strategy_slug}_{timestamp}.txt"
+        output_path = directory / f"{analysis_slug}_{strategy_slug}_{timestamp}.txt"
         output_path.write_text(report)
         return output_path
 

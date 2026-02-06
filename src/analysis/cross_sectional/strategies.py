@@ -5,8 +5,8 @@ from typing import Callable
 
 import numpy as np
 
+from ..common import extract_close_volume
 from .base import CrossSectionalResult
-from .momentum import _extract_close_volume
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ def compute_cross_sectional_low_volatility(
     scores: dict[str, float] = {}
     skipped: dict[str, str] = {}
     for ticker, series in prices_by_ticker.items():
-        closes, _volumes = _extract_close_volume(list(series))
+        closes, _volumes = extract_close_volume(list(series))
         if len(closes) < 2:
             skipped[ticker] = "insufficient_history"
             continue
@@ -58,7 +58,7 @@ def compute_cross_sectional_liquidity(
     scores: dict[str, float] = {}
     skipped: dict[str, str] = {}
     for ticker, series in prices_by_ticker.items():
-        closes, volumes = _extract_close_volume(list(series))
+        closes, volumes = extract_close_volume(list(series))
         if not closes or not volumes:
             skipped[ticker] = "missing_volume"
             continue
@@ -199,7 +199,7 @@ def _missing_data_result(
 
 def _latest_close(series: list[float] | list[dict] | tuple[float, ...]) -> float | None:
     values = list(series)
-    closes, _volumes = _extract_close_volume(values)
+    closes, _volumes = extract_close_volume(values)
     if not closes:
         return None
     return float(closes[-1])
