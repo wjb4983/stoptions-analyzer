@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import random
 import socket
 import time
 import threading
@@ -201,6 +202,16 @@ def parse_int(value: str) -> int | None:
         return None
 
 
+def parse_date(value: str) -> date | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
 def normalize_likelihood_threshold(value: str) -> float | None:
     raw = parse_float(value)
     if raw is None:
@@ -316,6 +327,8 @@ HORIZON_CONFIGS = [
     ("10Y", 3650, 10080, "7d"),
 ]
 ANALYSIS_OUTPUT_DIR = DATA_DIR / "analysis_outputs"
+BACKTEST_CACHE_DIR = DATA_DIR / "backtest_cache"
+BACKTEST_OUTPUT_DIR = DATA_DIR / "backtest_outputs"
 DEFAULT_GENERAL_ANALYSIS_SETTINGS = {
     "analysis_type": "Cross-Sectional",
     "cross_sectional_strategy": "Momentum",
@@ -553,6 +566,26 @@ class MassiveApiClient:
             {"adjusted": "true"},
         )
         return payload.get("results", [])
+
+    def fetch_aggregates_range(
+        self, ticker: str, start_date: date, end_date: date, minutes_per_bar: int = 1
+    ) -> list[dict]:
+        params = {"adjusted": "true", "sort": "asc", "limit": "50000"}
+        data = self._request(
+            f"/v2/aggs/ticker/{ticker}/range/{minutes_per_bar}/minute/{start_date}/{end_date}",
+            params,
+        )
+        results: list[dict] = []
+        results.extend(data.get("results", []))
+        next_url = data.get("next_url")
+        while next_url:
+            if "apiKey=" not in next_url:
+                joiner = "&" if "?" in next_url else "?"
+                next_url = f"{next_url}{joiner}apiKey={self.api_key}"
+            payload = self._request_url(next_url)
+            results.extend(payload.get("results", []))
+            next_url = payload.get("next_url")
+        return results
 
 
 @dataclass
@@ -914,11 +947,17 @@ class BacktestingPage(ttk.Frame):
         ttk.Button(button_row, text="Save Parameters", command=self.save_settings).grid(
             row=0, column=0, padx=10
         )
+        self.run_button = ttk.Button(
+            button_row,
+            text="Run Backtest (Cache Data)",
+            command=self.run_backtest_cache,
+        )
+        self.run_button.grid(row=0, column=1, padx=10)
         ttk.Button(
             button_row,
             text="Back to Main Menu",
             command=lambda: controller.show_frame("MainMenu"),
-        ).grid(row=0, column=1, padx=10)
+        ).grid(row=0, column=2, padx=10)
 
     def refresh(self) -> None:
         settings = dict(DEFAULT_BACKTEST_SETTINGS)
@@ -982,6 +1021,90 @@ class BacktestingPage(ttk.Frame):
         }
         self.controller.persist_state()
         messagebox.showinfo("Saved", "Backtesting parameters saved.")
+
+    def run_backtest_cache(self) -> None:
+        if not self.controller.api_key:
+            messagebox.showinfo("Missing key", "Enter a Massive API key first.")
+            return
+        tickers = list(self.controller.state.tickers)
+        if not tickers:
+            messagebox.showinfo("No tickers", "Add tickers before running a backtest.")
+            return
+
+        start_date = parse_date(self.start_date_var.get())
+        end_date = parse_date(self.end_date_var.get())
+        if end_date is None:
+            end_date = date.today()
+        if start_date is None:
+            start_date = end_date - timedelta(days=365 * 5)
+        if start_date >= end_date:
+            messagebox.showinfo("Invalid dates", "Start date must be before end date.")
+            return
+
+        self.run_button.config(state="disabled")
+        self.notes_text.delete("1.0", tk.END)
+        self.notes_text.insert(
+            "1.0",
+            "Running backtest data cache...\nThis may take a while for 1-minute data.\n",
+        )
+
+        thread = threading.Thread(
+            target=self._run_backtest_worker,
+            args=(tickers, start_date, end_date),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_backtest_worker(
+        self, tickers: list[str], start_date: date, end_date: date
+    ) -> None:
+        api_client = MassiveApiClient(self.controller.api_key)
+        BACKTEST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        for ticker in tickers:
+            safe_ticker = _safe_ticker_name(ticker)
+            cache_path = (
+                BACKTEST_CACHE_DIR
+                / f"{safe_ticker}_1m_{start_date.isoformat()}_{end_date.isoformat()}.json"
+            )
+            try:
+                results = api_client.fetch_aggregates_range(
+                    ticker, start_date, end_date, minutes_per_bar=1
+                )
+                cache_path.write_text(
+                    json.dumps(
+                        {
+                            "ticker": ticker,
+                            "start_date": start_date.isoformat(),
+                            "end_date": end_date.isoformat(),
+                            "results": results,
+                        },
+                        indent=2,
+                    )
+                )
+                if results:
+                    sample = random.choice(results)
+                    sample_text = (
+                        f"{ticker}: sample close={sample.get('c')} "
+                        f"timestamp={sample.get('t')}"
+                    )
+                else:
+                    sample_text = f"{ticker}: no data returned"
+            except Exception as exc:
+                sample_text = f"{ticker}: error fetching data ({exc})"
+            lines.append(sample_text)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = BACKTEST_OUTPUT_DIR / f"backtest_cache_{timestamp}.txt"
+        output_path.write_text("\n".join(lines))
+        output_text = "\n".join(lines) + f"\n\nSaved summary to: {output_path}"
+        self.after(0, lambda: self._finish_backtest_run(output_text))
+
+    def _finish_backtest_run(self, output_text: str) -> None:
+        self.notes_text.delete("1.0", tk.END)
+        self.notes_text.insert("1.0", output_text)
+        self.run_button.config(state="normal")
 
 
 
