@@ -1123,8 +1123,7 @@ class BacktestingPage(ttk.Frame):
         api_client = MassiveApiClient(self.controller.api_key)
         cache_root.mkdir(parents=True, exist_ok=True)
         BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        lines: list[str] = []
-        for ticker in tickers:
+        def _process_ticker(ticker: str) -> str:
             safe_ticker = _safe_ticker_name(ticker)
             ticker_dir = cache_root / safe_ticker / "1m"
             ticker_dir.mkdir(parents=True, exist_ok=True)
@@ -1151,48 +1150,53 @@ class BacktestingPage(ttk.Frame):
                                     f"{ticker}: sample close={data['c'][idx]} "
                                     f"timestamp={int(data['t'][idx])}"
                                 )
-                else:
+                    return sample_text
+                legacy_path = (
+                    cache_root
+                    / f"{safe_ticker}_1m_{start_date.isoformat()}_{end_date.isoformat()}.json"
+                )
+                if not legacy_path.exists():
                     legacy_path = (
-                        cache_root
+                        BACKTEST_CACHE_DIR
                         / f"{safe_ticker}_1m_{start_date.isoformat()}_{end_date.isoformat()}.json"
                     )
-                    if not legacy_path.exists():
-                        legacy_path = (
-                            BACKTEST_CACHE_DIR
-                            / f"{safe_ticker}_1m_{start_date.isoformat()}_{end_date.isoformat()}.json"
-                        )
-                    if legacy_path.exists():
-                        results = json.loads(legacy_path.read_text()).get("results", [])
-                    else:
-                        results = api_client.fetch_aggregates_range(
-                            ticker, start_date, end_date, minutes_per_bar=1
-                        )
-                    buckets = chunk_results_by_year(results)
-                    for year, entries in buckets.items():
-                        payload = build_npz_payload(entries)
-                        np.savez_compressed(
-                            ticker_dir / f"{safe_ticker}_1m_{year}.npz", **payload
-                        )
-                    index_payload = {
-                        "ticker": ticker,
-                        "start_date": start_date.isoformat(),
-                        "end_date": end_date.isoformat(),
-                        "full_range": True,
-                        "fetched_at": datetime.now().isoformat(),
-                        "years": sorted(buckets.keys()),
-                    }
-                    index_path.write_text(json.dumps(index_payload, indent=2))
-                    if results:
-                        sample = random.choice(results)
-                        sample_text = (
-                            f"{ticker}: sample close={sample.get('c')} "
-                            f"timestamp={sample.get('t')}"
-                        )
-                    else:
-                        sample_text = f"{ticker}: no data returned"
+                if legacy_path.exists():
+                    results = json.loads(legacy_path.read_text()).get("results", [])
+                else:
+                    results = api_client.fetch_aggregates_range(
+                        ticker, start_date, end_date, minutes_per_bar=1
+                    )
+                buckets = chunk_results_by_year(results)
+                for year, entries in buckets.items():
+                    payload = build_npz_payload(entries)
+                    np.savez_compressed(
+                        ticker_dir / f"{safe_ticker}_1m_{year}.npz", **payload
+                    )
+                index_payload = {
+                    "ticker": ticker,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "full_range": True,
+                    "fetched_at": datetime.now().isoformat(),
+                    "years": sorted(buckets.keys()),
+                }
+                index_path.write_text(json.dumps(index_payload, indent=2))
+                if results:
+                    sample = random.choice(results)
+                    return (
+                        f"{ticker}: sample close={sample.get('c')} "
+                        f"timestamp={sample.get('t')}"
+                    )
+                return f"{ticker}: no data returned"
             except Exception as exc:
-                sample_text = f"{ticker}: error fetching data ({exc})"
-            lines.append(sample_text)
+                return f"{ticker}: error fetching data ({exc})"
+
+        lines: list[str] = []
+        max_workers = min(8, max(1, len(tickers)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {executor.submit(_process_ticker, ticker): ticker for ticker in tickers}
+            for future in as_completed(future_map):
+                lines.append(future.result())
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = BACKTEST_OUTPUT_DIR / f"backtest_cache_{timestamp}.txt"
