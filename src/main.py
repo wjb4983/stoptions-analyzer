@@ -8,7 +8,7 @@ import threading
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 import tkinter as tk
@@ -570,9 +570,15 @@ class MassiveApiClient:
     def fetch_aggregates_range(
         self, ticker: str, start_date: date, end_date: date, minutes_per_bar: int = 1
     ) -> list[dict]:
+        start_dt = datetime.combine(start_date, dt_time.min, tzinfo=ZoneInfo("America/New_York"))
+        end_dt = datetime.combine(
+            end_date, dt_time.max.replace(microsecond=0), tzinfo=ZoneInfo("America/New_York")
+        )
+        start_ms = int(start_dt.timestamp() * 1000)
+        end_ms = int(end_dt.timestamp() * 1000)
         params = {"adjusted": "true", "sort": "asc", "limit": "50000"}
         data = self._request(
-            f"/v2/aggs/ticker/{ticker}/range/{minutes_per_bar}/minute/{start_date}/{end_date}",
+            f"/v2/aggs/ticker/{ticker}/range/{minutes_per_bar}/minute/{start_ms}/{end_ms}",
             params,
         )
         results: list[dict] = []
@@ -1071,9 +1077,14 @@ class BacktestingPage(ttk.Frame):
                 / f"{safe_ticker}_1m_{start_date.isoformat()}_{end_date.isoformat()}.json"
             )
             try:
+                cached_results: list[dict] = []
+                cache_ready = False
                 if cache_path.exists():
                     cached = json.loads(cache_path.read_text())
-                    results = cached.get("results", [])
+                    cached_results = cached.get("results", [])
+                    cache_ready = bool(cached_results) and cached.get("full_range") is True
+                if cache_ready:
+                    results = cached_results
                 else:
                     results = api_client.fetch_aggregates_range(
                         ticker, start_date, end_date, minutes_per_bar=1
@@ -1084,6 +1095,8 @@ class BacktestingPage(ttk.Frame):
                                 "ticker": ticker,
                                 "start_date": start_date.isoformat(),
                                 "end_date": end_date.isoformat(),
+                                "full_range": True,
+                                "fetched_at": datetime.now().isoformat(),
                                 "results": results,
                             },
                             indent=2,
