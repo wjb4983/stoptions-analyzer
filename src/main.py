@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
+import numpy as np
 
 from analysis.cross_sectional import (
     CrossSectionalSettings,
@@ -212,6 +213,45 @@ def parse_date(value: str) -> date | None:
         return None
 
 
+def normalize_cache_root(value: str) -> Path:
+    text = value.strip()
+    if not text:
+        return BACKTEST_CACHE_DIR
+    return Path(text).expanduser()
+
+
+def chunk_results_by_year(results: list[dict]) -> dict[int, list[dict]]:
+    buckets: dict[int, list[dict]] = {}
+    for entry in results:
+        timestamp = entry.get("t")
+        if timestamp is None:
+            continue
+        try:
+            stamp = datetime.fromtimestamp(timestamp / 1000, tz=ZoneInfo("America/New_York"))
+        except (TypeError, ValueError, OSError):
+            continue
+        buckets.setdefault(stamp.year, []).append(entry)
+    return buckets
+
+
+def build_npz_payload(entries: list[dict]) -> dict[str, np.ndarray]:
+    def _extract(key: str, default: float = float("nan")) -> np.ndarray:
+        return np.array(
+            [entry.get(key, default) for entry in entries], dtype=float
+        )
+
+    payload = {
+        "t": np.array([entry.get("t", 0) for entry in entries], dtype=np.int64),
+        "o": _extract("o"),
+        "h": _extract("h"),
+        "l": _extract("l"),
+        "c": _extract("c"),
+        "v": _extract("v"),
+        "n": _extract("n"),
+    }
+    return payload
+
+
 def normalize_likelihood_threshold(value: str) -> float | None:
     raw = parse_float(value)
     if raw is None:
@@ -364,6 +404,7 @@ DEFAULT_BACKTEST_SETTINGS = {
     "model_walk_forward": False,
     "max_position_pct": "10",
     "notes": "",
+    "backtest_data_root": str(BACKTEST_CACHE_DIR),
 }
 
 
@@ -895,6 +936,14 @@ class BacktestingPage(ttk.Frame):
             row=4, column=1, sticky="ew", padx=8, pady=6
         )
 
+        ttk.Label(data_frame, text="Backtest Data Root").grid(
+            row=5, column=0, sticky="w", padx=8, pady=6
+        )
+        self.backtest_root_var = tk.StringVar()
+        ttk.Entry(data_frame, textvariable=self.backtest_root_var).grid(
+            row=5, column=1, sticky="ew", padx=8, pady=6
+        )
+
         realism_frame = ttk.LabelFrame(content, text="Execution Realism")
         realism_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
         realism_frame.columnconfigure(1, weight=1)
@@ -976,6 +1025,9 @@ class BacktestingPage(ttk.Frame):
         self.start_date_var.set(settings.get("start_date", ""))
         self.end_date_var.set(settings.get("end_date", ""))
         self.training_split_var.set(settings.get("training_split", "70/30"))
+        self.backtest_root_var.set(
+            settings.get("backtest_data_root", str(BACKTEST_CACHE_DIR))
+        )
         self.slippage_bps_var.set(settings.get("slippage_bps", "5"))
         self.commission_var.set(settings.get("commission_per_contract", "0.65"))
         self.fill_probability_var.set(settings.get("fill_probability", "0.9"))
@@ -1017,6 +1069,7 @@ class BacktestingPage(ttk.Frame):
             "start_date": self.start_date_var.get().strip(),
             "end_date": self.end_date_var.get().strip(),
             "training_split": self.training_split_var.get().strip(),
+            "backtest_data_root": self.backtest_root_var.get().strip(),
             "slippage_bps": str(slippage_bps),
             "commission_per_contract": str(commission),
             "fill_probability": str(fill_probability),
@@ -1056,60 +1109,87 @@ class BacktestingPage(ttk.Frame):
             "This may take a while for 1-minute data.\n",
         )
 
+        cache_root = normalize_cache_root(self.backtest_root_var.get())
         thread = threading.Thread(
             target=self._run_backtest_worker,
-            args=(tickers, start_date, end_date),
+            args=(tickers, start_date, end_date, cache_root),
             daemon=True,
         )
         thread.start()
 
     def _run_backtest_worker(
-        self, tickers: list[str], start_date: date, end_date: date
+        self, tickers: list[str], start_date: date, end_date: date, cache_root: Path
     ) -> None:
         api_client = MassiveApiClient(self.controller.api_key)
-        BACKTEST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_root.mkdir(parents=True, exist_ok=True)
         BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         lines: list[str] = []
         for ticker in tickers:
             safe_ticker = _safe_ticker_name(ticker)
-            cache_path = (
-                BACKTEST_CACHE_DIR
-                / f"{safe_ticker}_1m_{start_date.isoformat()}_{end_date.isoformat()}.json"
-            )
+            ticker_dir = cache_root / safe_ticker / "1m"
+            ticker_dir.mkdir(parents=True, exist_ok=True)
+            index_path = ticker_dir / "index.json"
+            expected_years = list(range(start_date.year, end_date.year + 1))
             try:
-                cached_results: list[dict] = []
                 cache_ready = False
-                if cache_path.exists():
-                    cached = json.loads(cache_path.read_text())
-                    cached_results = cached.get("results", [])
-                    cache_ready = bool(cached_results) and cached.get("full_range") is True
+                if index_path.exists():
+                    index_data = json.loads(index_path.read_text())
+                    years = index_data.get("years", [])
+                    cache_ready = (
+                        index_data.get("full_range") is True
+                        and set(expected_years).issubset(set(years))
+                    )
                 if cache_ready:
-                    results = cached_results
+                    sample_text = f"{ticker}: cached data ready"
+                    sample_year = random.choice(expected_years)
+                    sample_path = ticker_dir / f"{safe_ticker}_1m_{sample_year}.npz"
+                    if sample_path.exists():
+                        with np.load(sample_path, mmap_mode="r") as data:
+                            if data["t"].size > 0:
+                                idx = random.randrange(data["t"].size)
+                                sample_text = (
+                                    f"{ticker}: sample close={data['c'][idx]} "
+                                    f"timestamp={int(data['t'][idx])}"
+                                )
                 else:
-                    results = api_client.fetch_aggregates_range(
-                        ticker, start_date, end_date, minutes_per_bar=1
+                    legacy_path = (
+                        cache_root
+                        / f"{safe_ticker}_1m_{start_date.isoformat()}_{end_date.isoformat()}.json"
                     )
-                    cache_path.write_text(
-                        json.dumps(
-                            {
-                                "ticker": ticker,
-                                "start_date": start_date.isoformat(),
-                                "end_date": end_date.isoformat(),
-                                "full_range": True,
-                                "fetched_at": datetime.now().isoformat(),
-                                "results": results,
-                            },
-                            indent=2,
+                    if not legacy_path.exists():
+                        legacy_path = (
+                            BACKTEST_CACHE_DIR
+                            / f"{safe_ticker}_1m_{start_date.isoformat()}_{end_date.isoformat()}.json"
                         )
-                    )
-                if results:
-                    sample = random.choice(results)
-                    sample_text = (
-                        f"{ticker}: sample close={sample.get('c')} "
-                        f"timestamp={sample.get('t')}"
-                    )
-                else:
-                    sample_text = f"{ticker}: no data returned"
+                    if legacy_path.exists():
+                        results = json.loads(legacy_path.read_text()).get("results", [])
+                    else:
+                        results = api_client.fetch_aggregates_range(
+                            ticker, start_date, end_date, minutes_per_bar=1
+                        )
+                    buckets = chunk_results_by_year(results)
+                    for year, entries in buckets.items():
+                        payload = build_npz_payload(entries)
+                        np.savez_compressed(
+                            ticker_dir / f"{safe_ticker}_1m_{year}.npz", **payload
+                        )
+                    index_payload = {
+                        "ticker": ticker,
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                        "full_range": True,
+                        "fetched_at": datetime.now().isoformat(),
+                        "years": sorted(buckets.keys()),
+                    }
+                    index_path.write_text(json.dumps(index_payload, indent=2))
+                    if results:
+                        sample = random.choice(results)
+                        sample_text = (
+                            f"{ticker}: sample close={sample.get('c')} "
+                            f"timestamp={sample.get('t')}"
+                        )
+                    else:
+                        sample_text = f"{ticker}: no data returned"
             except Exception as exc:
                 sample_text = f"{ticker}: error fetching data ({exc})"
             lines.append(sample_text)
