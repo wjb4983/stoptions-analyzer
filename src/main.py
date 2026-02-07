@@ -1035,8 +1035,9 @@ class BacktestingPage(ttk.Frame):
         end_date = parse_date(self.end_date_var.get())
         if end_date is None:
             end_date = date.today()
-        if start_date is None:
-            start_date = end_date - timedelta(days=365 * 5)
+        five_year_start = end_date - timedelta(days=365 * 5)
+        if start_date is None or start_date != five_year_start:
+            start_date = five_year_start
         if start_date >= end_date:
             messagebox.showinfo("Invalid dates", "Start date must be before end date.")
             return
@@ -1045,7 +1046,8 @@ class BacktestingPage(ttk.Frame):
         self.notes_text.delete("1.0", tk.END)
         self.notes_text.insert(
             "1.0",
-            "Running backtest data cache...\nThis may take a while for 1-minute data.\n",
+            "Running backtest data cache (5 years @ 1-minute)...\n"
+            "This may take a while for 1-minute data.\n",
         )
 
         thread = threading.Thread(
@@ -1069,20 +1071,24 @@ class BacktestingPage(ttk.Frame):
                 / f"{safe_ticker}_1m_{start_date.isoformat()}_{end_date.isoformat()}.json"
             )
             try:
-                results = api_client.fetch_aggregates_range(
-                    ticker, start_date, end_date, minutes_per_bar=1
-                )
-                cache_path.write_text(
-                    json.dumps(
-                        {
-                            "ticker": ticker,
-                            "start_date": start_date.isoformat(),
-                            "end_date": end_date.isoformat(),
-                            "results": results,
-                        },
-                        indent=2,
+                if cache_path.exists():
+                    cached = json.loads(cache_path.read_text())
+                    results = cached.get("results", [])
+                else:
+                    results = api_client.fetch_aggregates_range(
+                        ticker, start_date, end_date, minutes_per_bar=1
                     )
-                )
+                    cache_path.write_text(
+                        json.dumps(
+                            {
+                                "ticker": ticker,
+                                "start_date": start_date.isoformat(),
+                                "end_date": end_date.isoformat(),
+                                "results": results,
+                            },
+                            indent=2,
+                        )
+                    )
                 if results:
                     sample = random.choice(results)
                     sample_text = (
