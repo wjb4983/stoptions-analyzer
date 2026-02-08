@@ -386,6 +386,23 @@ def _safe_ticker_name(ticker: str) -> str:
     return "".join(char if char.isalnum() else "_" for char in ticker.upper())
 
 
+def _safe_dir_name(name: str) -> str:
+    safe = _safe_ticker_name(name).rstrip(" .")
+    if not safe:
+        safe = "TICKER"
+    reserved = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    }
+    if safe.upper() in reserved:
+        return f"{safe}_"
+    return safe
+
+
 def _cache_path(ticker: str) -> Path:
     return DATA_DIR / f"{_safe_ticker_name(ticker)}.json"
 
@@ -1080,7 +1097,7 @@ class BacktestingPage(ttk.Frame):
         cache_root.mkdir(parents=True, exist_ok=True)
         BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         def _process_ticker(ticker: str) -> str:
-            safe_ticker = _safe_ticker_name(ticker)
+            safe_ticker = _safe_dir_name(ticker)
             ticker_dir = cache_root / safe_ticker / "1m"
             ticker_dir.mkdir(parents=True, exist_ok=True)
             index_path = ticker_dir / "index.json"
