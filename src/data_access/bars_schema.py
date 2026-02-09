@@ -29,6 +29,7 @@ except ImportError:  # pragma: no cover - pandas isn't required in this repo.
     is_numeric_dtype = None
 
 
+# Required canonical fields that every bar payload must contain.
 REQUIRED_BAR_FIELDS: tuple[str, ...] = (
     "symbol",
     "timestamp_utc",
@@ -40,8 +41,10 @@ REQUIRED_BAR_FIELDS: tuple[str, ...] = (
     "trades",
 )
 
+# Optional canonical fields that may be provided by vendors.
 OPTIONAL_BAR_FIELDS: tuple[str, ...] = ("vwap",)
 
+# Canonical field -> expected Python type mapping for downstream validation.
 CANONICAL_BAR_FIELDS: dict[str, type] = {
     "symbol": str,
     "timestamp_utc": datetime,
@@ -54,6 +57,7 @@ CANONICAL_BAR_FIELDS: dict[str, type] = {
     "vwap": float,
 }
 
+# Vendor-provided short keys or synonyms mapped to canonical field names.
 _VENDOR_ALIASES: dict[str, str] = {
     "t": "timestamp_utc",
     "o": "open",
@@ -69,6 +73,7 @@ _VENDOR_ALIASES: dict[str, str] = {
 }
 
 
+# Convert a vendor payload to canonical bar fields, coercing types and timestamps.
 def coerce_vendor_bar(payload: Mapping[str, Any], symbol: str | None = None) -> dict[str, Any]:
     """Coerce a vendor payload (e.g., Massive API t/o/h/l/c/v/n) into canonical fields."""
     mapped: dict[str, Any] = {}
@@ -96,6 +101,7 @@ def coerce_vendor_bar(payload: Mapping[str, Any], symbol: str | None = None) -> 
     }
 
 
+# Validate a DataFrame-like object against the canonical schema.
 def validate_bars_frame(frame: Any) -> None:
     """Validate that a DataFrame-like object matches the canonical bar schema.
 
@@ -131,6 +137,7 @@ def validate_bars_frame(frame: Any) -> None:
         raise ValueError("trades column must be integer typed.")
 
 
+# Convert a timestamp representation to a timezone-aware UTC datetime.
 def _coerce_timestamp(value: Any) -> datetime:
     if isinstance(value, datetime):
         timestamp = value
@@ -146,11 +153,13 @@ def _coerce_timestamp(value: Any) -> datetime:
     return timestamp.astimezone(timezone.utc)
 
 
+# Interpret epoch timestamps in seconds or milliseconds.
 def _coerce_epoch_timestamp(value: float) -> datetime:
     seconds = value / 1000 if value > 10**12 else value
     return datetime.fromtimestamp(seconds, tz=timezone.utc)
 
 
+# Coerce numeric values to float with a helpful error message.
 def _coerce_float(value: Any, field: str) -> float:
     try:
         return float(value)
@@ -158,12 +167,14 @@ def _coerce_float(value: Any, field: str) -> float:
         raise ValueError(f"{field} must be numeric, got {value!r}") from exc
 
 
+# Coerce optional numeric values to float (None is preserved).
 def _coerce_optional_float(value: Any, field: str) -> float | None:
     if value is None:
         return None
     return _coerce_float(value, field)
 
 
+# Coerce numeric values to int with a helpful error message.
 def _coerce_int(value: Any, field: str) -> int:
     try:
         return int(value)
