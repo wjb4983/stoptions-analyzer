@@ -7,6 +7,7 @@ import numpy as np
 
 from ..common import estimate_volatility, extract_close_volume, quantile_bucket_sizes
 from .base import TimeSeriesResult
+from utils.parsing import _coerce_number
 
 
 @dataclass(frozen=True)
@@ -327,12 +328,6 @@ def _latest_close(series: list[float] | list[dict] | tuple[float, ...]) -> float
     if not closes:
         return None
     return float(closes[-1])
-
-
-def _coerce_number(value: object) -> float | None:
-    if isinstance(value, (int, float)):
-        return float(value)
-    return None
 
 
 def _windowed_series(values: list[float], lookback_days: int) -> list[float]:

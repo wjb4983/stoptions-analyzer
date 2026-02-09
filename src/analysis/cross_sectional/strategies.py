@@ -7,6 +7,7 @@ import numpy as np
 
 from ..common import extract_close_volume
 from .base import CrossSectionalResult
+from utils.parsing import _coerce_number
 
 
 @dataclass(frozen=True)
@@ -203,12 +204,6 @@ def _latest_close(series: list[float] | list[dict] | tuple[float, ...]) -> float
     if not closes:
         return None
     return float(closes[-1])
-
-
-def _coerce_number(value: object) -> float | None:
-    if isinstance(value, (int, float)):
-        return float(value)
-    return None
 
 
 def _rank_scores(
