@@ -61,3 +61,7 @@ class StoptionsApp(tk.Tk):
         except tk.TclError:
             self.attributes("-fullscreen", True)
 
+
+if __name__ == "__main__":
+    app = StoptionsApp()
+    app.mainloop()
