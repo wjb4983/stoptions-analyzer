@@ -6,7 +6,7 @@ from .bars_schema import (
     coerce_vendor_bar,
     validate_bars_frame,
 )
-from .cache import cache_api
+from .cache import load_cached_market_data, save_cached_market_data
 from .option_loader import load_option_history
 
 __all__ = [
@@ -14,8 +14,9 @@ __all__ = [
     "OPTIONAL_BAR_FIELDS",
     "REQUIRED_BAR_FIELDS",
     "MassiveApiClient",
-    "cache_api",
+    "load_cached_market_data",
     "coerce_vendor_bar",
     "load_option_history",
+    "save_cached_market_data",
     "validate_bars_frame",
 ]
