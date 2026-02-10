@@ -20,7 +20,7 @@ from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR
 from data_access.api_client import MassiveApiClient
 from data_access.cache import _safe_ticker_name
 
-from data_access.engine_loader import EngineArrayBundle, load_canonical_price_arrays
+from data_access.engine_loader import EngineArrayBundle, EngineArrayMetadata, load_canonical_price_arrays
 from utils.parsing import build_npz_payload, chunk_results_by_year
 from backtesting.signals import build_targets, parse_entry_signal_config, parse_exit_signal_config, required_lookback_window
 from backtesting.strategies import CrossSectionalMomentumConfig, build_cross_sectional_momentum_targets
@@ -168,9 +168,10 @@ def run_time_series_momentum_backtest(
         start=start_dt.isoformat(),
         end=end_dt.isoformat(),
         cache_root=cache_root,
-        timeframe=timeframe,
+        timeframe="1m",
         lookback_window=lookback_window,
     )
+    arrays = _resample_engine_bundle_from_1m(arrays, timeframe=timeframe)
 
     prices = _fill_missing_prices(arrays.close_prices)
     bet_fraction = _resolve_bet_fraction(
@@ -712,6 +713,58 @@ def load_backtest_engine_arrays(
         validate_split_adjustment=True,
     )
 
+
+
+def _timeframe_step_from_1m(timeframe: str) -> int:
+    key = str(timeframe).strip().lower()
+    mapping = {
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "1d": 390,
+    }
+    if key not in mapping:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    return mapping[key]
+
+
+def _resample_engine_bundle_from_1m(arrays: EngineArrayBundle, *, timeframe: str) -> EngineArrayBundle:
+    step = _timeframe_step_from_1m(timeframe)
+    if step <= 1 or arrays.date_index.size == 0:
+        return arrays
+
+    start_idx = step - 1
+    if start_idx >= arrays.date_index.size:
+        start_idx = arrays.date_index.size - 1
+    selector = np.arange(start_idx, arrays.date_index.size, step, dtype=int)
+    if selector.size == 0:
+        selector = np.array([arrays.date_index.size - 1], dtype=int)
+
+    date_index = arrays.date_index[selector]
+    open_prices = arrays.open_prices[selector]
+    close_prices = arrays.close_prices[selector]
+    missing_mask = arrays.missing_mask[selector]
+
+    symbol_order = sorted(arrays.metadata.symbol_to_column.items(), key=lambda item: item[1])
+    missingness_by_symbol = {
+        symbol: float(np.mean(missing_mask[:, col])) if missing_mask.size else 1.0
+        for symbol, col in symbol_order
+    }
+    metadata = EngineArrayMetadata(
+        symbol_to_column=dict(arrays.metadata.symbol_to_column),
+        date_index=date_index,
+        missingness_ratio=float(np.mean(missing_mask)) if missing_mask.size else 1.0,
+        missingness_by_symbol=missingness_by_symbol,
+    )
+    return EngineArrayBundle(
+        date_index=date_index,
+        open_prices=open_prices,
+        close_prices=close_prices,
+        missing_mask=missing_mask,
+        metadata=metadata,
+    )
 
 def _fill_missing_prices(close_prices: np.ndarray) -> np.ndarray:
     values = np.asarray(close_prices, dtype=float).copy()
