@@ -9,6 +9,8 @@ class TimeSeriesMomentumEntryConfig:
     name: str = "ts_momentum"
     lookback_days: int = 90
     skip_days: int = 5
+    min_abs_return: float = 0.0
+    long_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class MomentumFlipExitConfig:
     name: str = "momentum_flip"
     lookback_days: int = 90
     skip_days: int = 5
+    min_abs_return: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -80,7 +83,16 @@ def parse_entry_signal_config(
             raise ValueError("skip_days must be >= 0")
         if skip_days >= lookback_days:
             raise ValueError("skip_days must be < lookback_days")
-        return TimeSeriesMomentumEntryConfig(lookback_days=lookback_days, skip_days=skip_days)
+        min_abs_return = float(payload.get("min_abs_return", 0.0))
+        if min_abs_return < 0:
+            raise ValueError("min_abs_return must be >= 0")
+        long_only = bool(payload.get("long_only", False))
+        return TimeSeriesMomentumEntryConfig(
+            lookback_days=lookback_days,
+            skip_days=skip_days,
+            min_abs_return=min_abs_return,
+            long_only=long_only,
+        )
     if signal_name == "ma_trend":
         return MovingAverageTrendEntryConfig(ma_window=_int(payload.get("ma_window", 50), "ma_window"))
     if signal_name == "breakout":
@@ -107,7 +119,14 @@ def parse_exit_signal_config(
             raise ValueError("skip_days must be >= 0")
         if skip_days >= lookback_days:
             raise ValueError("skip_days must be < lookback_days")
-        return MomentumFlipExitConfig(lookback_days=lookback_days, skip_days=skip_days)
+        min_abs_return = float(payload.get("min_abs_return", 0.0))
+        if min_abs_return < 0:
+            raise ValueError("min_abs_return must be >= 0")
+        return MomentumFlipExitConfig(
+            lookback_days=lookback_days,
+            skip_days=skip_days,
+            min_abs_return=min_abs_return,
+        )
     if signal_name == "trailing_stop":
         trailing_stop_pct = float(payload.get("trailing_stop_pct", 0.05))
         if trailing_stop_pct <= 0.0 or trailing_stop_pct >= 1.0:

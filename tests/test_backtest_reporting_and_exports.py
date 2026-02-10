@@ -63,6 +63,7 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     )
 
     assert "Summary Metrics" in output
+    assert "Trade Log" in output
     run_dirs = list(output_root.glob("tsmom_backtest_*"))
     assert len(run_dirs) == 1
     run_dir = run_dirs[0]
@@ -75,6 +76,8 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "trades.json",
         "metrics.csv",
         "metrics.json",
+        "trade_log.csv",
+        "trade_log.json",
         "report.txt",
     ]:
         assert (run_dir / name).exists(), name

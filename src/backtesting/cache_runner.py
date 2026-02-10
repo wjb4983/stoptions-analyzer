@@ -211,6 +211,14 @@ def run_time_series_momentum_backtest(
         metrics=metrics,
     )
 
+    trade_log_rows = _build_trade_log_rows(
+        timestamps=timestamps,
+        symbol_order=symbol_order,
+        prices=prices,
+        trades=trades,
+    )
+    trade_log_summary = _format_trade_log_summary(trade_log_rows)
+
     report_text = format_backtest_report(
         title="Time-Series Momentum Backtest",
         params={
@@ -230,9 +238,13 @@ def run_time_series_momentum_backtest(
         turnover_stats=turnover_stats,
         cost_totals=cost_totals,
     )
-    (run_dir / "report.txt").write_text(report_text)
+    (run_dir / "trade_log.csv").write_text(_trade_log_csv(trade_log_rows))
+    (run_dir / "trade_log.json").write_text(json.dumps(trade_log_rows, indent=2))
 
-    return report_text + f"\n\nSaved outputs to: {run_dir}"
+    final_report = report_text + "\n\n" + trade_log_summary
+    (run_dir / "report.txt").write_text(final_report)
+
+    return final_report + f"\n\nSaved outputs to: {run_dir}"
 
 
 def generate_sweep_combinations(
@@ -521,9 +533,14 @@ def run_multi_signal_backtest(
                 skip_days=skip_days,
                 costs_bps=costs_bps,
                 entry_signal=entry_signal,
-                entry_signal_params={},
+                entry_signal_params={
+                    "min_abs_return": 0.002,
+                    "long_only": True,
+                } if entry_signal == "ts_momentum" else {},
                 exit_signal=exit_signal,
-                exit_signal_params={},
+                exit_signal_params={
+                    "min_abs_return": 0.002,
+                } if exit_signal == "momentum_flip" else {},
             )
             run_dir = _extract_saved_output_dir(report)
             metrics = _load_metrics_from_run_dir(run_dir)
@@ -663,6 +680,79 @@ def _to_numpy_2d(values: object) -> np.ndarray:
         return arr.reshape(-1, 1)
     return arr
 
+
+
+
+def _build_trade_log_rows(
+    *,
+    timestamps: np.ndarray,
+    symbol_order: list[str],
+    prices: np.ndarray,
+    trades: np.ndarray,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for col_idx, symbol in enumerate(symbol_order):
+        side = 0
+        entry_price = 0.0
+        running_pnl = 0.0
+        for row_idx, ts in enumerate(timestamps):
+            trade = float(trades[row_idx, col_idx])
+            if trade == 0.0:
+                continue
+            price = float(prices[row_idx, col_idx])
+            event = "adjust"
+            trade_pnl = 0.0
+            if side == 0 and abs(trade) > 0:
+                side = 1 if trade > 0 else -1
+                entry_price = price
+                event = "entry"
+            elif side != 0 and side * trade < 0:
+                trade_pnl = ((price - entry_price) / entry_price) * side if entry_price > 0 else 0.0
+                running_pnl += trade_pnl
+                event = "exit" if abs(trade) == abs(side) else "flip"
+                next_side = side + int(round(trade))
+                side = next_side
+                if side != 0:
+                    entry_price = price
+                else:
+                    entry_price = 0.0
+            rows.append(
+                {
+                    "timestamp": datetime.utcfromtimestamp(int(ts) / 1000.0).isoformat(),
+                    "symbol": symbol,
+                    "event": event,
+                    "trade": trade,
+                    "price": price,
+                    "trade_pnl": float(trade_pnl),
+                    "running_pnl": float(running_pnl),
+                }
+            )
+    return rows
+
+
+def _format_trade_log_summary(rows: list[dict[str, object]], max_rows: int = 40) -> str:
+    lines = ["Trade Log", "---------"]
+    if not rows:
+        lines.append("No trade events generated.")
+        return "\n".join(lines)
+    lines.append("timestamp | symbol | event | trade | price | trade_pnl | running_pnl")
+    for row in rows[:max_rows]:
+        lines.append(
+            f"{row['timestamp']} | {row['symbol']} | {row['event']} | {float(row['trade']):.2f} | "
+            f"{float(row['price']):.4f} | {float(row['trade_pnl']):.6f} | {float(row['running_pnl']):.6f}"
+        )
+    if len(rows) > max_rows:
+        lines.append(f"... ({len(rows) - max_rows} more trade events)")
+    return "\n".join(lines)
+
+
+def _trade_log_csv(rows: list[dict[str, object]]) -> str:
+    header = "timestamp,symbol,event,trade,price,trade_pnl,running_pnl"
+    body = [
+        f"{row['timestamp']},{row['symbol']},{row['event']},{row['trade']},{row['price']},{row['trade_pnl']},{row['running_pnl']}"
+        for row in rows
+    ]
+    return "\n".join([header, *body]) + "\n"
 
 def _persist_backtest_outputs(
     *,

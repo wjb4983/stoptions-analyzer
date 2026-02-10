@@ -29,7 +29,12 @@ class TimeSeriesMomentumEntry:
         if start_px <= 0.0 or end_px <= 0.0:
             return 0
         score = end_px / start_px - 1.0
-        return int(np.sign(score))
+        if abs(score) < self.config.min_abs_return:
+            return 0
+        side = int(np.sign(score))
+        if self.config.long_only and side < 0:
+            return 0
+        return side
 
 
 @dataclass(frozen=True)
