@@ -4,9 +4,12 @@ import csv
 import json
 import random
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import date, datetime
+from itertools import product
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 
@@ -20,6 +23,9 @@ from data_access.cache import _safe_ticker_name
 from data_access.engine_loader import EngineArrayBundle, load_canonical_price_arrays
 from utils.parsing import build_npz_payload, chunk_results_by_year
 from backtesting.signals import build_targets, parse_entry_signal_config, parse_exit_signal_config, required_lookback_window
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def run_backtest_cache(
@@ -108,7 +114,7 @@ def run_backtest_cache(
         for future in as_completed(future_map):
             lines.append(future.result())
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     output_path = BACKTEST_OUTPUT_DIR / f"backtest_cache_{timestamp}.txt"
     output_path.write_text("\n".join(lines))
     return "\n".join(lines) + f"\n\nSaved summary to: {output_path}"
@@ -229,6 +235,256 @@ def run_time_series_momentum_backtest(
     return report_text + f"\n\nSaved outputs to: {run_dir}"
 
 
+def generate_sweep_combinations(
+    *,
+    entry_grid: dict[str, list[dict[str, Any]]],
+    exit_grid: dict[str, list[dict[str, Any]]],
+    core_grid: dict[str, list[Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build Cartesian combinations for entry/exit/core sweep definitions."""
+
+    valid: list[dict[str, Any]] = []
+    invalid: list[dict[str, Any]] = []
+
+    normalized_core = {key: list(values or []) for key, values in core_grid.items()}
+    core_keys = sorted(normalized_core)
+    core_values = [normalized_core[key] for key in core_keys]
+    if any(len(values) == 0 for values in core_values):
+        return valid, [{"reason": "core_grid contains empty value list", "core_grid": core_grid}]
+
+    for entry_signal, entry_params_grid in entry_grid.items():
+        for exit_signal, exit_params_grid in exit_grid.items():
+            for entry_params in entry_params_grid or []:
+                for exit_params in exit_params_grid or []:
+                    for core_combo in product(*core_values):
+                        core_params = dict(zip(core_keys, core_combo, strict=True))
+                        combo = {
+                            "entry_signal": entry_signal,
+                            "entry_signal_params": dict(entry_params),
+                            "exit_signal": exit_signal,
+                            "exit_signal_params": dict(exit_params),
+                            **core_params,
+                        }
+                        if _is_valid_combo_definition(combo):
+                            valid.append(combo)
+                        else:
+                            invalid.append({"reason": "invalid combo parameters", "combo": combo})
+    return valid, invalid
+
+
+def run_parameter_sweep(
+    *,
+    tickers: list[str],
+    start_date: date,
+    end_date: date,
+    cache_root: Path,
+    entry_grid: dict[str, list[dict[str, Any]]],
+    exit_grid: dict[str, list[dict[str, Any]]],
+    core_grid: dict[str, list[Any]],
+    seed: int = 42,
+    max_workers: int | None = None,
+    fail_fast: bool = False,
+    continue_on_error: bool = True,
+    top_n: int = 10,
+    evaluator: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> str:
+    """Run a parallel sweep over signal/core-parameter combinations."""
+
+    if fail_fast and continue_on_error:
+        raise ValueError("fail_fast and continue_on_error cannot both be true")
+
+    combos, invalid_rows = generate_sweep_combinations(
+        entry_grid=entry_grid,
+        exit_grid=exit_grid,
+        core_grid=core_grid,
+    )
+    if not combos:
+        raise ValueError("No valid combinations generated for sweep")
+
+    random.Random(seed).shuffle(combos)
+    worker = evaluator or _execute_sweep_combo
+    default_workers = min(8, max(1, len(combos)))
+    n_workers = max_workers or default_workers
+    use_process_pool = evaluator is None
+    executor_cls = ProcessPoolExecutor if use_process_pool else ThreadPoolExecutor
+
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    LOGGER.info("Starting sweep for %s combinations with %s workers", len(combos), n_workers)
+
+    with executor_cls(max_workers=n_workers) as executor:
+        futures = {
+            executor.submit(
+                worker,
+                {
+                    "combo_index": idx,
+                    "seed": seed,
+                    "tickers": tickers,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "cache_root": str(cache_root),
+                    **combo,
+                },
+            ): combo
+            for idx, combo in enumerate(combos)
+        }
+        completed = 0
+        for future in as_completed(futures):
+            combo = futures[future]
+            completed += 1
+            try:
+                rows.append(future.result())
+            except Exception as exc:
+                error_row = {"error": str(exc), "combo": combo}
+                errors.append(error_row)
+                LOGGER.exception("Sweep combo failed (%s/%s)", completed, len(combos))
+                if fail_fast:
+                    raise
+                if not continue_on_error:
+                    raise
+            LOGGER.info("Sweep progress: %s/%s", completed, len(combos))
+
+    ranked_rows = sorted(rows, key=lambda row: float(row["sharpe"]), reverse=True)
+    run_dir = _persist_sweep_outputs(
+        ranked_rows=ranked_rows,
+        invalid_rows=invalid_rows,
+        errors=errors,
+        top_n=top_n,
+    )
+    return (
+        f"Sweep complete: {len(ranked_rows)} successful combos, "
+        f"{len(invalid_rows)} skipped, {len(errors)} failed. "
+        f"Saved outputs to: {run_dir}"
+    )
+
+
+def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
+    combo_seed = int(payload["seed"]) + int(payload["combo_index"])
+    random.seed(combo_seed)
+    np.random.seed(combo_seed)
+
+    tickers = [str(ticker) for ticker in payload["tickers"]]
+    start_date = date.fromisoformat(str(payload["start_date"]))
+    end_date = date.fromisoformat(str(payload["end_date"]))
+    lookback_days = int(payload["lookback_days"])
+    skip_days = int(payload["skip_days"])
+    costs_bps = float(payload["costs_bps"])
+
+    entry_cfg = parse_entry_signal_config(
+        str(payload["entry_signal"]),
+        dict(payload.get("entry_signal_params", {})),
+        default_lookback_days=lookback_days,
+        default_skip_days=skip_days,
+    )
+    exit_cfg = parse_exit_signal_config(
+        str(payload["exit_signal"]),
+        dict(payload.get("exit_signal_params", {})),
+        default_lookback_days=lookback_days,
+        default_skip_days=skip_days,
+    )
+
+    arrays = load_backtest_engine_arrays(
+        tickers=tickers,
+        start=datetime.combine(start_date, datetime.min.time()).isoformat(),
+        end=datetime.combine(end_date, datetime.max.time()).isoformat(),
+        cache_root=Path(str(payload["cache_root"])),
+        timeframe="1m",
+        lookback_window=required_lookback_window(entry_cfg, exit_cfg),
+    )
+    prices = _fill_missing_prices(arrays.close_prices)
+    signals = build_targets(
+        close_prices=prices,
+        missing_mask=arrays.missing_mask,
+        entry_config=entry_cfg,
+        exit_config=exit_cfg,
+    )
+    result = backtest_vectorized(
+        prices=prices,
+        signals=signals,
+        slippage_model=BpsSlippage(costs_bps),
+        initial_equity=1.0,
+    )
+
+    turnover = _to_numpy_1d(result.turnover)
+    cost_totals = {
+        key: float(value)
+        for key, value in result.cost_breakdown.get("totals", {}).items()
+    }
+    metrics = dict(result.metrics)
+    return {
+        "entry_signal": payload["entry_signal"],
+        "entry_signal_params": json.dumps(payload.get("entry_signal_params", {}), sort_keys=True),
+        "exit_signal": payload["exit_signal"],
+        "exit_signal_params": json.dumps(payload.get("exit_signal_params", {}), sort_keys=True),
+        "lookback_days": lookback_days,
+        "skip_days": skip_days,
+        "costs_bps": costs_bps,
+        "total_return": float(metrics.get("total_return", 0.0)),
+        "sharpe": float(metrics.get("sharpe", 0.0)),
+        "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
+        "volatility": float(metrics.get("volatility", 0.0)),
+        "turnover_total": float(np.sum(turnover)) if turnover.size else 0.0,
+        "cost_total": cost_totals.get("total", 0.0),
+    }
+
+
+def _persist_sweep_outputs(
+    *,
+    ranked_rows: list[dict[str, Any]],
+    invalid_rows: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+    top_n: int,
+) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_sweep_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    leaderboard_csv = run_dir / "leaderboard.csv"
+    fieldnames = list(ranked_rows[0].keys()) if ranked_rows else []
+    with leaderboard_csv.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(ranked_rows)
+    (run_dir / "leaderboard.json").write_text(json.dumps(ranked_rows, indent=2))
+
+    (run_dir / "per_combo_summary.csv").write_text(leaderboard_csv.read_text())
+    (run_dir / "per_combo_summary.json").write_text(json.dumps(ranked_rows, indent=2))
+    (run_dir / "skipped_invalid_combos.json").write_text(json.dumps(invalid_rows, indent=2))
+    (run_dir / "errors.json").write_text(json.dumps(errors, indent=2))
+
+    top_rows = ranked_rows[: max(0, top_n)]
+    report_lines = ["Top sweep combinations", "======================", ""]
+    for idx, row in enumerate(top_rows, start=1):
+        report_lines.append(
+            f"#{idx}: sharpe={row['sharpe']:.6f} total_return={row['total_return']:.6f} "
+            f"entry={row['entry_signal']} exit={row['exit_signal']} "
+            f"core=(lookback_days={row['lookback_days']}, skip_days={row['skip_days']}, costs_bps={row['costs_bps']})"
+        )
+    (run_dir / "top_n_report.txt").write_text("\n".join(report_lines))
+
+    return run_dir
+
+
+def _is_valid_combo_definition(combo: dict[str, Any]) -> bool:
+    try:
+        parse_entry_signal_config(
+            str(combo["entry_signal"]),
+            dict(combo.get("entry_signal_params", {})),
+            default_lookback_days=int(combo["lookback_days"]),
+            default_skip_days=int(combo["skip_days"]),
+        )
+        parse_exit_signal_config(
+            str(combo["exit_signal"]),
+            dict(combo.get("exit_signal_params", {})),
+            default_lookback_days=int(combo["lookback_days"]),
+            default_skip_days=int(combo["skip_days"]),
+        )
+        float(combo["costs_bps"])
+        return True
+    except Exception:
+        return False
+
+
 
 def load_backtest_engine_arrays(
     tickers: list[str],
@@ -296,7 +552,7 @@ def _persist_backtest_outputs(
     trades: np.ndarray,
     metrics: dict[str, float],
 ) -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -390,49 +646,81 @@ def _parse_json_object(raw: str | None) -> dict[str, object]:
     return parsed
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Run the time-series momentum backtest with pluggable entry/exit signals.",
-        epilog=(
-            "Examples:\n"
-            "  PYTHONPATH=src python -m backtesting.cache_runner --tickers AAPL,MSFT "
-            "--start-date 2024-01-01 --end-date 2024-03-01 --entry-signal ts_momentum --exit-signal none\n"
-            "  PYTHONPATH=src python -m backtesting.cache_runner --tickers AAPL --start-date 2024-01-01 "
-            "--end-date 2024-03-01 --entry-signal breakout --entry-signal-params '{\"breakout_window\": 55}' "
-            "--exit-signal trailing_stop --exit-signal-params '{\"trailing_stop_pct\": 0.08}'"
-        ),
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tickers", required=True, help="Comma-separated ticker list.")
     parser.add_argument("--start-date", required=True, help="Backtest start date (YYYY-MM-DD).")
     parser.add_argument("--end-date", required=True, help="Backtest end date (YYYY-MM-DD).")
     parser.add_argument("--cache-root", default=str(BACKTEST_CACHE_DIR), help="Cache root directory.")
-    parser.add_argument("--lookback-days", type=int, default=90)
-    parser.add_argument("--skip-days", type=int, default=5)
-    parser.add_argument("--costs-bps", type=float, default=5.0)
-    parser.add_argument("--entry-signal", default="ts_momentum", choices=["ts_momentum", "ma_trend", "breakout"])
-    parser.add_argument("--entry-signal-params", default="{}", help="JSON object with entry signal parameters.")
-    parser.add_argument("--exit-signal", default="none", choices=["none", "momentum_flip", "trailing_stop", "max_hold"])
-    parser.add_argument("--exit-signal-params", default="{}", help="JSON object with exit signal parameters.")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Backtest runner and parameter sweep tools.")
+    subparsers = parser.add_subparsers(dest="command")
+
+    run_parser = subparsers.add_parser("run", help="Run one backtest combo.")
+    _add_common_args(run_parser)
+    run_parser.add_argument("--lookback-days", type=int, default=90)
+    run_parser.add_argument("--skip-days", type=int, default=5)
+    run_parser.add_argument("--costs-bps", type=float, default=5.0)
+    run_parser.add_argument("--entry-signal", default="ts_momentum", choices=["ts_momentum", "ma_trend", "breakout"])
+    run_parser.add_argument("--entry-signal-params", default="{}", help="JSON object with entry signal parameters.")
+    run_parser.add_argument("--exit-signal", default="none", choices=["none", "momentum_flip", "trailing_stop", "max_hold"])
+    run_parser.add_argument("--exit-signal-params", default="{}", help="JSON object with exit signal parameters.")
+
+    sweep_parser = subparsers.add_parser("sweep", help="Run parameter sweep across signal/core grids.")
+    _add_common_args(sweep_parser)
+    sweep_parser.add_argument("--entry-grid", required=True, help="JSON mapping signal->list[params].")
+    sweep_parser.add_argument("--exit-grid", required=True, help="JSON mapping signal->list[params].")
+    sweep_parser.add_argument("--core-grid", required=True, help="JSON mapping core param->list[values].")
+    sweep_parser.add_argument("--seed", type=int, default=42)
+    sweep_parser.add_argument("--max-workers", type=int, default=None)
+    sweep_parser.add_argument("--top-n", type=int, default=10)
+    sweep_parser.add_argument("--fail-fast", action="store_true")
+    sweep_parser.add_argument("--continue-on-error", action="store_true")
+
+    parser.set_defaults(command="run")
     return parser
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = _build_parser()
     args = parser.parse_args()
-    output = run_time_series_momentum_backtest(
-        tickers=[part.strip() for part in args.tickers.split(",") if part.strip()],
-        start_date=date.fromisoformat(args.start_date),
-        end_date=date.fromisoformat(args.end_date),
-        cache_root=Path(args.cache_root),
-        lookback_days=args.lookback_days,
-        skip_days=args.skip_days,
-        costs_bps=args.costs_bps,
-        entry_signal=args.entry_signal,
-        entry_signal_params=_parse_json_object(args.entry_signal_params),
-        exit_signal=args.exit_signal,
-        exit_signal_params=_parse_json_object(args.exit_signal_params),
-    )
+
+    tickers = [part.strip() for part in args.tickers.split(",") if part.strip()]
+    start_date = date.fromisoformat(args.start_date)
+    end_date = date.fromisoformat(args.end_date)
+    cache_root = Path(args.cache_root)
+
+    if args.command == "sweep":
+        output = run_parameter_sweep(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            cache_root=cache_root,
+            entry_grid={str(k): list(v) for k, v in _parse_json_object(args.entry_grid).items()},
+            exit_grid={str(k): list(v) for k, v in _parse_json_object(args.exit_grid).items()},
+            core_grid={str(k): list(v) for k, v in _parse_json_object(args.core_grid).items()},
+            seed=args.seed,
+            max_workers=args.max_workers,
+            fail_fast=bool(args.fail_fast),
+            continue_on_error=bool(args.continue_on_error),
+            top_n=args.top_n,
+        )
+    else:
+        output = run_time_series_momentum_backtest(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            cache_root=cache_root,
+            lookback_days=args.lookback_days,
+            skip_days=args.skip_days,
+            costs_bps=args.costs_bps,
+            entry_signal=args.entry_signal,
+            entry_signal_params=_parse_json_object(args.entry_signal_params),
+            exit_signal=args.exit_signal,
+            exit_signal_params=_parse_json_object(args.exit_signal_params),
+        )
     print(output)
 
 
