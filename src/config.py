@@ -41,6 +41,7 @@ DEFAULT_GENERAL_ANALYSIS_SETTINGS = {
 }
 
 DEFAULT_BACKTEST_SETTINGS = {
+    "strategy": "momentum",
     "strategy_name": "Time-Series Momentum",
     "lookback_days": "90",
     "skip_days": "5",
@@ -48,8 +49,13 @@ DEFAULT_BACKTEST_SETTINGS = {
     "starting_capital": "100000",
     "bet_sizing_mode": "half_kelly",
     "custom_bet_pct": "10",
+    "timeframe": "1m",
     "selected_entry_signals": "ts_momentum",
     "selected_exit_signals": "none",
+    "xsmom_top_quantile": "0.2",
+    "xsmom_bottom_quantile": "0.2",
+    "xsmom_long_only": False,
+    "xsmom_vol_lookback_days": "20",
     "start_date": "",
     "end_date": "",
     "notes": "",

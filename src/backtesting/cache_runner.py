@@ -20,9 +20,10 @@ from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR
 from data_access.api_client import MassiveApiClient
 from data_access.cache import _safe_ticker_name
 
-from data_access.engine_loader import EngineArrayBundle, load_canonical_price_arrays
+from data_access.engine_loader import EngineArrayBundle, EngineArrayMetadata, load_canonical_price_arrays
 from utils.parsing import build_npz_payload, chunk_results_by_year
 from backtesting.signals import build_targets, parse_entry_signal_config, parse_exit_signal_config, required_lookback_window
+from backtesting.strategies import CrossSectionalMomentumConfig, build_cross_sectional_momentum_targets
 
 
 LOGGER = logging.getLogger(__name__)
@@ -137,6 +138,12 @@ def run_time_series_momentum_backtest(
     starting_capital: float = 100_000.0,
     bet_sizing_mode: str = "half_kelly",
     custom_bet_pct: float = 10.0,
+    strategy: str = "momentum",
+    xsmom_top_quantile: float = 0.2,
+    xsmom_bottom_quantile: float = 0.2,
+    xsmom_long_only: bool = False,
+    xsmom_vol_lookback_days: int = 20,
+    timeframe: str = "1m",
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     entry_cfg = parse_entry_signal_config(
@@ -154,6 +161,8 @@ def run_time_series_momentum_backtest(
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time())
     lookback_window = required_lookback_window(entry_cfg, exit_cfg)
+    if strategy == "xsmom":
+        lookback_window = max(lookback_window, lookback_days + skip_days + 1, int(xsmom_vol_lookback_days) + 2)
     arrays = load_backtest_engine_arrays(
         tickers=tickers,
         start=start_dt.isoformat(),
@@ -162,26 +171,45 @@ def run_time_series_momentum_backtest(
         timeframe="1m",
         lookback_window=lookback_window,
     )
+    arrays = _resample_engine_bundle_from_1m(arrays, timeframe=timeframe)
 
     prices = _fill_missing_prices(arrays.close_prices)
-    signals = build_targets(
-        close_prices=prices,
-        missing_mask=arrays.missing_mask,
-        entry_config=entry_cfg,
-        exit_config=exit_cfg,
-    )
-    signals = _throttle_signal_changes(signals, interval=max(1, int(signal_rebalance_interval)))
     bet_fraction = _resolve_bet_fraction(
         prices=prices,
         mode=bet_sizing_mode,
         custom_bet_pct=custom_bet_pct,
     )
-    sized_signals = _apply_discrete_bet_sizing(
-        signals=signals,
-        prices=prices,
-        starting_capital=starting_capital,
-        bet_fraction=bet_fraction,
-    )
+
+    if strategy == "xsmom":
+        xs_cfg = CrossSectionalMomentumConfig(
+            lookback_days=lookback_days,
+            skip_days=skip_days,
+            top_quantile=float(xsmom_top_quantile),
+            bottom_quantile=float(xsmom_bottom_quantile),
+            long_only=bool(xsmom_long_only),
+            vol_lookback_days=int(xsmom_vol_lookback_days),
+            rebalance_interval=max(1, int(signal_rebalance_interval)),
+        )
+        signals = build_cross_sectional_momentum_targets(
+            close_prices=prices,
+            missing_mask=arrays.missing_mask,
+            config=xs_cfg,
+        )
+        sized_signals = signals * float(bet_fraction)
+    else:
+        signals = build_targets(
+            close_prices=prices,
+            missing_mask=arrays.missing_mask,
+            entry_config=entry_cfg,
+            exit_config=exit_cfg,
+        )
+        signals = _throttle_signal_changes(signals, interval=max(1, int(signal_rebalance_interval)))
+        sized_signals = _apply_discrete_bet_sizing(
+            signals=signals,
+            prices=prices,
+            starting_capital=starting_capital,
+            bet_fraction=bet_fraction,
+        )
 
     result = backtest_vectorized(
         prices=prices,
@@ -238,7 +266,7 @@ def run_time_series_momentum_backtest(
     trade_log_summary = _format_trade_log_summary(trade_log_rows)
 
     report_text = format_backtest_report(
-        title="Time-Series Momentum Backtest",
+        title=f"{strategy.upper()} Backtest" if strategy != "momentum" else "Time-Series Momentum Backtest",
         params={
             "tickers": ", ".join(tickers),
             "lookback_days": lookback_days,
@@ -255,6 +283,12 @@ def run_time_series_momentum_backtest(
             "bet_sizing_mode": bet_sizing_mode,
             "custom_bet_pct": custom_bet_pct,
             "resolved_bet_pct": bet_fraction * 100.0,
+            "strategy": strategy,
+            "xsmom_top_quantile": xsmom_top_quantile,
+            "xsmom_bottom_quantile": xsmom_bottom_quantile,
+            "xsmom_long_only": xsmom_long_only,
+            "xsmom_vol_lookback_days": xsmom_vol_lookback_days,
+            "timeframe": timeframe,
         },
         metrics=metrics,
         drawdown_rows=drawdown_rows,
@@ -537,6 +571,7 @@ def run_multi_signal_backtest(
     starting_capital: float = 100_000.0,
     bet_sizing_mode: str = "half_kelly",
     custom_bet_pct: float = 10.0,
+    timeframe: str = "1m",
 ) -> str:
     """Run all selected entry/exit combinations with shared core parameters."""
 
@@ -571,6 +606,7 @@ def run_multi_signal_backtest(
                 exit_signal_params={
                     "min_abs_return": 0.01,
                 } if exit_signal == "momentum_flip" else {},
+                timeframe=timeframe,
             )
             run_dir = _extract_saved_output_dir(report)
             metrics = _load_metrics_from_run_dir(run_dir)
@@ -677,6 +713,58 @@ def load_backtest_engine_arrays(
         validate_split_adjustment=True,
     )
 
+
+
+def _timeframe_step_from_1m(timeframe: str) -> int:
+    key = str(timeframe).strip().lower()
+    mapping = {
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "1d": 390,
+    }
+    if key not in mapping:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    return mapping[key]
+
+
+def _resample_engine_bundle_from_1m(arrays: EngineArrayBundle, *, timeframe: str) -> EngineArrayBundle:
+    step = _timeframe_step_from_1m(timeframe)
+    if step <= 1 or arrays.date_index.size == 0:
+        return arrays
+
+    start_idx = step - 1
+    if start_idx >= arrays.date_index.size:
+        start_idx = arrays.date_index.size - 1
+    selector = np.arange(start_idx, arrays.date_index.size, step, dtype=int)
+    if selector.size == 0:
+        selector = np.array([arrays.date_index.size - 1], dtype=int)
+
+    date_index = arrays.date_index[selector]
+    open_prices = arrays.open_prices[selector]
+    close_prices = arrays.close_prices[selector]
+    missing_mask = arrays.missing_mask[selector]
+
+    symbol_order = sorted(arrays.metadata.symbol_to_column.items(), key=lambda item: item[1])
+    missingness_by_symbol = {
+        symbol: float(np.mean(missing_mask[:, col])) if missing_mask.size else 1.0
+        for symbol, col in symbol_order
+    }
+    metadata = EngineArrayMetadata(
+        symbol_to_column=dict(arrays.metadata.symbol_to_column),
+        date_index=date_index,
+        missingness_ratio=float(np.mean(missing_mask)) if missing_mask.size else 1.0,
+        missingness_by_symbol=missingness_by_symbol,
+    )
+    return EngineArrayBundle(
+        date_index=date_index,
+        open_prices=open_prices,
+        close_prices=close_prices,
+        missing_mask=missing_mask,
+        metadata=metadata,
+    )
 
 def _fill_missing_prices(close_prices: np.ndarray) -> np.ndarray:
     values = np.asarray(close_prices, dtype=float).copy()
@@ -1025,6 +1113,12 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--starting-capital", type=float, default=100000.0)
     run_parser.add_argument("--bet-sizing-mode", choices=["kelly", "half_kelly", "custom"], default="half_kelly")
     run_parser.add_argument("--custom-bet-pct", type=float, default=10.0)
+    run_parser.add_argument("--timeframe", default="1m", help="Bar resolution (e.g. 1m, 5m, 15m, 30m, 1h, 1d).")
+    run_parser.add_argument("--strategy", choices=["momentum", "xsmom"], default="momentum")
+    run_parser.add_argument("--xsmom-top-quantile", type=float, default=0.2)
+    run_parser.add_argument("--xsmom-bottom-quantile", type=float, default=0.2)
+    run_parser.add_argument("--xsmom-long-only", action="store_true")
+    run_parser.add_argument("--xsmom-vol-lookback-days", type=int, default=20)
 
     sweep_parser = subparsers.add_parser("sweep", help="Run parameter sweep across signal/core grids.")
     _add_common_args(sweep_parser)
@@ -1083,6 +1177,12 @@ def main() -> None:
             starting_capital=args.starting_capital,
             bet_sizing_mode=args.bet_sizing_mode,
             custom_bet_pct=args.custom_bet_pct,
+            strategy=args.strategy,
+            xsmom_top_quantile=args.xsmom_top_quantile,
+            xsmom_bottom_quantile=args.xsmom_bottom_quantile,
+            xsmom_long_only=bool(args.xsmom_long_only),
+            xsmom_vol_lookback_days=args.xsmom_vol_lookback_days,
+            timeframe=str(args.timeframe),
         )
     print(output)
 
