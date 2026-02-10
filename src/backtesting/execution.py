@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import numpy as np
+
 
 class SlippageModel(Protocol):
     """Contract for execution price adjustments due to slippage.
@@ -76,3 +78,58 @@ class ExecutionModel:
 
     slippage: SlippageModel
     fees: FeeModel
+
+
+class BpsSlippage:
+    """Fixed basis-point slippage model.
+
+    The model worsens the execution price by ``bps`` in the trade direction.
+    """
+
+    def __init__(self, bps: float) -> None:
+        if bps < 0:
+            raise ValueError("Slippage bps must be non-negative.")
+        self.bps = bps
+
+    def apply(self, price: float, size: float, liquidity_context: Any | None = None) -> float:
+        if size == 0:
+            return price
+        impact = (self.bps / 10_000.0) * np.sign(size)
+        return float(price * (1.0 + impact))
+
+
+class FixedCommission:
+    """Fee model that applies a fixed commission per non-zero trade."""
+
+    def __init__(self, commission_per_trade: float) -> None:
+        if commission_per_trade < 0:
+            raise ValueError("Commission must be non-negative.")
+        self.commission_per_trade = commission_per_trade
+
+    def calculate(self, price: float, size: float, liquidity_context: Any | None = None) -> float:
+        if size == 0:
+            return 0.0
+        return float(self.commission_per_trade)
+
+
+class ShortBorrowCost:
+    """Daily borrow-rate model applied to short notional exposure.
+
+    ``annual_borrow_rate`` is interpreted as decimal annualized carry
+    (for example ``0.03`` for 3%/year). The resulting cost is represented as
+    return drag per period and is computed as:
+
+    ``max(-position, 0) * annual_borrow_rate / periods_per_year``.
+    """
+
+    def __init__(self, annual_borrow_rate: float, periods_per_year: float = 252.0) -> None:
+        if annual_borrow_rate < 0:
+            raise ValueError("Borrow rate must be non-negative.")
+        if periods_per_year <= 0:
+            raise ValueError("periods_per_year must be positive.")
+        self.annual_borrow_rate = annual_borrow_rate
+        self.periods_per_year = periods_per_year
+
+    def calculate(self, position: float | np.ndarray) -> float | np.ndarray:
+        short_exposure = np.clip(-np.asarray(position, dtype=float), 0.0, None)
+        return short_exposure * (self.annual_borrow_rate / self.periods_per_year)
