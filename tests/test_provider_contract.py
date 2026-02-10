@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from src.data_access.actions_schema import validate_actions_frame
-from src.data_access.bars_schema import validate_bars_frame
+from src.data_access.actions_schema import CANONICAL_ACTION_FIELDS, REQUIRED_ACTION_FIELDS, validate_actions_frame
+from src.data_access.bars_schema import CANONICAL_BAR_FIELDS, REQUIRED_BAR_FIELDS, validate_bars_frame
 from src.data_access.provider_base import DataProvider
 
 
@@ -69,7 +69,19 @@ def test_provider_contract() -> None:
     bars = provider.get_bars(symbols, "2024-01-01", "2024-01-31")
     assert hasattr(bars, "columns")
     validate_bars_frame(bars)
+    assert bars.rows
+    bar = bars.rows[0]
+    for field in REQUIRED_BAR_FIELDS:
+        assert field in bar
+        assert isinstance(bar[field], CANONICAL_BAR_FIELDS[field])
+    assert bar["timestamp_utc"].tzinfo == timezone.utc
 
     actions = provider.get_corporate_actions(symbols, "2024-01-01", "2024-01-31")
     assert hasattr(actions, "columns")
     validate_actions_frame(actions)
+    assert actions.rows
+    action = actions.rows[0]
+    for field in REQUIRED_ACTION_FIELDS:
+        assert field in action
+        assert isinstance(action[field], CANONICAL_ACTION_FIELDS[field])
+    assert action["action_date"].tzinfo == timezone.utc
