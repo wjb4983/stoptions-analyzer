@@ -41,6 +41,8 @@ class MomentumFlipExit:
         if start_px <= 0.0 or end_px <= 0.0:
             return False
         score = end_px / start_px - 1.0
+        if abs(score) < self.config.min_abs_return:
+            return False
         if position.side > 0:
             return score < 0.0
         if position.side < 0:
