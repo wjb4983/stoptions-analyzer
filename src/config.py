@@ -49,6 +49,7 @@ DEFAULT_BACKTEST_SETTINGS = {
     "starting_capital": "100000",
     "bet_sizing_mode": "half_kelly",
     "custom_bet_pct": "10",
+    "timeframe": "1m",
     "selected_entry_signals": "ts_momentum",
     "selected_exit_signals": "none",
     "xsmom_top_quantile": "0.2",

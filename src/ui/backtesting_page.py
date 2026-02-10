@@ -13,6 +13,7 @@ from utils.parsing import normalize_cache_root, parse_date, parse_float
 ENTRY_SIGNALS = ["ts_momentum", "ma_trend", "breakout"]
 EXIT_SIGNALS = ["none", "momentum_flip", "trailing_stop", "max_hold"]
 STRATEGIES = ["momentum", "xsmom"]
+TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 
 
 class BacktestingPage(ttk.Frame):
@@ -83,6 +84,16 @@ class BacktestingPage(ttk.Frame):
         ttk.Label(strategy_frame, text="Custom Bet %").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.custom_bet_pct_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.custom_bet_pct_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Resolution").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.timeframe_var = tk.StringVar(value="1m")
+        ttk.Combobox(
+            strategy_frame,
+            textvariable=self.timeframe_var,
+            state="readonly",
+            values=TIMEFRAMES,
+        ).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         self.strategy_specific_container = ttk.Frame(strategy_frame)
@@ -200,6 +211,8 @@ class BacktestingPage(ttk.Frame):
         self.starting_capital_var.set(str(settings.get("starting_capital", "100000")))
         self.bet_sizing_mode_var.set(str(settings.get("bet_sizing_mode", "half_kelly")))
         self.custom_bet_pct_var.set(str(settings.get("custom_bet_pct", "10")))
+        timeframe = str(settings.get("timeframe", "1m"))
+        self.timeframe_var.set(timeframe if timeframe in TIMEFRAMES else "1m")
 
         selected_entries = self._split_csv_setting(settings.get("selected_entry_signals", "ts_momentum"))
         selected_exits = self._split_csv_setting(settings.get("selected_exit_signals", "none"))
@@ -267,6 +280,7 @@ class BacktestingPage(ttk.Frame):
             "starting_capital": str(starting_capital),
             "bet_sizing_mode": self.bet_sizing_mode_var.get().strip() or "half_kelly",
             "custom_bet_pct": str(custom_bet_pct),
+            "timeframe": self.timeframe_var.get().strip() or "1m",
             "selected_entry_signals": ",".join(selected_entries),
             "selected_exit_signals": ",".join(selected_exits),
             "start_date": self.start_date_var.get().strip(),
@@ -300,6 +314,10 @@ class BacktestingPage(ttk.Frame):
 
         cache_root = normalize_cache_root(self.backtest_root_var.get())
         bet_sizing_mode = self.bet_sizing_mode_var.get().strip() or "half_kelly"
+        timeframe = self.timeframe_var.get().strip() or "1m"
+        if timeframe not in TIMEFRAMES:
+            messagebox.showinfo("Invalid input", "Please select a valid resolution.")
+            return
 
         worker_args: tuple[object, ...]
         status_line: str
@@ -325,6 +343,7 @@ class BacktestingPage(ttk.Frame):
                 starting_capital,
                 bet_sizing_mode,
                 custom_bet_pct,
+                timeframe,
                 selected_entries,
                 selected_exits,
             )
@@ -347,6 +366,7 @@ class BacktestingPage(ttk.Frame):
                 starting_capital,
                 bet_sizing_mode,
                 custom_bet_pct,
+                timeframe,
                 xsmom_top_quantile,
                 xsmom_bottom_quantile,
                 xsmom_long_only,
@@ -427,6 +447,7 @@ class BacktestingPage(ttk.Frame):
         starting_capital: float,
         bet_sizing_mode: str,
         custom_bet_pct: float,
+        timeframe: str,
         entry_signals: list[str],
         exit_signals: list[str],
     ) -> None:
@@ -442,6 +463,7 @@ class BacktestingPage(ttk.Frame):
                 starting_capital=starting_capital,
                 bet_sizing_mode=bet_sizing_mode,
                 custom_bet_pct=custom_bet_pct,
+                timeframe=timeframe,
                 entry_signals=entry_signals,
                 exit_signals=exit_signals,
             )
@@ -461,6 +483,7 @@ class BacktestingPage(ttk.Frame):
         starting_capital: float,
         bet_sizing_mode: str,
         custom_bet_pct: float,
+        timeframe: str,
         top_quantile: float,
         bottom_quantile: float,
         long_only: bool,
@@ -483,6 +506,7 @@ class BacktestingPage(ttk.Frame):
                 xsmom_bottom_quantile=bottom_quantile,
                 xsmom_long_only=long_only,
                 xsmom_vol_lookback_days=vol_lookback_days,
+                timeframe=timeframe,
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"

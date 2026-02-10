@@ -143,6 +143,7 @@ def run_time_series_momentum_backtest(
     xsmom_bottom_quantile: float = 0.2,
     xsmom_long_only: bool = False,
     xsmom_vol_lookback_days: int = 20,
+    timeframe: str = "1m",
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     entry_cfg = parse_entry_signal_config(
@@ -167,7 +168,7 @@ def run_time_series_momentum_backtest(
         start=start_dt.isoformat(),
         end=end_dt.isoformat(),
         cache_root=cache_root,
-        timeframe="1m",
+        timeframe=timeframe,
         lookback_window=lookback_window,
     )
 
@@ -286,6 +287,7 @@ def run_time_series_momentum_backtest(
             "xsmom_bottom_quantile": xsmom_bottom_quantile,
             "xsmom_long_only": xsmom_long_only,
             "xsmom_vol_lookback_days": xsmom_vol_lookback_days,
+            "timeframe": timeframe,
         },
         metrics=metrics,
         drawdown_rows=drawdown_rows,
@@ -568,6 +570,7 @@ def run_multi_signal_backtest(
     starting_capital: float = 100_000.0,
     bet_sizing_mode: str = "half_kelly",
     custom_bet_pct: float = 10.0,
+    timeframe: str = "1m",
 ) -> str:
     """Run all selected entry/exit combinations with shared core parameters."""
 
@@ -602,6 +605,7 @@ def run_multi_signal_backtest(
                 exit_signal_params={
                     "min_abs_return": 0.01,
                 } if exit_signal == "momentum_flip" else {},
+                timeframe=timeframe,
             )
             run_dir = _extract_saved_output_dir(report)
             metrics = _load_metrics_from_run_dir(run_dir)
@@ -1056,6 +1060,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--starting-capital", type=float, default=100000.0)
     run_parser.add_argument("--bet-sizing-mode", choices=["kelly", "half_kelly", "custom"], default="half_kelly")
     run_parser.add_argument("--custom-bet-pct", type=float, default=10.0)
+    run_parser.add_argument("--timeframe", default="1m", help="Bar resolution (e.g. 1m, 5m, 15m, 30m, 1h, 1d).")
     run_parser.add_argument("--strategy", choices=["momentum", "xsmom"], default="momentum")
     run_parser.add_argument("--xsmom-top-quantile", type=float, default=0.2)
     run_parser.add_argument("--xsmom-bottom-quantile", type=float, default=0.2)
@@ -1124,6 +1129,7 @@ def main() -> None:
             xsmom_bottom_quantile=args.xsmom_bottom_quantile,
             xsmom_long_only=bool(args.xsmom_long_only),
             xsmom_vol_lookback_days=args.xsmom_vol_lookback_days,
+            timeframe=str(args.timeframe),
         )
     print(output)
 
