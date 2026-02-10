@@ -89,3 +89,17 @@ MVP supports deterministic sizing rules:
 - **Win rate**: fraction of closed trades with positive PnL.
 
 These are computed from backtest outputs and reported in a single metrics object.
+
+## 7) Next after MVP backlog
+
+1. **Walk-forward optimization**
+   - Add rolling train/validation/test windows for momentum and cost hyperparameters.
+   - Store each fold's parameter choice and out-of-sample metrics for auditability.
+
+2. **Regime filters**
+   - Gate exposure with simple market-state filters (trend/volatility/liquidity regimes).
+   - Track filter hit-rate and incremental alpha vs. always-on baseline.
+
+3. **Multi-asset risk parity**
+   - Extend sizing to equal-risk-contribution allocations across symbols.
+   - Add leverage and concentration controls at portfolio and asset-class levels.
