@@ -216,6 +216,7 @@ def run_time_series_momentum_backtest(
         signals=sized_signals,
         slippage_model=BpsSlippage(costs_bps),
         initial_equity=float(starting_capital),
+        timeframe=timeframe,
     )
 
     timestamps = arrays.date_index
@@ -472,6 +473,7 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         signals=signals,
         slippage_model=BpsSlippage(costs_bps),
         initial_equity=1.0,
+        timeframe="1m",
     )
 
     turnover = _to_numpy_1d(result.turnover)
@@ -490,8 +492,18 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         "costs_bps": costs_bps,
         "total_return": float(metrics.get("total_return", 0.0)),
         "sharpe": float(metrics.get("sharpe", 0.0)),
+        "cagr": float(metrics.get("cagr", 0.0)),
         "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
+        "calmar": float(metrics.get("calmar", 0.0)),
         "volatility": float(metrics.get("volatility", 0.0)),
+        "sortino": float(metrics.get("sortino", 0.0)),
+        "downside_deviation": float(metrics.get("downside_deviation", 0.0)),
+        "hit_rate": float(metrics.get("hit_rate", 0.0)),
+        "profit_factor": float(metrics.get("profit_factor", 0.0)),
+        "exposure_time": float(metrics.get("exposure_time", 0.0)),
+        "turnover_adjusted_return": float(metrics.get("turnover_adjusted_return", 0.0)),
+        "rolling_sharpe_mean": float(metrics.get("rolling_sharpe_mean", 0.0)),
+        "rolling_drawdown_worst": float(metrics.get("rolling_drawdown_worst", 0.0)),
         "turnover_total": float(np.sum(turnover)) if turnover.size else 0.0,
         "cost_total": cost_totals.get("total", 0.0),
     }
@@ -616,8 +628,16 @@ def run_multi_signal_backtest(
                     "exit_signal": exit_signal,
                     "total_return": float(metrics.get("total_return", 0.0)),
                     "sharpe": float(metrics.get("sharpe", 0.0)),
+                    "cagr": float(metrics.get("cagr", 0.0)),
                     "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
+                    "calmar": float(metrics.get("calmar", 0.0)),
                     "volatility": float(metrics.get("volatility", 0.0)),
+                    "sortino": float(metrics.get("sortino", 0.0)),
+                    "hit_rate": float(metrics.get("hit_rate", 0.0)),
+                    "profit_factor": float(metrics.get("profit_factor", 0.0)),
+                    "turnover_adjusted_return": float(metrics.get("turnover_adjusted_return", 0.0)),
+                    "rolling_sharpe_mean": float(metrics.get("rolling_sharpe_mean", 0.0)),
+                    "rolling_drawdown_worst": float(metrics.get("rolling_drawdown_worst", 0.0)),
                     "turnover_total": float(metrics.get("turnover_total", 0.0)),
                     "cost_total": float(metrics.get("cost_total", 0.0)),
                     "run_dir": str(run_dir),
@@ -643,7 +663,9 @@ def run_multi_signal_backtest(
         summary_lines.append(
             f"#{idx} entry={row['entry_signal']} exit={row['exit_signal']} "
             f"sharpe={row['sharpe']:.6f} total_return={row['total_return']:.6f} "
+            f"cagr={row['cagr']:.6f} calmar={row['calmar']:.6f} "
             f"max_drawdown={row['max_drawdown']:.6f} volatility={row['volatility']:.6f} "
+            f"sortino={row['sortino']:.6f} hit_rate={row['hit_rate']:.6f} "
             f"turnover_total={row['turnover_total']:.6f} cost_total={row['cost_total']:.6f}"
         )
 
@@ -680,8 +702,16 @@ def _persist_multi_signal_outputs(rows: list[dict[str, Any]]) -> Path:
         "exit_signal",
         "total_return",
         "sharpe",
+        "cagr",
         "max_drawdown",
+        "calmar",
         "volatility",
+        "sortino",
+        "hit_rate",
+        "profit_factor",
+        "turnover_adjusted_return",
+        "rolling_sharpe_mean",
+        "rolling_drawdown_worst",
         "turnover_total",
         "cost_total",
         "run_dir",

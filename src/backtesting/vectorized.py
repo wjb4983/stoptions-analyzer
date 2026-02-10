@@ -100,6 +100,8 @@ def backtest_vectorized(
     weights: Any | None = None,
     initial_equity: float = 1.0,
     execution_mode: ExecutionMode = "optimized",
+    timeframe: str | None = None,
+    periods_per_year: float | None = None,
 ) -> BacktestResult:
     """Run a pure vectorized backtest with next-open execution.
 
@@ -168,7 +170,14 @@ def backtest_vectorized(
     pnl[1:] = equity_curve[:-1] * net_returns[1:]
     turnover = np.sum(np.abs(trades) * portfolio_weights, axis=1)
 
-    metrics = _compute_metrics(net_returns, equity_curve)
+    metrics = _compute_metrics(
+        returns=net_returns,
+        equity_curve=equity_curve,
+        positions=positions,
+        turnover=turnover,
+        timeframe=timeframe,
+        periods_per_year=periods_per_year,
+    )
     cost_breakdown = {
         "slippage": _to_series(slippage_cost, index),
         "fees": _to_series(fee_cost, index),
@@ -357,16 +366,125 @@ def _normalize_weights(weights: Any | None, n_assets: int) -> np.ndarray:
     return arr
 
 
-def _compute_metrics(returns: np.ndarray, equity_curve: np.ndarray) -> dict[str, float]:
+def _resolve_periods_per_year(*, timeframe: str | None, periods_per_year: float | None) -> float:
+    if periods_per_year is not None and periods_per_year > 0:
+        return float(periods_per_year)
+    if timeframe is None:
+        return 252.0
+    mapping = {
+        "1m": 252.0 * 390.0,
+        "5m": 252.0 * 78.0,
+        "15m": 252.0 * 26.0,
+        "30m": 252.0 * 13.0,
+        "1h": 252.0 * 6.5,
+        "1d": 252.0,
+    }
+    return float(mapping.get(str(timeframe).strip().lower(), 252.0))
+
+
+def _compute_metrics(
+    *,
+    returns: np.ndarray,
+    equity_curve: np.ndarray,
+    positions: np.ndarray,
+    turnover: np.ndarray,
+    timeframe: str | None,
+    periods_per_year: float | None,
+) -> dict[str, float]:
+    ann_factor = _resolve_periods_per_year(timeframe=timeframe, periods_per_year=periods_per_year)
     total_return = equity_curve[-1] / equity_curve[0] - 1.0 if equity_curve.size else 0.0
     avg_return = float(np.mean(returns)) if returns.size else 0.0
     vol = float(np.std(returns, ddof=1)) if returns.size > 1 else 0.0
-    sharpe = avg_return / vol * np.sqrt(252.0) if vol else 0.0
+    sharpe = avg_return / vol * np.sqrt(ann_factor) if vol else 0.0
+    downside = np.minimum(returns, 0.0)
+    downside_dev = float(np.sqrt(np.mean(np.square(downside)))) if returns.size else 0.0
+    sortino = avg_return / downside_dev * np.sqrt(ann_factor) if downside_dev else 0.0
+
+    running_peak = np.maximum.accumulate(equity_curve) if equity_curve.size else np.array([], dtype=float)
+    safe_peak = np.where(running_peak == 0.0, 1.0, running_peak) if equity_curve.size else np.array([], dtype=float)
+    drawdown = equity_curve / safe_peak - 1.0 if equity_curve.size else np.array([], dtype=float)
+    max_drawdown = float(np.min(drawdown)) if drawdown.size else 0.0
+    n_periods = int(returns.size)
+    if n_periods > 0 and equity_curve.size and equity_curve[0] != 0 and ann_factor > 0:
+        cagr = float((equity_curve[-1] / equity_curve[0]) ** (ann_factor / n_periods) - 1.0)
+    else:
+        cagr = 0.0
+    calmar = cagr / abs(max_drawdown) if max_drawdown < 0 else 0.0
+
+    centered = returns - avg_return if returns.size else np.array([], dtype=float)
+    if returns.size > 2:
+        m2 = float(np.mean(centered**2))
+        m3 = float(np.mean(centered**3))
+        skew = m3 / (m2 ** 1.5) if m2 > 0 else 0.0
+    else:
+        skew = 0.0
+    if returns.size > 3:
+        m2 = float(np.mean(centered**2))
+        m4 = float(np.mean(centered**4))
+        kurtosis = m4 / (m2**2) - 3.0 if m2 > 0 else 0.0
+    else:
+        kurtosis = 0.0
+
+    positive_returns = returns[returns > 0.0]
+    negative_returns = returns[returns < 0.0]
+    hit_rate = float(np.mean(returns > 0.0)) if returns.size else 0.0
+    gross_profit = float(np.sum(positive_returns)) if positive_returns.size else 0.0
+    gross_loss = float(-np.sum(negative_returns)) if negative_returns.size else 0.0
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+
+    abs_positions = np.abs(positions)
+    if abs_positions.ndim == 2:
+        exposure = float(np.mean(np.sum(abs_positions, axis=1) > 0.0))
+    else:
+        exposure = float(np.mean(abs_positions > 0.0)) if abs_positions.size else 0.0
+
+    turnover_total = float(np.sum(turnover)) if turnover.size else 0.0
+    turnover_adjusted_return = float(total_return / (1.0 + turnover_total))
+
+    rolling_window = int(max(5, min(60, max(1, int(np.sqrt(max(n_periods, 1)))))))
+    rolling_sharpes: list[float] = []
+    rolling_mdds: list[float] = []
+    if n_periods >= rolling_window:
+        for idx in range(rolling_window, n_periods + 1):
+            win_returns = returns[idx - rolling_window:idx]
+            win_mean = float(np.mean(win_returns))
+            win_vol = float(np.std(win_returns, ddof=1)) if win_returns.size > 1 else 0.0
+            rolling_sharpes.append(win_mean / win_vol * np.sqrt(ann_factor) if win_vol else 0.0)
+            win_equity = equity_curve[idx - rolling_window:idx]
+            win_peak = np.maximum.accumulate(win_equity)
+            win_safe_peak = np.where(win_peak == 0.0, 1.0, win_peak)
+            win_dd = win_equity / win_safe_peak - 1.0
+            rolling_mdds.append(float(np.min(win_dd)) if win_dd.size else 0.0)
+
+    rolling_sharpe_mean = float(np.mean(rolling_sharpes)) if rolling_sharpes else 0.0
+    rolling_sharpe_min = float(np.min(rolling_sharpes)) if rolling_sharpes else 0.0
+    rolling_sharpe_max = float(np.max(rolling_sharpes)) if rolling_sharpes else 0.0
+    rolling_drawdown_mean = float(np.mean(rolling_mdds)) if rolling_mdds else 0.0
+    rolling_drawdown_worst = float(np.min(rolling_mdds)) if rolling_mdds else 0.0
+
     return {
+        "periods_per_year": float(ann_factor),
         "total_return": float(total_return),
+        "cagr": cagr,
         "avg_return": avg_return,
         "volatility": vol,
         "sharpe": sharpe,
+        "sortino": sortino,
+        "downside_deviation": downside_dev,
+        "max_drawdown": max_drawdown,
+        "calmar": calmar,
+        "skew": float(skew),
+        "kurtosis": float(kurtosis),
+        "hit_rate": hit_rate,
+        "profit_factor": float(profit_factor),
+        "exposure_time": exposure,
+        "turnover_adjusted_return": turnover_adjusted_return,
+        "rolling_window": float(rolling_window),
+        "rolling_sharpe_mean": rolling_sharpe_mean,
+        "rolling_sharpe_min": rolling_sharpe_min,
+        "rolling_sharpe_max": rolling_sharpe_max,
+        "rolling_drawdown_mean": rolling_drawdown_mean,
+        "rolling_drawdown_worst": rolling_drawdown_worst,
     }
 
 

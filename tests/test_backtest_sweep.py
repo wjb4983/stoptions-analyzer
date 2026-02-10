@@ -51,8 +51,18 @@ def test_run_parameter_sweep_ranks_by_sharpe_and_is_reproducible(tmp_path) -> No
             "costs_bps": float(payload["costs_bps"]),
             "total_return": sharpe / 100.0,
             "sharpe": sharpe,
+            "cagr": sharpe / 120.0,
             "max_drawdown": -0.1,
+            "calmar": sharpe / 12.0,
             "volatility": 0.2,
+            "sortino": sharpe / 2.0,
+            "downside_deviation": 0.1,
+            "hit_rate": 0.6,
+            "profit_factor": 1.5,
+            "exposure_time": 0.8,
+            "turnover_adjusted_return": 0.03,
+            "rolling_sharpe_mean": sharpe - 1.0,
+            "rolling_drawdown_worst": -0.08,
             "turnover_total": 1.0,
             "cost_total": 0.01,
         }
@@ -95,6 +105,9 @@ def test_run_parameter_sweep_ranks_by_sharpe_and_is_reproducible(tmp_path) -> No
     rows = list(csv.DictReader(leaderboard1.splitlines()))
     assert len(rows) > 1
     assert float(rows[0]["sharpe"]) >= float(rows[1]["sharpe"])
+    assert "cagr" in rows[0]
+    assert "calmar" in rows[0]
+    assert "turnover_adjusted_return" in rows[0]
 
 
 def test_run_multi_signal_backtest_ranks_and_persists(monkeypatch, tmp_path) -> None:
@@ -113,8 +126,16 @@ def test_run_multi_signal_backtest_ranks_and_persists(monkeypatch, tmp_path) -> 
         metrics = [
             {"metric": "total_return", "value": sharpe / 10.0},
             {"metric": "sharpe", "value": sharpe},
+            {"metric": "cagr", "value": 0.08},
             {"metric": "max_drawdown", "value": -0.2},
+            {"metric": "calmar", "value": 0.4},
             {"metric": "volatility", "value": 0.3},
+            {"metric": "sortino", "value": 1.1},
+            {"metric": "hit_rate", "value": 0.55},
+            {"metric": "profit_factor", "value": 1.4},
+            {"metric": "turnover_adjusted_return", "value": 0.04},
+            {"metric": "rolling_sharpe_mean", "value": 0.8},
+            {"metric": "rolling_drawdown_worst", "value": -0.12},
             {"metric": "turnover_total", "value": 1.2},
             {"metric": "cost_total", "value": 0.02},
         ]
@@ -141,7 +162,7 @@ def test_run_multi_signal_backtest_ranks_and_persists(monkeypatch, tmp_path) -> 
     run_dirs = list((tmp_path / "outputs").glob("tsmom_multi_signal_*"))
     assert len(run_dirs) == 1
     leaderboard = (run_dirs[0] / "leaderboard.csv").read_text()
-    assert "entry_signal,exit_signal,total_return,sharpe" in leaderboard
+    assert "entry_signal,exit_signal,total_return,sharpe,cagr,max_drawdown,calmar" in leaderboard
 
 
 def test_run_multi_signal_backtest_applies_conservative_runtime_params(monkeypatch, tmp_path) -> None:
@@ -155,8 +176,16 @@ def test_run_multi_signal_backtest_applies_conservative_runtime_params(monkeypat
         metrics = [
             {"metric": "total_return", "value": 0.01},
             {"metric": "sharpe", "value": 1.0},
+            {"metric": "cagr", "value": 0.05},
             {"metric": "max_drawdown", "value": -0.1},
+            {"metric": "calmar", "value": 0.5},
             {"metric": "volatility", "value": 0.2},
+            {"metric": "sortino", "value": 0.9},
+            {"metric": "hit_rate", "value": 0.52},
+            {"metric": "profit_factor", "value": 1.2},
+            {"metric": "turnover_adjusted_return", "value": 0.02},
+            {"metric": "rolling_sharpe_mean", "value": 0.7},
+            {"metric": "rolling_drawdown_worst", "value": -0.08},
             {"metric": "turnover_total", "value": 1.0},
             {"metric": "cost_total", "value": 0.01},
         ]

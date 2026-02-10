@@ -174,6 +174,29 @@ def format_backtest_report(
         lines.append(f"  - {key}: {value:.6f}")
     lines.append("")
 
+    if any(key in metrics for key in ("rolling_sharpe_mean", "rolling_sharpe_min", "rolling_sharpe_max")):
+        lines.append("Rolling Sharpe Summary:")
+        lines.append(
+            "  - mean={mean:.6f}, min={minv:.6f}, max={maxv:.6f}, window={window:.0f}".format(
+                mean=metrics.get("rolling_sharpe_mean", 0.0),
+                minv=metrics.get("rolling_sharpe_min", 0.0),
+                maxv=metrics.get("rolling_sharpe_max", 0.0),
+                window=metrics.get("rolling_window", 0.0),
+            )
+        )
+        lines.append("")
+
+    if any(key in metrics for key in ("rolling_drawdown_mean", "rolling_drawdown_worst")):
+        lines.append("Rolling Drawdown Summary:")
+        lines.append(
+            "  - mean={mean:.6f}, worst={worst:.6f}, window={window:.0f}".format(
+                mean=metrics.get("rolling_drawdown_mean", 0.0),
+                worst=metrics.get("rolling_drawdown_worst", 0.0),
+                window=metrics.get("rolling_window", 0.0),
+            )
+        )
+        lines.append("")
+
     lines.append("Drawdown Table:")
     if drawdown_rows:
         for row in drawdown_rows:
