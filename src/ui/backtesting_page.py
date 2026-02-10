@@ -31,6 +31,7 @@ class BacktestingPage(ttk.Frame):
         content = ttk.Frame(self)
         content.pack(fill="both", expand=True, padx=30, pady=10)
         content.columnconfigure(0, weight=1)
+        content.rowconfigure(1, weight=1)
 
         strategy_frame = ttk.LabelFrame(content, text="Strategy")
         strategy_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
@@ -112,17 +113,20 @@ class BacktestingPage(ttk.Frame):
         self.notes_text = tk.Text(notes_frame, height=14)
         self.notes_text.grid(row=0, column=0, sticky="nsew", padx=8, pady=6)
 
-        button_row = ttk.Frame(self)
-        button_row.pack(pady=10)
+        button_row = ttk.Frame(content)
+        button_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 10))
+        button_row.columnconfigure(0, weight=1)
+        button_row.columnconfigure(1, weight=1)
+        button_row.columnconfigure(2, weight=1)
 
-        ttk.Button(button_row, text="Save Parameters", command=self.save_settings).grid(row=0, column=0, padx=10)
+        ttk.Button(button_row, text="Save Parameters", command=self.save_settings).grid(row=0, column=0, padx=10, pady=4)
         self.run_button = ttk.Button(button_row, text="Run Backtest", command=self.run_backtest)
-        self.run_button.grid(row=0, column=1, padx=10)
+        self.run_button.grid(row=0, column=1, padx=10, pady=4)
         ttk.Button(
             button_row,
             text="Back to Main Menu",
             command=lambda: controller.show_frame("MainMenu"),
-        ).grid(row=0, column=2, padx=10)
+        ).grid(row=0, column=2, padx=10, pady=4)
 
         self._on_strategy_changed()
 
