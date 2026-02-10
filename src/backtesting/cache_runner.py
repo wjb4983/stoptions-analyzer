@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import random
+import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from data_access.cache import _safe_ticker_name
 
 from data_access.engine_loader import EngineArrayBundle, load_canonical_price_arrays
 from utils.parsing import build_npz_payload, chunk_results_by_year
+from backtesting.signals import build_targets, parse_entry_signal_config, parse_exit_signal_config, required_lookback_window
 
 
 def run_backtest_cache(
@@ -121,25 +123,42 @@ def run_time_series_momentum_backtest(
     lookback_days: int,
     skip_days: int,
     costs_bps: float,
+    entry_signal: str = "ts_momentum",
+    entry_signal_params: dict[str, object] | None = None,
+    exit_signal: str = "none",
+    exit_signal_params: dict[str, object] | None = None,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    entry_cfg = parse_entry_signal_config(
+        entry_signal,
+        entry_signal_params,
+        default_lookback_days=lookback_days,
+        default_skip_days=skip_days,
+    )
+    exit_cfg = parse_exit_signal_config(
+        exit_signal,
+        exit_signal_params,
+        default_lookback_days=lookback_days,
+        default_skip_days=skip_days,
+    )
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time())
+    lookback_window = required_lookback_window(entry_cfg, exit_cfg)
     arrays = load_backtest_engine_arrays(
         tickers=tickers,
         start=start_dt.isoformat(),
         end=end_dt.isoformat(),
         cache_root=cache_root,
         timeframe="1m",
-        lookback_window=lookback_days + skip_days + 1,
+        lookback_window=lookback_window,
     )
 
     prices = _fill_missing_prices(arrays.close_prices)
-    signals = _build_time_series_signals(
+    signals = build_targets(
         close_prices=prices,
         missing_mask=arrays.missing_mask,
-        lookback_days=lookback_days,
-        skip_days=skip_days,
+        entry_config=entry_cfg,
+        exit_config=exit_cfg,
     )
 
     result = backtest_vectorized(
@@ -193,6 +212,10 @@ def run_time_series_momentum_backtest(
             "lookback_days": lookback_days,
             "skip_days": skip_days,
             "costs_bps": costs_bps,
+            "entry_signal": entry_signal,
+            "entry_signal_params": json.dumps(entry_signal_params or {}),
+            "exit_signal": exit_signal,
+            "exit_signal_params": json.dumps(exit_signal_params or {}),
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
         },
@@ -243,34 +266,6 @@ def _fill_missing_prices(close_prices: np.ndarray) -> np.ndarray:
             if not np.isfinite(column[idx]):
                 column[idx] = column[idx - 1]
     return values
-
-
-def _build_time_series_signals(
-    *,
-    close_prices: np.ndarray,
-    missing_mask: np.ndarray,
-    lookback_days: int,
-    skip_days: int,
-) -> np.ndarray:
-    n_periods, n_assets = close_prices.shape
-    signals = np.zeros((n_periods, n_assets), dtype=float)
-    offset = lookback_days + skip_days
-    for asset_idx in range(n_assets):
-        column = close_prices[:, asset_idx]
-        for idx in range(offset, n_periods):
-            end_idx = idx - skip_days
-            start_idx = end_idx - lookback_days
-            if start_idx < 0 or end_idx < 0:
-                continue
-            if missing_mask[start_idx, asset_idx] or missing_mask[end_idx, asset_idx]:
-                continue
-            start_px = column[start_idx]
-            end_px = column[end_idx]
-            if start_px <= 0.0 or end_px <= 0.0:
-                continue
-            score = end_px / start_px - 1.0
-            signals[idx, asset_idx] = float(np.sign(score))
-    return signals
 
 
 def _to_numpy_1d(values: object) -> np.ndarray:
@@ -384,3 +379,62 @@ def _write_trades_csv_json(
         writer.writeheader()
         writer.writerows(rows)
     (run_dir / "trades.json").write_text(json.dumps(rows, indent=2))
+
+
+def _parse_json_object(raw: str | None) -> dict[str, object]:
+    if raw is None or not raw.strip():
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("signal params must be a JSON object")
+    return parsed
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run the time-series momentum backtest with pluggable entry/exit signals.",
+        epilog=(
+            "Examples:\n"
+            "  PYTHONPATH=src python -m backtesting.cache_runner --tickers AAPL,MSFT "
+            "--start-date 2024-01-01 --end-date 2024-03-01 --entry-signal ts_momentum --exit-signal none\n"
+            "  PYTHONPATH=src python -m backtesting.cache_runner --tickers AAPL --start-date 2024-01-01 "
+            "--end-date 2024-03-01 --entry-signal breakout --entry-signal-params '{\"breakout_window\": 55}' "
+            "--exit-signal trailing_stop --exit-signal-params '{\"trailing_stop_pct\": 0.08}'"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument("--tickers", required=True, help="Comma-separated ticker list.")
+    parser.add_argument("--start-date", required=True, help="Backtest start date (YYYY-MM-DD).")
+    parser.add_argument("--end-date", required=True, help="Backtest end date (YYYY-MM-DD).")
+    parser.add_argument("--cache-root", default=str(BACKTEST_CACHE_DIR), help="Cache root directory.")
+    parser.add_argument("--lookback-days", type=int, default=90)
+    parser.add_argument("--skip-days", type=int, default=5)
+    parser.add_argument("--costs-bps", type=float, default=5.0)
+    parser.add_argument("--entry-signal", default="ts_momentum", choices=["ts_momentum", "ma_trend", "breakout"])
+    parser.add_argument("--entry-signal-params", default="{}", help="JSON object with entry signal parameters.")
+    parser.add_argument("--exit-signal", default="none", choices=["none", "momentum_flip", "trailing_stop", "max_hold"])
+    parser.add_argument("--exit-signal-params", default="{}", help="JSON object with exit signal parameters.")
+    return parser
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+    output = run_time_series_momentum_backtest(
+        tickers=[part.strip() for part in args.tickers.split(",") if part.strip()],
+        start_date=date.fromisoformat(args.start_date),
+        end_date=date.fromisoformat(args.end_date),
+        cache_root=Path(args.cache_root),
+        lookback_days=args.lookback_days,
+        skip_days=args.skip_days,
+        costs_bps=args.costs_bps,
+        entry_signal=args.entry_signal,
+        entry_signal_params=_parse_json_object(args.entry_signal_params),
+        exit_signal=args.exit_signal,
+        exit_signal_params=_parse_json_object(args.exit_signal_params),
+    )
+    print(output)
+
+
+if __name__ == "__main__":
+    main()

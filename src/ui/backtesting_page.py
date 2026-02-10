@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import threading
 from datetime import date
 from pathlib import Path
@@ -21,8 +23,8 @@ class BacktestingPage(ttk.Frame):
         )
 
         intro = (
-            "MVP strategy is fixed to Time-Series Momentum. "
-            "Set only lookback, skip, costs, and date range."
+            "Time-Series backtest with pluggable entry/exit signals. "
+            "Default settings preserve existing time-series momentum behavior."
         )
         ttk.Label(self, text=intro, wraplength=900, justify="center").pack(pady=5)
 
@@ -57,36 +59,73 @@ class BacktestingPage(ttk.Frame):
             row=2, column=1, sticky="ew", padx=8, pady=6
         )
 
-        ttk.Label(strategy_frame, text="Costs (bps)").grid(
+        ttk.Label(strategy_frame, text="Entry Signal").grid(
             row=3, column=0, sticky="w", padx=8, pady=6
         )
-        self.costs_bps_var = tk.StringVar()
-        ttk.Entry(strategy_frame, textvariable=self.costs_bps_var).grid(
-            row=3, column=1, sticky="ew", padx=8, pady=6
-        )
+        self.entry_signal_var = tk.StringVar()
+        ttk.Combobox(
+            strategy_frame,
+            textvariable=self.entry_signal_var,
+            state="readonly",
+            values=["ts_momentum", "ma_trend", "breakout"],
+        ).grid(row=3, column=1, sticky="ew", padx=8, pady=6)
 
-        ttk.Label(strategy_frame, text="Start Date (YYYY-MM-DD)").grid(
+        ttk.Label(strategy_frame, text="Entry Params (JSON)").grid(
             row=4, column=0, sticky="w", padx=8, pady=6
         )
-        self.start_date_var = tk.StringVar()
-        ttk.Entry(strategy_frame, textvariable=self.start_date_var).grid(
+        self.entry_signal_params_var = tk.StringVar()
+        ttk.Entry(strategy_frame, textvariable=self.entry_signal_params_var).grid(
             row=4, column=1, sticky="ew", padx=8, pady=6
         )
 
-        ttk.Label(strategy_frame, text="End Date (YYYY-MM-DD)").grid(
+        ttk.Label(strategy_frame, text="Exit Signal").grid(
             row=5, column=0, sticky="w", padx=8, pady=6
+        )
+        self.exit_signal_var = tk.StringVar()
+        ttk.Combobox(
+            strategy_frame,
+            textvariable=self.exit_signal_var,
+            state="readonly",
+            values=["none", "momentum_flip", "trailing_stop", "max_hold"],
+        ).grid(row=5, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(strategy_frame, text="Exit Params (JSON)").grid(
+            row=6, column=0, sticky="w", padx=8, pady=6
+        )
+        self.exit_signal_params_var = tk.StringVar()
+        ttk.Entry(strategy_frame, textvariable=self.exit_signal_params_var).grid(
+            row=6, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(strategy_frame, text="Costs (bps)").grid(
+            row=7, column=0, sticky="w", padx=8, pady=6
+        )
+        self.costs_bps_var = tk.StringVar()
+        ttk.Entry(strategy_frame, textvariable=self.costs_bps_var).grid(
+            row=7, column=1, sticky="ew", padx=8, pady=6
+        )
+
+        ttk.Label(strategy_frame, text="Start Date (YYYY-MM-DD)").grid(
+            row=8, column=0, sticky="w", padx=8, pady=6
+        )
+        self.start_date_var = tk.StringVar()
+        ttk.Entry(strategy_frame, textvariable=self.start_date_var).grid(
+            row=8, column=1, sticky="ew", padx=8, pady=6
+        )
+
+        ttk.Label(strategy_frame, text="End Date (YYYY-MM-DD)").grid(
+            row=9, column=0, sticky="w", padx=8, pady=6
         )
         self.end_date_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.end_date_var).grid(
-            row=5, column=1, sticky="ew", padx=8, pady=6
+            row=9, column=1, sticky="ew", padx=8, pady=6
         )
 
         ttk.Label(strategy_frame, text="Backtest Data Root").grid(
-            row=6, column=0, sticky="w", padx=8, pady=6
+            row=10, column=0, sticky="w", padx=8, pady=6
         )
         self.backtest_root_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.backtest_root_var).grid(
-            row=6, column=1, sticky="ew", padx=8, pady=6
+            row=10, column=1, sticky="ew", padx=8, pady=6
         )
 
         notes_frame = ttk.LabelFrame(content, text="Run Output")
@@ -118,6 +157,10 @@ class BacktestingPage(ttk.Frame):
         settings.update(self.controller.state.backtest_settings)
         self.lookback_days_var.set(str(settings.get("lookback_days", "90")))
         self.skip_days_var.set(str(settings.get("skip_days", "5")))
+        self.entry_signal_var.set(str(settings.get("entry_signal", "ts_momentum")))
+        self.entry_signal_params_var.set(str(settings.get("entry_signal_params", "{}")))
+        self.exit_signal_var.set(str(settings.get("exit_signal", "none")))
+        self.exit_signal_params_var.set(str(settings.get("exit_signal_params", "{}")))
         self.costs_bps_var.set(str(settings.get("costs_bps", "5")))
         self.start_date_var.set(settings.get("start_date", ""))
         self.end_date_var.set(settings.get("end_date", ""))
@@ -146,6 +189,10 @@ class BacktestingPage(ttk.Frame):
             "strategy_name": "Time-Series Momentum",
             "lookback_days": str(int(lookback)),
             "skip_days": str(int(skip)),
+            "entry_signal": self.entry_signal_var.get().strip() or "ts_momentum",
+            "entry_signal_params": self.entry_signal_params_var.get().strip() or "{}",
+            "exit_signal": self.exit_signal_var.get().strip() or "none",
+            "exit_signal_params": self.exit_signal_params_var.get().strip() or "{}",
             "costs_bps": str(costs_bps),
             "start_date": self.start_date_var.get().strip(),
             "end_date": self.end_date_var.get().strip(),
@@ -188,12 +235,24 @@ class BacktestingPage(ttk.Frame):
 
         self.run_button.config(state="disabled")
         self.notes_text.delete("1.0", tk.END)
-        self.notes_text.insert("1.0", "Running Time-Series Momentum backtest...\n")
+        self.notes_text.insert("1.0", "Running backtest...\n")
 
         cache_root = normalize_cache_root(self.backtest_root_var.get())
         thread = threading.Thread(
             target=self._run_backtest_worker,
-            args=(tickers, start_date, end_date, cache_root, lookback, skip, costs_bps),
+            args=(
+                tickers,
+                start_date,
+                end_date,
+                cache_root,
+                lookback,
+                skip,
+                costs_bps,
+                self.entry_signal_var.get().strip() or "ts_momentum",
+                self.entry_signal_params_var.get().strip() or "{}",
+                self.exit_signal_var.get().strip() or "none",
+                self.exit_signal_params_var.get().strip() or "{}",
+            ),
             daemon=True,
         )
         thread.start()
@@ -207,16 +266,27 @@ class BacktestingPage(ttk.Frame):
         lookback: int,
         skip: int,
         costs_bps: float,
+        entry_signal: str,
+        entry_signal_params: str,
+        exit_signal: str,
+        exit_signal_params: str,
     ) -> None:
-        output_text = run_time_series_momentum_backtest(
-            tickers=tickers,
-            start_date=start_date,
-            end_date=end_date,
-            cache_root=cache_root,
-            lookback_days=lookback,
-            skip_days=skip,
-            costs_bps=costs_bps,
-        )
+        try:
+            output_text = run_time_series_momentum_backtest(
+                tickers=tickers,
+                start_date=start_date,
+                end_date=end_date,
+                cache_root=cache_root,
+                lookback_days=lookback,
+                skip_days=skip,
+                costs_bps=costs_bps,
+                entry_signal=entry_signal,
+                entry_signal_params=json.loads(entry_signal_params),
+                exit_signal=exit_signal,
+                exit_signal_params=json.loads(exit_signal_params),
+            )
+        except Exception as exc:
+            output_text = f"Backtest failed: {exc}"
         self.after(0, lambda: self._finish_backtest_run(output_text))
 
     def _finish_backtest_run(self, output_text: str) -> None:
