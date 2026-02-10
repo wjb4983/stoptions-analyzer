@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib.util
-from typing import Any, Protocol
+from typing import Any
 
 import numpy as np
+
+from .execution import SlippageModel, ZeroSlippage
 
 
 _pd_spec = importlib.util.find_spec("pandas")
@@ -19,24 +21,6 @@ if _pd_spec:
     import pandas as pd
 else:
     pd = None
-
-
-class SlippageModel(Protocol):
-    """Interface for slippage models.
-
-    Implementations should return a per-bar slippage cost (as a return) for the
-    provided trades. Trades are the change in position executed at the bar open.
-    """
-
-    def estimate(self, prices: np.ndarray, trades: np.ndarray) -> np.ndarray:
-        """Return slippage costs aligned to bars."""
-
-
-class NoSlippage:
-    """A slippage model that applies zero cost."""
-
-    def estimate(self, prices: np.ndarray, trades: np.ndarray) -> np.ndarray:
-        return np.zeros_like(prices, dtype=float)
 
 
 class BpsSlippage:
@@ -51,10 +35,11 @@ class BpsSlippage:
             raise ValueError("Slippage bps must be non-negative.")
         self.bps = bps
 
-    def estimate(self, prices: np.ndarray, trades: np.ndarray) -> np.ndarray:
-        cost = np.zeros_like(prices, dtype=float)
-        cost += np.abs(trades) * (self.bps / 10_000.0)
-        return cost
+    def apply(self, price: float, size: float, liquidity_context: Any | None = None) -> float:
+        if size == 0:
+            return price
+        impact = (self.bps / 10_000.0) * np.sign(size)
+        return price * (1.0 + impact)
 
 
 @dataclass(frozen=True)
@@ -96,7 +81,8 @@ def backtest_vectorized(
     returns = np.zeros_like(price_values, dtype=float)
     returns[1:] = price_values[1:] / price_values[:-1] - 1.0
 
-    slippage = slippage_model.estimate(price_values, trades) if slippage_model else 0.0
+    execution_model = slippage_model or ZeroSlippage()
+    slippage = _estimate_slippage(price_values, trades, execution_model)
     net_returns = positions * returns - slippage
 
     equity_curve = initial_equity * np.cumprod(1.0 + net_returns)
@@ -123,6 +109,23 @@ def _shift(values: np.ndarray, periods: int) -> np.ndarray:
         return shifted
     shifted[periods:] = values[:-periods]
     return shifted
+
+
+def _estimate_slippage(
+    prices: np.ndarray,
+    trades: np.ndarray,
+    model: SlippageModel,
+) -> np.ndarray:
+    slippage = np.zeros_like(prices, dtype=float)
+    if not trades.size:
+        return slippage
+    for idx, trade_size in enumerate(trades):
+        if trade_size == 0:
+            continue
+        price = float(prices[idx])
+        exec_price = float(model.apply(price, float(trade_size), {"bar_index": idx}))
+        slippage[idx] = (exec_price - price) / price * trade_size
+    return slippage
 
 
 def _to_array(values: Any) -> tuple[np.ndarray, Any]:
