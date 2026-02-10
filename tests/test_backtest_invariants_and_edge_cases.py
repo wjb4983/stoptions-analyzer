@@ -131,3 +131,33 @@ def test_vectorized_and_event_driven_agree_on_deterministic_path() -> None:
     event_final_equity = event_result.portfolio.cash + final_qty * prices[-1]
 
     assert np.isclose(event_final_equity, vec.equity_curve[-1])
+
+
+def test_compute_metrics_include_rich_period_aware_fields() -> None:
+    prices = np.array([100.0, 101.0, 102.0, 99.0, 100.0, 104.0, 103.0], dtype=float)
+    signals = np.array([1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0], dtype=float)
+
+    result_daily = backtest_vectorized(prices, signals, timeframe="1d")
+    result_minute = backtest_vectorized(prices, signals, timeframe="1m")
+
+    required = {
+        "cagr",
+        "max_drawdown",
+        "calmar",
+        "sortino",
+        "downside_deviation",
+        "skew",
+        "kurtosis",
+        "hit_rate",
+        "profit_factor",
+        "exposure_time",
+        "turnover_adjusted_return",
+        "rolling_sharpe_mean",
+        "rolling_drawdown_worst",
+    }
+    assert required.issubset(result_daily.metrics.keys())
+    assert float(result_daily.metrics["periods_per_year"]) == 252.0
+    assert float(result_minute.metrics["periods_per_year"]) == 252.0 * 390.0
+    assert 0.0 <= float(result_daily.metrics["hit_rate"]) <= 1.0
+    assert 0.0 <= float(result_daily.metrics["exposure_time"]) <= 1.0
+    assert np.isfinite(float(result_daily.metrics["turnover_adjusted_return"]))

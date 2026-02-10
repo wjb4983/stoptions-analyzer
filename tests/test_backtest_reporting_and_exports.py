@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+import json
 
 import numpy as np
 
@@ -82,12 +83,31 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     ]:
         assert (run_dir / name).exists(), name
 
+    metrics_rows = json.loads((run_dir / "metrics.json").read_text())
+    metric_names = {row["metric"] for row in metrics_rows}
+    for name in [
+        "cagr",
+        "max_drawdown",
+        "calmar",
+        "sortino",
+        "downside_deviation",
+        "skew",
+        "kurtosis",
+        "hit_rate",
+        "profit_factor",
+        "exposure_time",
+        "turnover_adjusted_return",
+        "rolling_sharpe_mean",
+        "rolling_drawdown_worst",
+    ]:
+        assert name in metric_names
+
 
 def test_format_backtest_report_contains_required_sections() -> None:
     report = format_backtest_report(
         title="TSMOM",
         params={"lookback_days": 20},
-        metrics={"total_return": 0.2},
+        metrics={"total_return": 0.2, "rolling_sharpe_mean": 1.1, "rolling_sharpe_min": 0.5, "rolling_sharpe_max": 1.9, "rolling_drawdown_mean": -0.05, "rolling_drawdown_worst": -0.12, "rolling_window": 10.0},
         drawdown_rows=[
             {
                 "timestamp": "2024-01-01T00:00:00",
@@ -102,4 +122,6 @@ def test_format_backtest_report_contains_required_sections() -> None:
 
     assert "Summary Metrics" in report
     assert "Drawdown Table" in report
+    assert "Rolling Sharpe Summary" in report
+    assert "Rolling Drawdown Summary" in report
     assert "Turnover and Cost Attribution" in report
