@@ -133,6 +133,7 @@ def run_time_series_momentum_backtest(
     entry_signal_params: dict[str, object] | None = None,
     exit_signal: str = "none",
     exit_signal_params: dict[str, object] | None = None,
+    signal_rebalance_interval: int = 1,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     entry_cfg = parse_entry_signal_config(
@@ -166,6 +167,7 @@ def run_time_series_momentum_backtest(
         entry_config=entry_cfg,
         exit_config=exit_cfg,
     )
+    signals = _throttle_signal_changes(signals, interval=max(1, int(signal_rebalance_interval)))
 
     result = backtest_vectorized(
         prices=prices,
@@ -216,6 +218,7 @@ def run_time_series_momentum_backtest(
         symbol_order=symbol_order,
         prices=prices,
         trades=trades,
+        costs_bps=costs_bps,
     )
     trade_log_summary = _format_trade_log_summary(trade_log_rows)
 
@@ -232,6 +235,7 @@ def run_time_series_momentum_backtest(
             "exit_signal_params": json.dumps(exit_signal_params or {}),
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
+            "signal_rebalance_interval": signal_rebalance_interval,
         },
         metrics=metrics,
         drawdown_rows=drawdown_rows,
@@ -532,14 +536,15 @@ def run_multi_signal_backtest(
                 lookback_days=lookback_days,
                 skip_days=skip_days,
                 costs_bps=costs_bps,
+                signal_rebalance_interval=390,
                 entry_signal=entry_signal,
                 entry_signal_params={
-                    "min_abs_return": 0.002,
+                    "min_abs_return": 0.01,
                     "long_only": True,
                 } if entry_signal == "ts_momentum" else {},
                 exit_signal=exit_signal,
                 exit_signal_params={
-                    "min_abs_return": 0.002,
+                    "min_abs_return": 0.01,
                 } if exit_signal == "momentum_flip" else {},
             )
             run_dir = _extract_saved_output_dir(report)
@@ -662,6 +667,20 @@ def _fill_missing_prices(close_prices: np.ndarray) -> np.ndarray:
     return values
 
 
+def _throttle_signal_changes(signals: np.ndarray, *, interval: int) -> np.ndarray:
+    if interval <= 1:
+        return np.asarray(signals, dtype=float)
+    values = np.asarray(signals, dtype=float)
+    throttled = np.zeros_like(values)
+    throttled[0] = values[0]
+    for idx in range(1, values.shape[0]):
+        if idx % interval == 0:
+            throttled[idx] = values[idx]
+        else:
+            throttled[idx] = throttled[idx - 1]
+    return throttled
+
+
 def _to_numpy_1d(values: object) -> np.ndarray:
     if hasattr(values, "to_numpy"):
         return np.asarray(values.to_numpy(), dtype=float)
@@ -689,6 +708,7 @@ def _build_trade_log_rows(
     symbol_order: list[str],
     prices: np.ndarray,
     trades: np.ndarray,
+    costs_bps: float,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for col_idx, symbol in enumerate(symbol_order):
@@ -702,13 +722,14 @@ def _build_trade_log_rows(
             price = float(prices[row_idx, col_idx])
             event = "adjust"
             trade_pnl = 0.0
+            trade_cost = abs(trade) * (costs_bps / 10_000.0)
             if side == 0 and abs(trade) > 0:
                 side = 1 if trade > 0 else -1
                 entry_price = price
                 event = "entry"
             elif side != 0 and side * trade < 0:
                 trade_pnl = ((price - entry_price) / entry_price) * side if entry_price > 0 else 0.0
-                running_pnl += trade_pnl
+                running_pnl += trade_pnl - trade_cost
                 event = "exit" if abs(trade) == abs(side) else "flip"
                 next_side = side + int(round(trade))
                 side = next_side
@@ -724,6 +745,7 @@ def _build_trade_log_rows(
                     "trade": trade,
                     "price": price,
                     "trade_pnl": float(trade_pnl),
+                    "trade_cost": float(trade_cost),
                     "running_pnl": float(running_pnl),
                 }
             )
@@ -735,11 +757,11 @@ def _format_trade_log_summary(rows: list[dict[str, object]], max_rows: int = 40)
     if not rows:
         lines.append("No trade events generated.")
         return "\n".join(lines)
-    lines.append("timestamp | symbol | event | trade | price | trade_pnl | running_pnl")
+    lines.append("timestamp | symbol | event | trade | price | trade_pnl | trade_cost | running_pnl")
     for row in rows[:max_rows]:
         lines.append(
             f"{row['timestamp']} | {row['symbol']} | {row['event']} | {float(row['trade']):.2f} | "
-            f"{float(row['price']):.4f} | {float(row['trade_pnl']):.6f} | {float(row['running_pnl']):.6f}"
+            f"{float(row['price']):.4f} | {float(row['trade_pnl']):.6f} | {float(row['trade_cost']):.6f} | {float(row['running_pnl']):.6f}"
         )
     if len(rows) > max_rows:
         lines.append(f"... ({len(rows) - max_rows} more trade events)")
@@ -747,9 +769,9 @@ def _format_trade_log_summary(rows: list[dict[str, object]], max_rows: int = 40)
 
 
 def _trade_log_csv(rows: list[dict[str, object]]) -> str:
-    header = "timestamp,symbol,event,trade,price,trade_pnl,running_pnl"
+    header = "timestamp,symbol,event,trade,price,trade_pnl,trade_cost,running_pnl"
     body = [
-        f"{row['timestamp']},{row['symbol']},{row['event']},{row['trade']},{row['price']},{row['trade_pnl']},{row['running_pnl']}"
+        f"{row['timestamp']},{row['symbol']},{row['event']},{row['trade']},{row['price']},{row['trade_pnl']},{row['trade_cost']},{row['running_pnl']}"
         for row in rows
     ]
     return "\n".join([header, *body]) + "\n"
@@ -877,6 +899,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--entry-signal-params", default="{}", help="JSON object with entry signal parameters.")
     run_parser.add_argument("--exit-signal", default="none", choices=["none", "momentum_flip", "trailing_stop", "max_hold"])
     run_parser.add_argument("--exit-signal-params", default="{}", help="JSON object with exit signal parameters.")
+    run_parser.add_argument("--signal-rebalance-interval", type=int, default=1, help="Only allow signal changes every N bars.")
 
     sweep_parser = subparsers.add_parser("sweep", help="Run parameter sweep across signal/core grids.")
     _add_common_args(sweep_parser)
@@ -931,6 +954,7 @@ def main() -> None:
             entry_signal_params=_parse_json_object(args.entry_signal_params),
             exit_signal=args.exit_signal,
             exit_signal_params=_parse_json_object(args.exit_signal_params),
+            signal_rebalance_interval=args.signal_rebalance_interval,
         )
     print(output)
 

@@ -142,3 +142,44 @@ def test_run_multi_signal_backtest_ranks_and_persists(monkeypatch, tmp_path) -> 
     assert len(run_dirs) == 1
     leaderboard = (run_dirs[0] / "leaderboard.csv").read_text()
     assert "entry_signal,exit_signal,total_return,sharpe" in leaderboard
+
+
+def test_run_multi_signal_backtest_applies_conservative_runtime_params(monkeypatch, tmp_path) -> None:
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+    captured: list[dict[str, object]] = []
+
+    def fake_single(**kwargs):
+        captured.append(kwargs)
+        run_dir = tmp_path / f"run_{len(captured)}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        metrics = [
+            {"metric": "total_return", "value": 0.01},
+            {"metric": "sharpe", "value": 1.0},
+            {"metric": "max_drawdown", "value": -0.1},
+            {"metric": "volatility", "value": 0.2},
+            {"metric": "turnover_total", "value": 1.0},
+            {"metric": "cost_total", "value": 0.01},
+        ]
+        (run_dir / "metrics.json").write_text(__import__("json").dumps(metrics))
+        return f"report\n\nSaved outputs to: {run_dir}"
+
+    monkeypatch.setattr(cache_runner, "run_time_series_momentum_backtest", fake_single)
+
+    cache_runner.run_multi_signal_backtest(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        lookback_days=20,
+        skip_days=5,
+        costs_bps=5.0,
+        entry_signals=["ts_momentum", "ma_trend"],
+        exit_signals=["momentum_flip"],
+    )
+
+    assert captured
+    for call in captured:
+        assert int(call["signal_rebalance_interval"]) == 390
+    ts_call = next(call for call in captured if call["entry_signal"] == "ts_momentum")
+    assert ts_call["entry_signal_params"]["long_only"] is True
+    assert float(ts_call["entry_signal_params"]["min_abs_return"]) == 0.01
