@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Protocol
 
+from .execution import SlippageModel, ZeroSlippage
+
 
 @dataclass(frozen=True)
 class Order:
@@ -75,8 +77,9 @@ class Strategy(Protocol):
 class EventDrivenBacktester:
     """Simple event loop that processes bars and executes orders at next open."""
 
-    def __init__(self, initial_cash: float = 0.0) -> None:
+    def __init__(self, initial_cash: float = 0.0, slippage_model: SlippageModel | None = None) -> None:
         self.portfolio = Portfolio(cash=initial_cash)
+        self.slippage_model = slippage_model or ZeroSlippage()
         self.fills: List[Fill] = []
 
     def run(self, bars: Iterable[dict], strategy: Strategy) -> Portfolio:
@@ -95,4 +98,9 @@ class EventDrivenBacktester:
     def _execute_orders_at_open(self, orders: Iterable[Order], bar: dict) -> List[Fill]:
         open_price = float(bar["open"])
         timestamp = bar.get("timestamp")
-        return [Fill(order=order, price=open_price, timestamp=timestamp) for order in orders]
+        fills: List[Fill] = []
+        for order in orders:
+            signed_size = order.quantity if order.side == "buy" else -order.quantity
+            exec_price = self.slippage_model.apply(open_price, signed_size, bar)
+            fills.append(Fill(order=order, price=exec_price, timestamp=timestamp))
+        return fills
