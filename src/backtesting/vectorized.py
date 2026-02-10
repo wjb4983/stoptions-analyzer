@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib.util
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 
@@ -28,6 +28,20 @@ if _pd_spec:
     import pandas as pd
 else:
     pd = None
+
+_numba_spec = importlib.util.find_spec("numba")
+if _numba_spec:
+    from numba import njit
+else:
+
+    def njit(*args: Any, **kwargs: Any):
+        def _decorator(func: Any) -> Any:
+            return func
+
+        return _decorator
+
+
+ExecutionMode = Literal["reference", "optimized"]
 
 
 class VectorizedBacktestRunner(Protocol):
@@ -85,6 +99,7 @@ def backtest_vectorized(
     borrow_cost_model: ShortBorrowCost | None = None,
     weights: Any | None = None,
     initial_equity: float = 1.0,
+    execution_mode: ExecutionMode = "optimized",
 ) -> BacktestResult:
     """Run a pure vectorized backtest with next-open execution.
 
@@ -130,8 +145,20 @@ def backtest_vectorized(
     fees = fee_model or ZeroFee()
     borrow_costs = borrow_cost_model or ShortBorrowCost(0.0)
 
-    slippage_cost = _estimate_slippage(price_values, trades, execution_model, portfolio_weights)
-    fee_cost = _estimate_fees(price_values, trades, fees, portfolio_weights)
+    slippage_cost = _estimate_slippage(
+        price_values,
+        trades,
+        execution_model,
+        portfolio_weights,
+        mode=execution_mode,
+    )
+    fee_cost = _estimate_fees(
+        price_values,
+        trades,
+        fees,
+        portfolio_weights,
+        mode=execution_mode,
+    )
     borrow_cost = _estimate_borrow_cost(positions, borrow_costs, portfolio_weights)
 
     net_returns = gross_returns - slippage_cost - fee_cost - borrow_cost
@@ -182,6 +209,21 @@ def _estimate_slippage(
     trades: np.ndarray,
     model: SlippageModel,
     weights: np.ndarray,
+    *,
+    mode: ExecutionMode,
+) -> np.ndarray:
+    if mode == "optimized":
+        optimized = _estimate_slippage_optimized(trades, model, weights)
+        if optimized is not None:
+            return optimized
+    return _estimate_slippage_reference(prices, trades, model, weights)
+
+
+def _estimate_slippage_reference(
+    prices: np.ndarray,
+    trades: np.ndarray,
+    model: SlippageModel,
+    weights: np.ndarray,
 ) -> np.ndarray:
     slippage = np.zeros(prices.shape[0], dtype=float)
     if not trades.size:
@@ -203,7 +245,35 @@ def _estimate_slippage(
     return slippage
 
 
+def _estimate_slippage_optimized(
+    trades: np.ndarray,
+    model: SlippageModel,
+    weights: np.ndarray,
+) -> np.ndarray | None:
+    if isinstance(model, ZeroSlippage):
+        return np.zeros(trades.shape[0], dtype=float)
+    if isinstance(model, BpsSlippage):
+        bps_factor = float(model.bps / 10_000.0)
+        return _slippage_bps_kernel(trades, weights, bps_factor)
+    return None
+
+
 def _estimate_fees(
+    prices: np.ndarray,
+    trades: np.ndarray,
+    model: FeeModel,
+    weights: np.ndarray,
+    *,
+    mode: ExecutionMode,
+) -> np.ndarray:
+    if mode == "optimized":
+        optimized = _estimate_fees_optimized(trades, model, weights)
+        if optimized is not None:
+            return optimized
+    return _estimate_fees_reference(prices, trades, model, weights)
+
+
+def _estimate_fees_reference(
     prices: np.ndarray,
     trades: np.ndarray,
     model: FeeModel,
@@ -226,6 +296,19 @@ def _estimate_fees(
             )
             fee_returns[idx] += fee * weights[asset_idx]
     return fee_returns
+
+
+def _estimate_fees_optimized(
+    trades: np.ndarray,
+    model: FeeModel,
+    weights: np.ndarray,
+) -> np.ndarray | None:
+    if isinstance(model, ZeroFee):
+        return np.zeros(trades.shape[0], dtype=float)
+    if hasattr(model, "commission_per_trade"):
+        commission = float(getattr(model, "commission_per_trade"))
+        return _fixed_commission_kernel(trades, weights, commission)
+    return None
 
 
 def _estimate_borrow_cost(
@@ -285,3 +368,34 @@ def _compute_metrics(returns: np.ndarray, equity_curve: np.ndarray) -> dict[str,
         "volatility": vol,
         "sharpe": sharpe,
     }
+
+
+@njit(cache=True)
+def _slippage_bps_kernel(trades: np.ndarray, weights: np.ndarray, bps_factor: float) -> np.ndarray:
+    n_periods, n_assets = trades.shape
+    slippage = np.zeros(n_periods, dtype=np.float64)
+    for idx in range(n_periods):
+        total = 0.0
+        for asset_idx in range(n_assets):
+            trade_size = trades[idx, asset_idx]
+            if trade_size != 0.0:
+                total += abs(trade_size) * weights[asset_idx]
+        slippage[idx] = bps_factor * total
+    return slippage
+
+
+@njit(cache=True)
+def _fixed_commission_kernel(
+    trades: np.ndarray,
+    weights: np.ndarray,
+    commission: float,
+) -> np.ndarray:
+    n_periods, n_assets = trades.shape
+    fees = np.zeros(n_periods, dtype=np.float64)
+    for idx in range(n_periods):
+        total = 0.0
+        for asset_idx in range(n_assets):
+            if trades[idx, asset_idx] != 0.0:
+                total += weights[asset_idx]
+        fees[idx] = commission * total
+    return fees

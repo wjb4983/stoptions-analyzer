@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
+from typing import Literal
 
 import numpy as np
 
@@ -12,6 +14,21 @@ from ..common import (
     quantile_bucket_sizes,
 )
 from .base import TimeSeriesResult
+
+
+_numba_spec = importlib.util.find_spec("numba")
+if _numba_spec:
+    from numba import njit
+else:
+
+    def njit(*args, **kwargs):
+        def _decorator(func):
+            return func
+
+        return _decorator
+
+
+ComputationMode = Literal["reference", "optimized"]
 
 
 @dataclass(frozen=True)
@@ -64,6 +81,7 @@ def _resolve_hyperparameters(settings: TimeSeriesMomentumSettings) -> MomentumHy
 def build_time_series_momentum_arrays(
     closes: list[float] | tuple[float, ...],
     settings: TimeSeriesMomentumSettings,
+    mode: ComputationMode = "optimized",
 ) -> TimeSeriesMomentumArrays:
     """Build momentum arrays from close data with next-open execution alignment.
 
@@ -75,18 +93,10 @@ def build_time_series_momentum_arrays(
     params = _resolve_hyperparameters(settings)
     close_array = np.asarray(closes, dtype=float)
     count = close_array.shape[0]
-    raw_score = np.full(count, np.nan, dtype=float)
-
-    for idx in range(count):
-        end_idx = idx - params.skip_days
-        start_idx = end_idx - params.lookback_days
-        if start_idx < 0 or end_idx < 0:
-            continue
-        start_price = close_array[start_idx]
-        end_price = close_array[end_idx]
-        if not is_valid_price(float(start_price)) or not is_valid_price(float(end_price)):
-            continue
-        raw_score[idx] = float(end_price / start_price - 1.0)
+    if mode == "reference":
+        raw_score = _compute_raw_score_reference(close_array, params.lookback_days, params.skip_days)
+    else:
+        raw_score = _compute_raw_score_optimized(close_array, params.lookback_days, params.skip_days)
 
     position_signal = np.zeros(count, dtype=float)
     valid = np.isfinite(raw_score)
@@ -98,20 +108,24 @@ def build_time_series_momentum_arrays(
     if params.target_volatility is not None and params.target_volatility > 0:
         daily_returns = np.zeros(count, dtype=float)
         daily_returns[1:] = close_array[1:] / close_array[:-1] - 1.0
-        annualization = np.sqrt(252.0)
-        for idx in range(count):
-            end_idx = idx - params.skip_days
-            start_idx = end_idx - params.vol_window_days + 1
-            if start_idx < 1 or end_idx < 1:
-                scaled_weight[idx] = 0.0
-                continue
-            window = daily_returns[start_idx : end_idx + 1]
-            vol = float(np.std(window, ddof=1)) * annualization if window.size > 1 else 0.0
-            if vol <= 0:
-                scaled_weight[idx] = 0.0
-                continue
-            leverage = min(params.max_leverage, params.target_volatility / vol)
-            scaled_weight[idx] = position_signal[idx] * max(leverage, 0.0)
+        if mode == "reference":
+            scaled_weight = _apply_vol_target_reference(
+                position_signal,
+                daily_returns,
+                skip_days=params.skip_days,
+                vol_window_days=params.vol_window_days,
+                target_volatility=float(params.target_volatility),
+                max_leverage=float(params.max_leverage),
+            )
+        else:
+            scaled_weight = _apply_vol_target_optimized(
+                position_signal,
+                daily_returns,
+                skip_days=params.skip_days,
+                vol_window_days=params.vol_window_days,
+                target_volatility=float(params.target_volatility),
+                max_leverage=float(params.max_leverage),
+            )
 
     tradable_position = np.zeros(count, dtype=float)
     tradable_position[1:] = scaled_weight[:-1]
@@ -123,6 +137,129 @@ def build_time_series_momentum_arrays(
         scaled_weight=scaled_weight,
         tradable_position=tradable_position,
     )
+
+
+def _compute_raw_score_reference(closes: np.ndarray, lookback_days: int, skip_days: int) -> np.ndarray:
+    count = closes.shape[0]
+    raw_score = np.full(count, np.nan, dtype=float)
+    for idx in range(count):
+        end_idx = idx - skip_days
+        start_idx = end_idx - lookback_days
+        if start_idx < 0 or end_idx < 0:
+            continue
+        start_price = closes[start_idx]
+        end_price = closes[end_idx]
+        if not is_valid_price(float(start_price)) or not is_valid_price(float(end_price)):
+            continue
+        raw_score[idx] = float(end_price / start_price - 1.0)
+    return raw_score
+
+
+def _compute_raw_score_optimized(closes: np.ndarray, lookback_days: int, skip_days: int) -> np.ndarray:
+    count = closes.shape[0]
+    raw_score = np.full(count, np.nan, dtype=float)
+    offset = lookback_days + skip_days
+    if offset >= count:
+        return raw_score
+    starts = closes[: count - offset]
+    ends = closes[lookback_days : count - skip_days]
+    valid = (starts > 0.0) & (ends > 0.0)
+    out_slice = raw_score[offset:]
+    out_slice[valid] = ends[valid] / starts[valid] - 1.0
+    return raw_score
+
+
+def _apply_vol_target_reference(
+    position_signal: np.ndarray,
+    daily_returns: np.ndarray,
+    *,
+    skip_days: int,
+    vol_window_days: int,
+    target_volatility: float,
+    max_leverage: float,
+) -> np.ndarray:
+    count = position_signal.shape[0]
+    scaled_weight = position_signal.astype(float)
+    annualization = np.sqrt(252.0)
+    for idx in range(count):
+        end_idx = idx - skip_days
+        start_idx = end_idx - vol_window_days + 1
+        if start_idx < 1 or end_idx < 1:
+            scaled_weight[idx] = 0.0
+            continue
+        window = daily_returns[start_idx : end_idx + 1]
+        vol = float(np.std(window, ddof=1)) * annualization if window.size > 1 else 0.0
+        if vol <= 0:
+            scaled_weight[idx] = 0.0
+            continue
+        leverage = min(max_leverage, target_volatility / vol)
+        scaled_weight[idx] = position_signal[idx] * max(leverage, 0.0)
+    return scaled_weight
+
+
+def _apply_vol_target_optimized(
+    position_signal: np.ndarray,
+    daily_returns: np.ndarray,
+    *,
+    skip_days: int,
+    vol_window_days: int,
+    target_volatility: float,
+    max_leverage: float,
+) -> np.ndarray:
+    annualization = float(np.sqrt(252.0))
+    return _rolling_volatility_position_kernel(
+        position_signal.astype(float),
+        daily_returns.astype(float),
+        int(skip_days),
+        int(vol_window_days),
+        float(target_volatility),
+        float(max_leverage),
+        annualization,
+    )
+
+
+@njit(cache=True)
+def _rolling_volatility_position_kernel(
+    position_signal: np.ndarray,
+    daily_returns: np.ndarray,
+    skip_days: int,
+    vol_window_days: int,
+    target_volatility: float,
+    max_leverage: float,
+    annualization: float,
+) -> np.ndarray:
+    count = position_signal.shape[0]
+    scaled_weight = np.zeros(count, dtype=np.float64)
+    for idx in range(count):
+        end_idx = idx - skip_days
+        start_idx = end_idx - vol_window_days + 1
+        if start_idx < 1 or end_idx < 1:
+            scaled_weight[idx] = 0.0
+            continue
+        n = end_idx - start_idx + 1
+        if n <= 1:
+            scaled_weight[idx] = 0.0
+            continue
+        total = 0.0
+        for j in range(start_idx, end_idx + 1):
+            total += daily_returns[j]
+        mean = total / n
+        var = 0.0
+        for j in range(start_idx, end_idx + 1):
+            diff = daily_returns[j] - mean
+            var += diff * diff
+        std = np.sqrt(var / (n - 1))
+        vol = std * annualization
+        if vol <= 0.0:
+            scaled_weight[idx] = 0.0
+            continue
+        leverage = target_volatility / vol
+        if leverage > max_leverage:
+            leverage = max_leverage
+        if leverage < 0.0:
+            leverage = 0.0
+        scaled_weight[idx] = position_signal[idx] * leverage
+    return scaled_weight
 
 
 def compute_time_series_momentum(
