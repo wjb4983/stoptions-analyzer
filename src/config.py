@@ -41,20 +41,12 @@ DEFAULT_GENERAL_ANALYSIS_SETTINGS = {
 }
 
 DEFAULT_BACKTEST_SETTINGS = {
-    "strategy_type": "Rule-based",
-    "ai_model": "Baseline (No ML)",
-    "stat_method": "Momentum",
-    "data_source": "Massive API",
-    "data_granularity": "Daily (EOD)",
+    "strategy_name": "Time-Series Momentum",
+    "lookback_days": "90",
+    "skip_days": "5",
+    "costs_bps": "5",
     "start_date": "",
     "end_date": "",
-    "training_split": "70/30",
-    "slippage_bps": "5",
-    "commission_per_contract": "0.65",
-    "fill_probability": "0.9",
-    "use_bid_ask": True,
-    "model_walk_forward": False,
-    "max_position_pct": "10",
     "notes": "",
     "backtest_data_root": str(BACKTEST_CACHE_DIR),
 }

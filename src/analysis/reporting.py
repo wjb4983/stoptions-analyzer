@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable
 
+import numpy as np
+
 from .cross_sectional.base import CrossSectionalResult
 from .time_series.base import TimeSeriesResult
 
@@ -145,6 +147,94 @@ def format_time_series_report(
             lines.append(f"  - {ticker}: skipped ({reason})")
 
     return "\n".join(lines)
+
+
+def format_backtest_report(
+    *,
+    title: str,
+    params: dict[str, object],
+    metrics: dict[str, float],
+    drawdown_rows: list[dict[str, object]],
+    turnover_stats: dict[str, float],
+    cost_totals: dict[str, float],
+) -> str:
+    lines: list[str] = []
+    lines.append(title)
+    lines.append("=" * len(title))
+    lines.append(f"Generated: {datetime.now().isoformat(timespec='seconds')}")
+    lines.append("")
+
+    lines.append("Parameters:")
+    for key, value in params.items():
+        lines.append(f"  - {key}: {value}")
+    lines.append("")
+
+    lines.append("Summary Metrics:")
+    for key, value in metrics.items():
+        lines.append(f"  - {key}: {value:.6f}")
+    lines.append("")
+
+    lines.append("Drawdown Table:")
+    if drawdown_rows:
+        for row in drawdown_rows:
+            lines.append(
+                "  - {timestamp}: drawdown={drawdown:.6f}, equity={equity:.6f}, "
+                "running_peak={running_peak:.6f}".format(
+                    timestamp=row["timestamp"],
+                    drawdown=float(row["drawdown"]),
+                    equity=float(row["equity"]),
+                    running_peak=float(row["running_peak"]),
+                )
+            )
+    else:
+        lines.append("  (none)")
+    lines.append("")
+
+    lines.append("Turnover and Cost Attribution:")
+    lines.append(
+        "  - turnover_mean={mean:.6f}, turnover_total={total:.6f}, turnover_max={max:.6f}".format(
+            mean=turnover_stats.get("mean", 0.0),
+            total=turnover_stats.get("total", 0.0),
+            max=turnover_stats.get("max", 0.0),
+        )
+    )
+    lines.append(
+        "  - costs_total={total:.6f}, slippage={slippage:.6f}, fees={fees:.6f}, borrow={borrow:.6f}".format(
+            total=cost_totals.get("total", 0.0),
+            slippage=cost_totals.get("slippage", 0.0),
+            fees=cost_totals.get("fees", 0.0),
+            borrow=cost_totals.get("borrow", 0.0),
+        )
+    )
+
+    return "\n".join(lines)
+
+
+def build_drawdown_rows(
+    timestamps: np.ndarray,
+    equity_curve: np.ndarray,
+    *,
+    top_n: int = 10,
+) -> list[dict[str, object]]:
+    if equity_curve.size == 0:
+        return []
+    running_peak = np.maximum.accumulate(equity_curve)
+    safe_peak = np.where(running_peak == 0.0, 1.0, running_peak)
+    drawdown = equity_curve / safe_peak - 1.0
+    order = np.argsort(drawdown)
+    selected = order[: min(top_n, drawdown.size)]
+    rows: list[dict[str, object]] = []
+    for idx in selected:
+        ts = datetime.utcfromtimestamp(int(timestamps[idx]) / 1000.0).isoformat()
+        rows.append(
+            {
+                "timestamp": ts,
+                "drawdown": float(drawdown[idx]),
+                "equity": float(equity_curve[idx]),
+                "running_peak": float(running_peak[idx]),
+            }
+        )
+    return rows
 
 
 def _format_ticker_line(
