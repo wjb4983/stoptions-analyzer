@@ -11,6 +11,12 @@ pip install -r requirements.txt
 pytest
 ```
 
+
+## Backtesting GUI workflow
+
+In the Backtesting page, select one or more **Entry Signals** and **Exit Signals** via checkboxes.
+The app runs every entry/exit pair using the same lookback/skip/cost/date parameters and prints a ranked leaderboard in the Run Output panel.
+
 ## Backtest CLI
 
 ### Single-run entry/exit signal selection

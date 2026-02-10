@@ -486,6 +486,127 @@ def _is_valid_combo_definition(combo: dict[str, Any]) -> bool:
 
 
 
+
+
+def run_multi_signal_backtest(
+    *,
+    tickers: list[str],
+    start_date: date,
+    end_date: date,
+    cache_root: Path,
+    lookback_days: int,
+    skip_days: int,
+    costs_bps: float,
+    entry_signals: list[str],
+    exit_signals: list[str],
+) -> str:
+    """Run all selected entry/exit combinations with shared core parameters."""
+
+    if not entry_signals:
+        raise ValueError("At least one entry signal must be selected")
+    if not exit_signals:
+        raise ValueError("At least one exit signal must be selected")
+
+    rows: list[dict[str, Any]] = []
+    combo_reports: list[str] = []
+
+    for entry_signal in entry_signals:
+        for exit_signal in exit_signals:
+            report = run_time_series_momentum_backtest(
+                tickers=tickers,
+                start_date=start_date,
+                end_date=end_date,
+                cache_root=cache_root,
+                lookback_days=lookback_days,
+                skip_days=skip_days,
+                costs_bps=costs_bps,
+                entry_signal=entry_signal,
+                entry_signal_params={},
+                exit_signal=exit_signal,
+                exit_signal_params={},
+            )
+            run_dir = _extract_saved_output_dir(report)
+            metrics = _load_metrics_from_run_dir(run_dir)
+            rows.append(
+                {
+                    "entry_signal": entry_signal,
+                    "exit_signal": exit_signal,
+                    "total_return": float(metrics.get("total_return", 0.0)),
+                    "sharpe": float(metrics.get("sharpe", 0.0)),
+                    "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
+                    "volatility": float(metrics.get("volatility", 0.0)),
+                    "turnover_total": float(metrics.get("turnover_total", 0.0)),
+                    "cost_total": float(metrics.get("cost_total", 0.0)),
+                    "run_dir": str(run_dir),
+                }
+            )
+            combo_reports.append(
+                f"entry={entry_signal} exit={exit_signal}\n{report}\n"
+            )
+
+    ranked_rows = sorted(rows, key=lambda row: float(row["sharpe"]), reverse=True)
+    leaderboard_dir = _persist_multi_signal_outputs(ranked_rows)
+
+    summary_lines = [
+        "Multi-signal backtest completed.",
+        f"Combinations: {len(rows)}",
+        f"Leaderboard outputs: {leaderboard_dir}",
+        "",
+        "Ranked combinations (by sharpe):",
+    ]
+    for idx, row in enumerate(ranked_rows, start=1):
+        summary_lines.append(
+            f"#{idx} entry={row['entry_signal']} exit={row['exit_signal']} "
+            f"sharpe={row['sharpe']:.6f} total_return={row['total_return']:.6f} "
+            f"max_drawdown={row['max_drawdown']:.6f} volatility={row['volatility']:.6f} "
+            f"turnover_total={row['turnover_total']:.6f} cost_total={row['cost_total']:.6f}"
+        )
+
+    return "\n".join(summary_lines + ["", "Detailed combo reports:", "", *combo_reports])
+
+
+def _extract_saved_output_dir(report_text: str) -> Path:
+    marker = "Saved outputs to: "
+    idx = report_text.rfind(marker)
+    if idx < 0:
+        raise ValueError("Could not locate saved output directory in report text")
+    raw = report_text[idx + len(marker):].strip().splitlines()[0].strip()
+    return Path(raw)
+
+
+def _load_metrics_from_run_dir(run_dir: Path) -> dict[str, float]:
+    metrics_path = run_dir / "metrics.json"
+    rows = json.loads(metrics_path.read_text())
+    metrics: dict[str, float] = {}
+    for row in rows:
+        metric = str(row.get("metric", ""))
+        value = float(row.get("value", 0.0))
+        metrics[metric] = value
+    return metrics
+
+
+def _persist_multi_signal_outputs(rows: list[dict[str, Any]]) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_multi_signal_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "entry_signal",
+        "exit_signal",
+        "total_return",
+        "sharpe",
+        "max_drawdown",
+        "volatility",
+        "turnover_total",
+        "cost_total",
+        "run_dir",
+    ]
+    with (run_dir / "leaderboard.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    (run_dir / "leaderboard.json").write_text(json.dumps(rows, indent=2))
+    return run_dir
 def load_backtest_engine_arrays(
     tickers: list[str],
     start: datetime | str,

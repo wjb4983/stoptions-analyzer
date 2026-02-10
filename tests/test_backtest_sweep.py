@@ -95,3 +95,50 @@ def test_run_parameter_sweep_ranks_by_sharpe_and_is_reproducible(tmp_path) -> No
     rows = list(csv.DictReader(leaderboard1.splitlines()))
     assert len(rows) > 1
     assert float(rows[0]["sharpe"]) >= float(rows[1]["sharpe"])
+
+
+def test_run_multi_signal_backtest_ranks_and_persists(monkeypatch, tmp_path) -> None:
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+
+    def fake_single(**kwargs):
+        entry = kwargs["entry_signal"]
+        exit_ = kwargs["exit_signal"]
+        stamp = f"{entry}_{exit_}"
+        run_dir = tmp_path / stamp
+        run_dir.mkdir(parents=True, exist_ok=True)
+        sharpe = {
+            ("ts_momentum", "none"): 1.5,
+            ("ma_trend", "none"): 0.8,
+        }.get((entry, exit_), 0.1)
+        metrics = [
+            {"metric": "total_return", "value": sharpe / 10.0},
+            {"metric": "sharpe", "value": sharpe},
+            {"metric": "max_drawdown", "value": -0.2},
+            {"metric": "volatility", "value": 0.3},
+            {"metric": "turnover_total", "value": 1.2},
+            {"metric": "cost_total", "value": 0.02},
+        ]
+        (run_dir / "metrics.json").write_text(__import__("json").dumps(metrics))
+        return f"report\n\nSaved outputs to: {run_dir}"
+
+    monkeypatch.setattr(cache_runner, "run_time_series_momentum_backtest", fake_single)
+
+    output = cache_runner.run_multi_signal_backtest(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        lookback_days=20,
+        skip_days=5,
+        costs_bps=5.0,
+        entry_signals=["ts_momentum", "ma_trend"],
+        exit_signals=["none"],
+    )
+
+    assert "Ranked combinations" in output
+    assert "#1 entry=ts_momentum exit=none" in output
+
+    run_dirs = list((tmp_path / "outputs").glob("tsmom_multi_signal_*"))
+    assert len(run_dirs) == 1
+    leaderboard = (run_dirs[0] / "leaderboard.csv").read_text()
+    assert "entry_signal,exit_signal,total_return,sharpe" in leaderboard
