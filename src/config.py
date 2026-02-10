@@ -42,6 +42,7 @@ DEFAULT_GENERAL_ANALYSIS_SETTINGS = {
 
 DEFAULT_BACKTEST_SETTINGS = {
     "strategy_name": "Time-Series Momentum",
+    "run_mode": "single",
     "lookback_days": "90",
     "skip_days": "5",
     "entry_signal": "ts_momentum",
@@ -49,6 +50,14 @@ DEFAULT_BACKTEST_SETTINGS = {
     "exit_signal": "none",
     "exit_signal_params": "{}",
     "costs_bps": "5",
+    "sweep_entry_grid": '{"ts_momentum": [{"lookback_days": 90, "skip_days": 5}]}',
+    "sweep_exit_grid": '{"none": [{}]}',
+    "sweep_core_grid": '{"lookback_days": [90], "skip_days": [5], "costs_bps": [5.0]}',
+    "sweep_seed": "42",
+    "sweep_max_workers": "",
+    "sweep_top_n": "10",
+    "sweep_fail_fast": False,
+    "sweep_continue_on_error": True,
     "start_date": "",
     "end_date": "",
     "notes": "",
