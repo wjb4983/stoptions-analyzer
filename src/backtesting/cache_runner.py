@@ -134,6 +134,9 @@ def run_time_series_momentum_backtest(
     exit_signal: str = "none",
     exit_signal_params: dict[str, object] | None = None,
     signal_rebalance_interval: int = 1,
+    starting_capital: float = 100_000.0,
+    bet_sizing_mode: str = "half_kelly",
+    custom_bet_pct: float = 10.0,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     entry_cfg = parse_entry_signal_config(
@@ -168,12 +171,23 @@ def run_time_series_momentum_backtest(
         exit_config=exit_cfg,
     )
     signals = _throttle_signal_changes(signals, interval=max(1, int(signal_rebalance_interval)))
+    bet_fraction = _resolve_bet_fraction(
+        prices=prices,
+        mode=bet_sizing_mode,
+        custom_bet_pct=custom_bet_pct,
+    )
+    sized_signals = _apply_discrete_bet_sizing(
+        signals=signals,
+        prices=prices,
+        starting_capital=starting_capital,
+        bet_fraction=bet_fraction,
+    )
 
     result = backtest_vectorized(
         prices=prices,
-        signals=signals,
+        signals=sized_signals,
         slippage_model=BpsSlippage(costs_bps),
-        initial_equity=1.0,
+        initial_equity=float(starting_capital),
     )
 
     timestamps = arrays.date_index
@@ -219,6 +233,7 @@ def run_time_series_momentum_backtest(
         prices=prices,
         trades=trades,
         costs_bps=costs_bps,
+        starting_capital=starting_capital,
     )
     trade_log_summary = _format_trade_log_summary(trade_log_rows)
 
@@ -236,6 +251,10 @@ def run_time_series_momentum_backtest(
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "signal_rebalance_interval": signal_rebalance_interval,
+            "starting_capital": starting_capital,
+            "bet_sizing_mode": bet_sizing_mode,
+            "custom_bet_pct": custom_bet_pct,
+            "resolved_bet_pct": bet_fraction * 100.0,
         },
         metrics=metrics,
         drawdown_rows=drawdown_rows,
@@ -515,6 +534,9 @@ def run_multi_signal_backtest(
     costs_bps: float,
     entry_signals: list[str],
     exit_signals: list[str],
+    starting_capital: float = 100_000.0,
+    bet_sizing_mode: str = "half_kelly",
+    custom_bet_pct: float = 10.0,
 ) -> str:
     """Run all selected entry/exit combinations with shared core parameters."""
 
@@ -537,6 +559,9 @@ def run_multi_signal_backtest(
                 skip_days=skip_days,
                 costs_bps=costs_bps,
                 signal_rebalance_interval=390,
+                starting_capital=starting_capital,
+                bet_sizing_mode=bet_sizing_mode,
+                custom_bet_pct=custom_bet_pct,
                 entry_signal=entry_signal,
                 entry_signal_params={
                     "min_abs_return": 0.01,
@@ -574,6 +599,8 @@ def run_multi_signal_backtest(
         f"Combinations: {len(rows)}",
         f"Leaderboard outputs: {leaderboard_dir}",
         "",
+        f"Starting capital: {starting_capital:.2f}",
+        f"Bet sizing mode: {bet_sizing_mode}",
         "Ranked combinations (by sharpe):",
     ]
     for idx, row in enumerate(ranked_rows, start=1):
@@ -681,6 +708,92 @@ def _throttle_signal_changes(signals: np.ndarray, *, interval: int) -> np.ndarra
     return throttled
 
 
+def _resolve_bet_fraction(*, prices: np.ndarray, mode: str, custom_bet_pct: float) -> float:
+    if mode == "custom":
+        return float(np.clip(custom_bet_pct / 100.0, 0.0, 1.0))
+
+    rets = np.diff(prices, axis=0) / np.where(prices[:-1] == 0.0, np.nan, prices[:-1])
+    finite = rets[np.isfinite(rets)]
+    if finite.size == 0:
+        base = 0.1
+    else:
+        mean_ret = float(np.mean(finite))
+        var_ret = float(np.var(finite))
+        if var_ret <= 1e-12:
+            base = 0.1
+        else:
+            base = max(0.0, min(1.0, mean_ret / var_ret))
+    if mode == "kelly":
+        return float(np.clip(base, 0.0, 1.0))
+    return float(np.clip(base * 0.5, 0.0, 1.0))
+
+
+def _apply_discrete_bet_sizing(
+    *,
+    signals: np.ndarray,
+    prices: np.ndarray,
+    starting_capital: float,
+    bet_fraction: float,
+) -> np.ndarray:
+    if starting_capital <= 0:
+        raise ValueError("starting_capital must be > 0")
+    if bet_fraction <= 0:
+        return np.zeros_like(signals, dtype=float)
+    sized = np.zeros_like(signals, dtype=float)
+    for idx in range(signals.shape[0]):
+        row = signals[idx]
+        active = np.flatnonzero(row != 0.0)
+        if active.size == 0:
+            continue
+        per_asset_budget = (starting_capital * bet_fraction) / float(active.size)
+        for col_idx in active:
+            px = float(prices[idx, col_idx])
+            if px <= 0.0 or not np.isfinite(px):
+                continue
+            shares = int(np.floor(per_asset_budget / px))
+            if shares <= 0:
+                continue
+            direction = 1.0 if row[col_idx] > 0 else -1.0
+            sized[idx, col_idx] = direction * (shares * px / starting_capital)
+    return sized
+
+
+def _save_portfolio_value_chart(run_dir: Path) -> Path | None:
+    equity_path = run_dir / "equity.csv"
+    if not equity_path.exists():
+        return None
+    rows: list[tuple[str, float]] = []
+    with equity_path.open() as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            ts = str(row.get("timestamp", ""))
+            day = ts.split("T")[0]
+            eq = float(row.get("equity", 0.0))
+            rows.append((day, eq))
+    if not rows:
+        return None
+    daily: dict[str, float] = {}
+    for day, eq in rows:
+        daily[day] = eq
+    days = sorted(daily)
+    values = [daily[d] for d in days]
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+    plt.figure(figsize=(10, 4))
+    plt.plot(days, values, linewidth=1.5)
+    plt.title("Portfolio Value Over Time")
+    plt.xlabel("day")
+    plt.ylabel("portfolio value")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    out = run_dir / "portfolio_value_over_time.png"
+    plt.savefig(out)
+    plt.close()
+    return out
+
+
 def _to_numpy_1d(values: object) -> np.ndarray:
     if hasattr(values, "to_numpy"):
         return np.asarray(values.to_numpy(), dtype=float)
@@ -709,33 +822,41 @@ def _build_trade_log_rows(
     prices: np.ndarray,
     trades: np.ndarray,
     costs_bps: float,
+    starting_capital: float,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for col_idx, symbol in enumerate(symbol_order):
         side = 0
         entry_price = 0.0
+        position_shares = 0
         running_pnl = 0.0
         for row_idx, ts in enumerate(timestamps):
             trade = float(trades[row_idx, col_idx])
             if trade == 0.0:
                 continue
             price = float(prices[row_idx, col_idx])
+            shares_delta = int(np.floor(abs(trade) * starting_capital / max(price, 1e-12)))
+            if shares_delta <= 0:
+                continue
             event = "adjust"
             trade_pnl = 0.0
-            trade_cost = abs(trade) * (costs_bps / 10_000.0)
+            trade_cost = (shares_delta * price) * (costs_bps / 10_000.0)
             if side == 0 and abs(trade) > 0:
                 side = 1 if trade > 0 else -1
+                position_shares = shares_delta
                 entry_price = price
                 event = "entry"
             elif side != 0 and side * trade < 0:
-                trade_pnl = ((price - entry_price) / entry_price) * side if entry_price > 0 else 0.0
+                trade_pnl = ((price - entry_price) * side * position_shares) if entry_price > 0 else 0.0
                 running_pnl += trade_pnl - trade_cost
                 event = "exit" if abs(trade) == abs(side) else "flip"
-                next_side = side + int(round(trade))
-                side = next_side
+                next_side = side + int(np.sign(trade))
+                side = 0 if next_side == 0 else (1 if next_side > 0 else -1)
                 if side != 0:
+                    position_shares = shares_delta
                     entry_price = price
                 else:
+                    position_shares = 0
                     entry_price = 0.0
             rows.append(
                 {
@@ -743,6 +864,7 @@ def _build_trade_log_rows(
                     "symbol": symbol,
                     "event": event,
                     "trade": trade,
+                    "shares_delta": float(shares_delta),
                     "price": price,
                     "trade_pnl": float(trade_pnl),
                     "trade_cost": float(trade_cost),
@@ -757,10 +879,10 @@ def _format_trade_log_summary(rows: list[dict[str, object]], max_rows: int = 40)
     if not rows:
         lines.append("No trade events generated.")
         return "\n".join(lines)
-    lines.append("timestamp | symbol | event | trade | price | trade_pnl | trade_cost | running_pnl")
+    lines.append("timestamp | symbol | event | trade | shares | price | trade_pnl | trade_cost | running_pnl")
     for row in rows[:max_rows]:
         lines.append(
-            f"{row['timestamp']} | {row['symbol']} | {row['event']} | {float(row['trade']):.2f} | "
+            f"{row['timestamp']} | {row['symbol']} | {row['event']} | {float(row['trade']):.2f} | {float(row['shares_delta']):.0f} | "
             f"{float(row['price']):.4f} | {float(row['trade_pnl']):.6f} | {float(row['trade_cost']):.6f} | {float(row['running_pnl']):.6f}"
         )
     if len(rows) > max_rows:
@@ -769,9 +891,9 @@ def _format_trade_log_summary(rows: list[dict[str, object]], max_rows: int = 40)
 
 
 def _trade_log_csv(rows: list[dict[str, object]]) -> str:
-    header = "timestamp,symbol,event,trade,price,trade_pnl,trade_cost,running_pnl"
+    header = "timestamp,symbol,event,trade,shares_delta,price,trade_pnl,trade_cost,running_pnl"
     body = [
-        f"{row['timestamp']},{row['symbol']},{row['event']},{row['trade']},{row['price']},{row['trade_pnl']},{row['trade_cost']},{row['running_pnl']}"
+        f"{row['timestamp']},{row['symbol']},{row['event']},{row['trade']},{row['shares_delta']},{row['price']},{row['trade_pnl']},{row['trade_cost']},{row['running_pnl']}"
         for row in rows
     ]
     return "\n".join([header, *body]) + "\n"
@@ -900,6 +1022,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--exit-signal", default="none", choices=["none", "momentum_flip", "trailing_stop", "max_hold"])
     run_parser.add_argument("--exit-signal-params", default="{}", help="JSON object with exit signal parameters.")
     run_parser.add_argument("--signal-rebalance-interval", type=int, default=1, help="Only allow signal changes every N bars.")
+    run_parser.add_argument("--starting-capital", type=float, default=100000.0)
+    run_parser.add_argument("--bet-sizing-mode", choices=["kelly", "half_kelly", "custom"], default="half_kelly")
+    run_parser.add_argument("--custom-bet-pct", type=float, default=10.0)
 
     sweep_parser = subparsers.add_parser("sweep", help="Run parameter sweep across signal/core grids.")
     _add_common_args(sweep_parser)
@@ -955,6 +1080,9 @@ def main() -> None:
             exit_signal=args.exit_signal,
             exit_signal_params=_parse_json_object(args.exit_signal_params),
             signal_rebalance_interval=args.signal_rebalance_interval,
+            starting_capital=args.starting_capital,
+            bet_sizing_mode=args.bet_sizing_mode,
+            custom_bet_pct=args.custom_bet_pct,
         )
     print(output)
 

@@ -15,7 +15,7 @@ pytest
 ## Backtesting GUI workflow
 
 In the Backtesting page, select one or more **Entry Signals** and **Exit Signals** via checkboxes.
-The app runs every entry/exit pair using the same lookback/skip/cost/date parameters and prints a ranked leaderboard in the Run Output panel.
+The app runs every entry/exit pair using the same lookback/skip/cost/date parameters, starting capital, and bet-size mode (Kelly / Half Kelly / custom %), then prints a ranked leaderboard in the Run Output panel. For each combo, a portfolio-value-over-time chart (x-axis=day) is saved in that combo output folder.
 
 ## Backtest CLI
 

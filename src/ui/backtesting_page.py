@@ -47,35 +47,52 @@ class BacktestingPage(ttk.Frame):
         self.costs_bps_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.costs_bps_var).grid(row=2, column=1, sticky="ew", padx=8, pady=6)
 
-        ttk.Label(strategy_frame, text="Entry Signals").grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(strategy_frame, text="Starting Capital").grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        self.starting_capital_var = tk.StringVar()
+        ttk.Entry(strategy_frame, textvariable=self.starting_capital_var).grid(row=3, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(strategy_frame, text="Bet Size Mode").grid(row=4, column=0, sticky="w", padx=8, pady=6)
+        self.bet_sizing_mode_var = tk.StringVar()
+        ttk.Combobox(
+            strategy_frame,
+            textvariable=self.bet_sizing_mode_var,
+            state="readonly",
+            values=["kelly", "half_kelly", "custom"],
+        ).grid(row=4, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(strategy_frame, text="Custom Bet %").grid(row=5, column=0, sticky="w", padx=8, pady=6)
+        self.custom_bet_pct_var = tk.StringVar()
+        ttk.Entry(strategy_frame, textvariable=self.custom_bet_pct_var).grid(row=5, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(strategy_frame, text="Entry Signals").grid(row=6, column=0, sticky="w", padx=8, pady=6)
         entry_row = ttk.Frame(strategy_frame)
-        entry_row.grid(row=3, column=1, sticky="ew", padx=8, pady=6)
+        entry_row.grid(row=6, column=1, sticky="ew", padx=8, pady=6)
         self.entry_signal_vars: dict[str, tk.BooleanVar] = {}
         for idx, name in enumerate(ENTRY_SIGNALS):
             var = tk.BooleanVar(value=False)
             self.entry_signal_vars[name] = var
             ttk.Checkbutton(entry_row, text=name, variable=var).grid(row=0, column=idx, sticky="w", padx=(0, 10))
 
-        ttk.Label(strategy_frame, text="Exit Signals").grid(row=4, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(strategy_frame, text="Exit Signals").grid(row=7, column=0, sticky="w", padx=8, pady=6)
         exit_row = ttk.Frame(strategy_frame)
-        exit_row.grid(row=4, column=1, sticky="ew", padx=8, pady=6)
+        exit_row.grid(row=7, column=1, sticky="ew", padx=8, pady=6)
         self.exit_signal_vars: dict[str, tk.BooleanVar] = {}
         for idx, name in enumerate(EXIT_SIGNALS):
             var = tk.BooleanVar(value=False)
             self.exit_signal_vars[name] = var
             ttk.Checkbutton(exit_row, text=name, variable=var).grid(row=0, column=idx, sticky="w", padx=(0, 10))
 
-        ttk.Label(strategy_frame, text="Start Date (YYYY-MM-DD)").grid(row=5, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(strategy_frame, text="Start Date (YYYY-MM-DD)").grid(row=8, column=0, sticky="w", padx=8, pady=6)
         self.start_date_var = tk.StringVar()
-        ttk.Entry(strategy_frame, textvariable=self.start_date_var).grid(row=5, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Entry(strategy_frame, textvariable=self.start_date_var).grid(row=8, column=1, sticky="ew", padx=8, pady=6)
 
-        ttk.Label(strategy_frame, text="End Date (YYYY-MM-DD)").grid(row=6, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(strategy_frame, text="End Date (YYYY-MM-DD)").grid(row=9, column=0, sticky="w", padx=8, pady=6)
         self.end_date_var = tk.StringVar()
-        ttk.Entry(strategy_frame, textvariable=self.end_date_var).grid(row=6, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Entry(strategy_frame, textvariable=self.end_date_var).grid(row=9, column=1, sticky="ew", padx=8, pady=6)
 
-        ttk.Label(strategy_frame, text="Backtest Data Root").grid(row=7, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(strategy_frame, text="Backtest Data Root").grid(row=10, column=0, sticky="w", padx=8, pady=6)
         self.backtest_root_var = tk.StringVar()
-        ttk.Entry(strategy_frame, textvariable=self.backtest_root_var).grid(row=7, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Entry(strategy_frame, textvariable=self.backtest_root_var).grid(row=10, column=1, sticky="ew", padx=8, pady=6)
 
         notes_frame = ttk.LabelFrame(content, text="Run Output")
         notes_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
@@ -102,6 +119,9 @@ class BacktestingPage(ttk.Frame):
         self.lookback_days_var.set(str(settings.get("lookback_days", "90")))
         self.skip_days_var.set(str(settings.get("skip_days", "5")))
         self.costs_bps_var.set(str(settings.get("costs_bps", "5")))
+        self.starting_capital_var.set(str(settings.get("starting_capital", "100000")))
+        self.bet_sizing_mode_var.set(str(settings.get("bet_sizing_mode", "half_kelly")))
+        self.custom_bet_pct_var.set(str(settings.get("custom_bet_pct", "10")))
 
         selected_entries = self._split_csv_setting(settings.get("selected_entry_signals", "ts_momentum"))
         selected_exits = self._split_csv_setting(settings.get("selected_exit_signals", "none"))
@@ -121,6 +141,8 @@ class BacktestingPage(ttk.Frame):
         lookback = parse_float(self.lookback_days_var.get())
         skip = parse_float(self.skip_days_var.get())
         costs_bps = parse_float(self.costs_bps_var.get())
+        starting_capital = parse_float(self.starting_capital_var.get())
+        custom_bet_pct = parse_float(self.custom_bet_pct_var.get())
 
         if lookback is None or lookback < 1 or int(lookback) != lookback:
             messagebox.showinfo("Invalid input", "Lookback must be a positive integer.")
@@ -130,6 +152,12 @@ class BacktestingPage(ttk.Frame):
             return
         if costs_bps is None or costs_bps < 0:
             messagebox.showinfo("Invalid input", "Costs must be zero or positive.")
+            return
+        if starting_capital is None or starting_capital <= 0:
+            messagebox.showinfo("Invalid input", "Starting capital must be > 0.")
+            return
+        if custom_bet_pct is None or custom_bet_pct <= 0:
+            messagebox.showinfo("Invalid input", "Custom bet % must be > 0.")
             return
 
         selected_entries = self._selected_signal_names(self.entry_signal_vars)
@@ -146,6 +174,9 @@ class BacktestingPage(ttk.Frame):
             "lookback_days": str(int(lookback)),
             "skip_days": str(int(skip)),
             "costs_bps": str(costs_bps),
+            "starting_capital": str(starting_capital),
+            "bet_sizing_mode": self.bet_sizing_mode_var.get().strip() or "half_kelly",
+            "custom_bet_pct": str(custom_bet_pct),
             "selected_entry_signals": ",".join(selected_entries),
             "selected_exit_signals": ",".join(selected_exits),
             "start_date": self.start_date_var.get().strip(),
@@ -166,11 +197,13 @@ class BacktestingPage(ttk.Frame):
             lookback = int(self.lookback_days_var.get().strip())
             skip = int(self.skip_days_var.get().strip())
             costs_bps = float(self.costs_bps_var.get().strip())
+            starting_capital = float(self.starting_capital_var.get().strip())
+            custom_bet_pct = float(self.custom_bet_pct_var.get().strip())
         except ValueError:
             messagebox.showinfo("Invalid input", "Lookback, skip, and costs must be numeric.")
             return
-        if lookback < 1 or skip < 0 or costs_bps < 0:
-            messagebox.showinfo("Invalid input", "Lookback must be >= 1, skip >= 0, and costs >= 0.")
+        if lookback < 1 or skip < 0 or costs_bps < 0 or starting_capital <= 0 or custom_bet_pct <= 0:
+            messagebox.showinfo("Invalid input", "Lookback>=1, skip>=0, costs>=0, capital>0, custom bet%>0 required.")
             return
 
         selected_entries = self._selected_signal_names(self.entry_signal_vars)
@@ -209,6 +242,9 @@ class BacktestingPage(ttk.Frame):
                 lookback,
                 skip,
                 costs_bps,
+                starting_capital,
+                self.bet_sizing_mode_var.get().strip() or "half_kelly",
+                custom_bet_pct,
                 selected_entries,
                 selected_exits,
             ),
@@ -225,6 +261,9 @@ class BacktestingPage(ttk.Frame):
         lookback: int,
         skip: int,
         costs_bps: float,
+        starting_capital: float,
+        bet_sizing_mode: str,
+        custom_bet_pct: float,
         entry_signals: list[str],
         exit_signals: list[str],
     ) -> None:
@@ -237,6 +276,9 @@ class BacktestingPage(ttk.Frame):
                 lookback_days=lookback,
                 skip_days=skip,
                 costs_bps=costs_bps,
+                starting_capital=starting_capital,
+                bet_sizing_mode=bet_sizing_mode,
+                custom_bet_pct=custom_bet_pct,
                 entry_signals=entry_signals,
                 exit_signals=exit_signals,
             )

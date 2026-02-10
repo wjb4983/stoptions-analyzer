@@ -183,3 +183,16 @@ def test_run_multi_signal_backtest_applies_conservative_runtime_params(monkeypat
     ts_call = next(call for call in captured if call["entry_signal"] == "ts_momentum")
     assert ts_call["entry_signal_params"]["long_only"] is True
     assert float(ts_call["entry_signal_params"]["min_abs_return"]) == 0.01
+
+
+def test_apply_discrete_bet_sizing_rounds_down_shares() -> None:
+    prices = __import__("numpy").array([[101.0]], dtype=float)
+    signals = __import__("numpy").array([[1.0]], dtype=float)
+    sized = cache_runner._apply_discrete_bet_sizing(
+        signals=signals,
+        prices=prices,
+        starting_capital=1000.0,
+        bet_fraction=0.5,
+    )
+    # 50% budget => $500, at $101/share -> floor(4) shares => $404 exposure => 0.404 weight
+    assert float(sized[0, 0]) == 404.0 / 1000.0
