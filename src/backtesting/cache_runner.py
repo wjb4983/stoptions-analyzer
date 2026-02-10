@@ -14,7 +14,14 @@ from typing import Any, Callable
 import numpy as np
 
 from analysis.reporting import build_drawdown_rows, format_backtest_report
-from backtesting.execution import BpsSlippage
+from backtesting.execution import (
+    AssetClassCarryCost,
+    BpsSlippage,
+    ParticipationImpactSlippage,
+    ShortBorrowCost,
+    SpreadSlippage,
+    VolatilityScaledSlippage,
+)
 from backtesting.vectorized import backtest_vectorized
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR
 from data_access.api_client import MassiveApiClient
@@ -130,6 +137,10 @@ def run_time_series_momentum_backtest(
     lookback_days: int,
     skip_days: int,
     costs_bps: float,
+    execution_model: str = "bps",
+    execution_model_params: dict[str, object] | None = None,
+    carry_model: str = "short_borrow",
+    carry_model_params: dict[str, object] | None = None,
     entry_signal: str = "ts_momentum",
     entry_signal_params: dict[str, object] | None = None,
     exit_signal: str = "none",
@@ -211,10 +222,23 @@ def run_time_series_momentum_backtest(
             bet_fraction=bet_fraction,
         )
 
+    slippage = _build_slippage_model(
+        model_name=execution_model,
+        costs_bps=costs_bps,
+        params=execution_model_params,
+    )
+    borrow = _build_carry_model(
+        model_name=carry_model,
+        params=carry_model_params,
+        n_assets=prices.shape[1],
+        timeframe=timeframe,
+    )
+
     result = backtest_vectorized(
         prices=prices,
         signals=sized_signals,
-        slippage_model=BpsSlippage(costs_bps),
+        slippage_model=slippage,
+        borrow_cost_model=borrow,
         initial_equity=float(starting_capital),
         timeframe=timeframe,
     )
@@ -273,6 +297,10 @@ def run_time_series_momentum_backtest(
             "lookback_days": lookback_days,
             "skip_days": skip_days,
             "costs_bps": costs_bps,
+            "execution_model": execution_model,
+            "execution_model_params": json.dumps(execution_model_params or {}),
+            "carry_model": carry_model,
+            "carry_model_params": json.dumps(carry_model_params or {}),
             "entry_signal": entry_signal,
             "entry_signal_params": json.dumps(entry_signal_params or {}),
             "exit_signal": exit_signal,
@@ -1110,6 +1138,52 @@ def _write_trades_csv_json(
     (run_dir / "trades.json").write_text(json.dumps(rows, indent=2))
 
 
+
+
+def _build_slippage_model(*, model_name: str, costs_bps: float, params: dict[str, object] | None) -> object:
+    cfg = dict(params or {})
+    name = str(model_name).strip().lower()
+    if name == "bps":
+        return BpsSlippage(float(cfg.get("bps", costs_bps)))
+    if name == "spread":
+        return SpreadSlippage(float(cfg.get("spread_bps", costs_bps)))
+    if name == "participation":
+        return ParticipationImpactSlippage(
+            base_bps=float(cfg.get("base_bps", 0.0)),
+            impact_coefficient_bps=float(cfg.get("impact_coefficient_bps", cfg.get("impact_bps", 20.0))),
+            participation_exponent=float(cfg.get("participation_exponent", 1.0)),
+            max_participation=float(cfg.get("max_participation", 1.0)),
+        )
+    if name == "volatility_scaled":
+        return VolatilityScaledSlippage(
+            base_bps=float(cfg.get("base_bps", costs_bps)),
+            target_volatility=float(cfg.get("target_volatility", 0.01)),
+            volatility_exponent=float(cfg.get("volatility_exponent", 1.0)),
+            min_volatility=float(cfg.get("min_volatility", 1e-6)),
+        )
+    raise ValueError(f"Unknown execution model: {model_name}")
+
+
+def _build_carry_model(*, model_name: str, params: dict[str, object] | None, n_assets: int, timeframe: str) -> object:
+    cfg = dict(params or {})
+    name = str(model_name).strip().lower()
+    periods_per_year = 252.0 if timeframe.endswith("d") else 252.0 * 390.0
+    if name == "short_borrow":
+        return ShortBorrowCost(
+            annual_borrow_rate=float(cfg.get("annual_borrow_rate", 0.0)),
+            periods_per_year=float(cfg.get("periods_per_year", periods_per_year)),
+        )
+    if name == "asset_class":
+        asset_classes = cfg.get("asset_classes")
+        if not isinstance(asset_classes, list):
+            asset_classes = ["equity"] * int(n_assets)
+        return AssetClassCarryCost(
+            asset_classes=asset_classes,
+            annual_short_borrow_rates=cfg.get("annual_short_borrow_rates") if isinstance(cfg.get("annual_short_borrow_rates"), dict) else {"equity": 0.0},
+            annual_long_financing_rates=cfg.get("annual_long_financing_rates") if isinstance(cfg.get("annual_long_financing_rates"), dict) else {},
+            periods_per_year=float(cfg.get("periods_per_year", periods_per_year)),
+        )
+    raise ValueError(f"Unknown carry model: {model_name}")
 def _parse_json_object(raw: str | None) -> dict[str, object]:
     if raw is None or not raw.strip():
         return {}
@@ -1135,6 +1209,10 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--lookback-days", type=int, default=90)
     run_parser.add_argument("--skip-days", type=int, default=5)
     run_parser.add_argument("--costs-bps", type=float, default=5.0)
+    run_parser.add_argument("--execution-model", choices=["bps", "spread", "participation", "volatility_scaled"], default="bps")
+    run_parser.add_argument("--execution-model-params", default="{}", help="JSON object with execution model params.")
+    run_parser.add_argument("--carry-model", choices=["short_borrow", "asset_class"], default="short_borrow")
+    run_parser.add_argument("--carry-model-params", default="{}", help="JSON object with carry model params.")
     run_parser.add_argument("--entry-signal", default="ts_momentum", choices=["ts_momentum", "ma_trend", "breakout"])
     run_parser.add_argument("--entry-signal-params", default="{}", help="JSON object with entry signal parameters.")
     run_parser.add_argument("--exit-signal", default="none", choices=["none", "momentum_flip", "trailing_stop", "max_hold"])
@@ -1199,6 +1277,10 @@ def main() -> None:
             lookback_days=args.lookback_days,
             skip_days=args.skip_days,
             costs_bps=args.costs_bps,
+            execution_model=str(args.execution_model),
+            execution_model_params=_parse_json_object(args.execution_model_params),
+            carry_model=str(args.carry_model),
+            carry_model_params=_parse_json_object(args.carry_model_params),
             entry_signal=args.entry_signal,
             entry_signal_params=_parse_json_object(args.entry_signal_params),
             exit_signal=args.exit_signal,

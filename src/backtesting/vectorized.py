@@ -16,6 +16,7 @@ import numpy as np
 from .execution import (
     BpsSlippage,
     FeeModel,
+    LiquidityContext,
     ShortBorrowCost,
     SlippageModel,
     ZeroFee,
@@ -96,7 +97,11 @@ def backtest_vectorized(
     *,
     slippage_model: SlippageModel | None = None,
     fee_model: FeeModel | None = None,
-    borrow_cost_model: ShortBorrowCost | None = None,
+    borrow_cost_model: Any | None = None,
+    volumes: Any | None = None,
+    adv: Any | None = None,
+    volatility: Any | None = None,
+    spread_bps: Any | None = None,
     weights: Any | None = None,
     initial_equity: float = 1.0,
     execution_mode: ExecutionMode = "optimized",
@@ -147,12 +152,21 @@ def backtest_vectorized(
     fees = fee_model or ZeroFee()
     borrow_costs = borrow_cost_model or ShortBorrowCost(0.0)
 
+    liquidity = _build_liquidity_context(
+        prices=price_values,
+        volumes=volumes,
+        adv=adv,
+        volatility=volatility,
+        spread_bps=spread_bps,
+    )
+
     slippage_cost = _estimate_slippage(
         price_values,
         trades,
         execution_model,
         portfolio_weights,
         mode=execution_mode,
+        liquidity=liquidity,
     )
     fee_cost = _estimate_fees(
         price_values,
@@ -160,6 +174,7 @@ def backtest_vectorized(
         fees,
         portfolio_weights,
         mode=execution_mode,
+        liquidity=liquidity,
     )
     borrow_cost = _estimate_borrow_cost(positions, borrow_costs, portfolio_weights)
 
@@ -220,12 +235,13 @@ def _estimate_slippage(
     weights: np.ndarray,
     *,
     mode: ExecutionMode,
+    liquidity: dict[str, np.ndarray],
 ) -> np.ndarray:
     if mode == "optimized":
         optimized = _estimate_slippage_optimized(trades, model, weights)
         if optimized is not None:
             return optimized
-    return _estimate_slippage_reference(prices, trades, model, weights)
+    return _estimate_slippage_reference(prices, trades, model, weights, liquidity)
 
 
 def _estimate_slippage_reference(
@@ -233,6 +249,7 @@ def _estimate_slippage_reference(
     trades: np.ndarray,
     model: SlippageModel,
     weights: np.ndarray,
+    liquidity: dict[str, np.ndarray],
 ) -> np.ndarray:
     slippage = np.zeros(prices.shape[0], dtype=float)
     if not trades.size:
@@ -247,7 +264,7 @@ def _estimate_slippage_reference(
                 model.apply(
                     price,
                     float(trade_size),
-                    {"bar_index": idx, "asset_index": asset_idx},
+                    _build_bar_context(liquidity, idx, asset_idx),
                 )
             )
             slippage[idx] += (exec_price - price) / price * trade_size * weights[asset_idx]
@@ -274,12 +291,13 @@ def _estimate_fees(
     weights: np.ndarray,
     *,
     mode: ExecutionMode,
+    liquidity: dict[str, np.ndarray],
 ) -> np.ndarray:
     if mode == "optimized":
         optimized = _estimate_fees_optimized(trades, model, weights)
         if optimized is not None:
             return optimized
-    return _estimate_fees_reference(prices, trades, model, weights)
+    return _estimate_fees_reference(prices, trades, model, weights, liquidity)
 
 
 def _estimate_fees_reference(
@@ -287,6 +305,7 @@ def _estimate_fees_reference(
     trades: np.ndarray,
     model: FeeModel,
     weights: np.ndarray,
+    liquidity: dict[str, np.ndarray],
 ) -> np.ndarray:
     fee_returns = np.zeros(prices.shape[0], dtype=float)
     if not trades.size:
@@ -300,7 +319,7 @@ def _estimate_fees_reference(
                 model.calculate(
                     float(prices[idx, asset_idx]),
                     float(trade_size),
-                    {"bar_index": idx, "asset_index": asset_idx},
+                    _build_bar_context(liquidity, idx, asset_idx),
                 )
             )
             fee_returns[idx] += fee * weights[asset_idx]
@@ -319,6 +338,85 @@ def _estimate_fees_optimized(
         return _fixed_commission_kernel(trades, weights, commission)
     return None
 
+
+
+
+def _build_liquidity_context(
+    *,
+    prices: np.ndarray,
+    volumes: Any | None,
+    adv: Any | None,
+    volatility: Any | None,
+    spread_bps: Any | None,
+) -> dict[str, np.ndarray]:
+    n_periods, n_assets = prices.shape
+    volumes_arr = _coerce_liquidity_array(volumes, prices.shape, default=1.0)
+    adv_arr = _coerce_liquidity_array(adv, prices.shape, default=np.nan)
+    if np.isnan(adv_arr).all():
+        adv_arr = _rolling_mean(volumes_arr, window=20)
+    else:
+        adv_arr = np.where(np.isnan(adv_arr), _rolling_mean(volumes_arr, window=20), adv_arr)
+    volatility_arr = _coerce_liquidity_array(volatility, prices.shape, default=np.nan)
+    if np.isnan(volatility_arr).all():
+        volatility_arr = _rolling_volatility(prices, window=20)
+    else:
+        volatility_arr = np.where(np.isnan(volatility_arr), _rolling_volatility(prices, window=20), volatility_arr)
+    spread_arr = _coerce_liquidity_array(spread_bps, prices.shape, default=2.0)
+    return {
+        "volume": volumes_arr,
+        "adv": adv_arr,
+        "volatility": volatility_arr,
+        "spread_bps": spread_arr,
+    }
+
+
+def _coerce_liquidity_array(values: Any | None, shape: tuple[int, int], default: float) -> np.ndarray:
+    if values is None:
+        return np.full(shape, float(default), dtype=float)
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 0:
+        return np.full(shape, float(arr), dtype=float)
+    if arr.ndim == 1:
+        if arr.shape[0] == shape[0]:
+            return np.repeat(arr.reshape(-1, 1), shape[1], axis=1)
+        if arr.shape[0] == shape[1]:
+            return np.repeat(arr.reshape(1, -1), shape[0], axis=0)
+        raise ValueError("Liquidity vectors must match either n_periods or n_assets.")
+    if arr.shape != shape:
+        raise ValueError("Liquidity arrays must match price shape.")
+    return arr
+
+
+def _rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
+    out = np.zeros_like(values, dtype=float)
+    for col in range(values.shape[1]):
+        for idx in range(values.shape[0]):
+            start = max(0, idx - window + 1)
+            out[idx, col] = float(np.mean(values[start:idx + 1, col]))
+    return out
+
+
+def _rolling_volatility(prices: np.ndarray, window: int) -> np.ndarray:
+    rets = np.zeros_like(prices, dtype=float)
+    rets[1:] = prices[1:] / np.where(prices[:-1] == 0.0, 1.0, prices[:-1]) - 1.0
+    out = np.zeros_like(prices, dtype=float)
+    for col in range(prices.shape[1]):
+        for idx in range(prices.shape[0]):
+            start = max(0, idx - window + 1)
+            segment = rets[start:idx + 1, col]
+            out[idx, col] = float(np.std(segment, ddof=1)) if segment.size > 1 else 0.0
+    return out
+
+
+def _build_bar_context(liquidity: dict[str, np.ndarray], idx: int, asset_idx: int) -> LiquidityContext:
+    return LiquidityContext(
+        bar_index=int(idx),
+        asset_index=int(asset_idx),
+        volume=float(liquidity["volume"][idx, asset_idx]),
+        adv=float(liquidity["adv"][idx, asset_idx]),
+        volatility=float(liquidity["volatility"][idx, asset_idx]),
+        spread_bps=float(liquidity["spread_bps"][idx, asset_idx]),
+    )
 
 def _estimate_borrow_cost(
     positions: np.ndarray,
