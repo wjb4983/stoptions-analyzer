@@ -1,0 +1,28 @@
+{
+  "seed": 7,
+  "target_universe_assets": 120,
+  "target_horizon_periods": 504,
+  "scenarios": [
+    {
+      "scenario": "baseline_low_cost_lookback_20",
+      "lookback_days": 20,
+      "skip_days": 1,
+      "slippage_bps": 5.0,
+      "fixed_commission": 0.0
+    },
+    {
+      "scenario": "baseline_med_cost_lookback_60",
+      "lookback_days": 60,
+      "skip_days": 1,
+      "slippage_bps": 10.0,
+      "fixed_commission": 0.0002
+    },
+    {
+      "scenario": "baseline_high_cost_lookback_120",
+      "lookback_days": 120,
+      "skip_days": 1,
+      "slippage_bps": 20.0,
+      "fixed_commission": 0.0005
+    }
+  ]
+}
