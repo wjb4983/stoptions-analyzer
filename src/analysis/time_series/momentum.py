@@ -18,6 +18,9 @@ from .base import TimeSeriesResult
 class TimeSeriesMomentumSettings:
     lookback_days: int = 90
     skip_days: int = 5
+    vol_window_days: int = 20
+    target_volatility: float | None = None
+    max_leverage: float = 1.0
     top_quantile: float = 0.2
     bottom_quantile: float = 0.2
     use_volatility_scaling: bool = False
@@ -25,6 +28,101 @@ class TimeSeriesMomentumSettings:
     use_multi_horizon: bool = False
     use_zscore: bool = False
     winsorize_sigma: float | None = None
+    hyperparameters: "MomentumHyperparameters | None" = None
+
+
+@dataclass(frozen=True)
+class MomentumHyperparameters:
+    lookback_days: int = 90
+    skip_days: int = 5
+    vol_window_days: int = 20
+    target_volatility: float | None = None
+    max_leverage: float = 1.0
+
+
+@dataclass(frozen=True)
+class TimeSeriesMomentumArrays:
+    raw_score: np.ndarray
+    position_signal: np.ndarray
+    confidence: np.ndarray
+    scaled_weight: np.ndarray
+    tradable_position: np.ndarray
+
+
+def _resolve_hyperparameters(settings: TimeSeriesMomentumSettings) -> MomentumHyperparameters:
+    if settings.hyperparameters is not None:
+        return settings.hyperparameters
+    return MomentumHyperparameters(
+        lookback_days=settings.lookback_days,
+        skip_days=settings.skip_days,
+        vol_window_days=settings.vol_window_days,
+        target_volatility=settings.target_volatility,
+        max_leverage=settings.max_leverage,
+    )
+
+
+def build_time_series_momentum_arrays(
+    closes: list[float] | tuple[float, ...],
+    settings: TimeSeriesMomentumSettings,
+) -> TimeSeriesMomentumArrays:
+    """Build momentum arrays from close data with next-open execution alignment.
+
+    The signal uses only data available through close ``t`` and a tradable
+    position is produced by shifting one bar so that execution begins at
+    ``t+1`` open.
+    """
+
+    params = _resolve_hyperparameters(settings)
+    close_array = np.asarray(closes, dtype=float)
+    count = close_array.shape[0]
+    raw_score = np.full(count, np.nan, dtype=float)
+
+    for idx in range(count):
+        end_idx = idx - params.skip_days
+        start_idx = end_idx - params.lookback_days
+        if start_idx < 0 or end_idx < 0:
+            continue
+        start_price = close_array[start_idx]
+        end_price = close_array[end_idx]
+        if not is_valid_price(float(start_price)) or not is_valid_price(float(end_price)):
+            continue
+        raw_score[idx] = float(end_price / start_price - 1.0)
+
+    position_signal = np.zeros(count, dtype=float)
+    valid = np.isfinite(raw_score)
+    position_signal[valid] = np.sign(raw_score[valid])
+    confidence = np.zeros(count, dtype=float)
+    confidence[valid] = np.abs(raw_score[valid])
+
+    scaled_weight = position_signal.astype(float)
+    if params.target_volatility is not None and params.target_volatility > 0:
+        daily_returns = np.zeros(count, dtype=float)
+        daily_returns[1:] = close_array[1:] / close_array[:-1] - 1.0
+        annualization = np.sqrt(252.0)
+        for idx in range(count):
+            end_idx = idx - params.skip_days
+            start_idx = end_idx - params.vol_window_days + 1
+            if start_idx < 1 or end_idx < 1:
+                scaled_weight[idx] = 0.0
+                continue
+            window = daily_returns[start_idx : end_idx + 1]
+            vol = float(np.std(window, ddof=1)) * annualization if window.size > 1 else 0.0
+            if vol <= 0:
+                scaled_weight[idx] = 0.0
+                continue
+            leverage = min(params.max_leverage, params.target_volatility / vol)
+            scaled_weight[idx] = position_signal[idx] * max(leverage, 0.0)
+
+    tradable_position = np.zeros(count, dtype=float)
+    tradable_position[1:] = scaled_weight[:-1]
+
+    return TimeSeriesMomentumArrays(
+        raw_score=raw_score,
+        position_signal=position_signal,
+        confidence=confidence,
+        scaled_weight=scaled_weight,
+        tradable_position=tradable_position,
+    )
 
 
 def compute_time_series_momentum(
@@ -32,7 +130,8 @@ def compute_time_series_momentum(
     fundamentals_by_ticker: dict[str, dict] | None,
     settings: TimeSeriesMomentumSettings,
 ) -> TimeSeriesResult:
-    min_points = settings.lookback_days + settings.skip_days + 1
+    params = _resolve_hyperparameters(settings)
+    min_points = params.lookback_days + params.skip_days + 1
     returns: list[float] = []
     tickers: list[str] = []
     skipped: dict[str, str] = {}
@@ -44,19 +143,23 @@ def compute_time_series_momentum(
         if len(closes) < min_points:
             skipped[ticker] = "insufficient_history"
             continue
-        end_index = len(closes) - settings.skip_days - 1
-        start_index = end_index - settings.lookback_days
-        if start_index < 0:
+        arrays = build_time_series_momentum_arrays(closes, settings)
+        valid_indices = np.flatnonzero(np.isfinite(arrays.raw_score))
+        if valid_indices.size == 0:
             skipped[ticker] = "insufficient_history"
             continue
-        start_price = closes[start_index]
-        end_price = closes[end_index]
-        if not is_valid_price(start_price) or not is_valid_price(end_price):
-            skipped[ticker] = "invalid_price"
-            continue
-        momentum_return = (end_price / start_price) - 1.0
-        ticker_metrics = {"base": float(momentum_return)}
+        latest_idx = int(valid_indices[-1])
+        momentum_return = float(arrays.raw_score[latest_idx])
+        ticker_metrics = {
+            "base": momentum_return,
+            "latest_position_signal": float(arrays.position_signal[latest_idx]),
+            "latest_confidence": float(arrays.confidence[latest_idx]),
+            "latest_scaled_weight": float(arrays.scaled_weight[latest_idx]),
+            "latest_tradable_position": float(arrays.tradable_position[latest_idx]),
+        }
+        end_index = latest_idx - params.skip_days
         if settings.use_volatility_scaling:
+            start_index = latest_idx - params.skip_days - params.lookback_days
             vol = estimate_volatility(closes[start_index : end_index + 1])
             if vol and vol > 0:
                 ticker_metrics["vol_scaled"] = float(momentum_return / vol)
@@ -79,6 +182,9 @@ def compute_time_series_momentum(
             metadata={
                 "lookback_days": settings.lookback_days,
                 "skip_days": settings.skip_days,
+                "vol_window_days": params.vol_window_days,
+                "target_volatility": params.target_volatility,
+                "max_leverage": params.max_leverage,
                 "top_quantile": settings.top_quantile,
                 "bottom_quantile": settings.bottom_quantile,
                 "universe": 0,
@@ -127,6 +233,9 @@ def compute_time_series_momentum(
         metadata={
             "lookback_days": settings.lookback_days,
             "skip_days": settings.skip_days,
+            "vol_window_days": params.vol_window_days,
+            "target_volatility": params.target_volatility,
+            "max_leverage": params.max_leverage,
             "top_quantile": settings.top_quantile,
             "bottom_quantile": settings.bottom_quantile,
             "universe": total,
