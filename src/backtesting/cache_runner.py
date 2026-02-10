@@ -11,6 +11,8 @@ import numpy as np
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR
 from data_access.api_client import MassiveApiClient
 from data_access.cache import _safe_ticker_name
+
+from data_access.engine_loader import EngineArrayBundle, load_canonical_price_arrays
 from utils.parsing import build_npz_payload, chunk_results_by_year
 
 
@@ -104,3 +106,26 @@ def run_backtest_cache(
     output_path = BACKTEST_OUTPUT_DIR / f"backtest_cache_{timestamp}.txt"
     output_path.write_text("\n".join(lines))
     return "\n".join(lines) + f"\n\nSaved summary to: {output_path}"
+
+
+
+def load_backtest_engine_arrays(
+    tickers: list[str],
+    start: datetime | str,
+    end: datetime | str,
+    *,
+    cache_root: Path | None = None,
+    timeframe: str = "1m",
+    lookback_window: int = 0,
+) -> EngineArrayBundle:
+    """Load canonical float64 arrays and metadata for backtest engines."""
+
+    return load_canonical_price_arrays(
+        symbols=tickers,
+        start=start,
+        end=end,
+        cache_root=cache_root,
+        timeframe=timeframe,
+        lookback_window=lookback_window,
+        validate_split_adjustment=True,
+    )
