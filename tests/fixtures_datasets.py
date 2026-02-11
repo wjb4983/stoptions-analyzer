@@ -88,3 +88,38 @@ def deterministic_event_target_positions() -> np.ndarray:
     """Target position for each bar close."""
 
     return np.array([0.0, 1.0, -1.0, 0.0], dtype=float)
+
+
+def pit_membership_fixture() -> dict[str, np.ndarray]:
+    """Fixture for point-in-time universe inclusion/exclusion."""
+
+    timestamps = np.array([
+        1704205800000,
+        1704205860000,
+        1704205920000,
+        1704205980000,
+    ], dtype=np.int64)
+    return {
+        "t": timestamps,
+        "o": np.array([100.0, 101.0, 102.0, 103.0], dtype=float),
+        "c": np.array([100.2, 101.2, 102.2, 103.2], dtype=float),
+        "active_from": np.array([timestamps[1]], dtype=np.int64),
+        "active_to": np.array([timestamps[2]], dtype=np.int64),
+        "tradable": np.array([True, True, True, True], dtype=bool),
+    }
+
+
+def delisting_fixture() -> dict[str, np.ndarray]:
+    """Fixture containing terminal bar and delisting scenario."""
+
+    timestamps = np.array([
+        1704205800000,
+        1704205860000,
+        1704205920000,
+    ], dtype=np.int64)
+    return {
+        "t": timestamps,
+        "o": np.array([50.0, 49.0, 48.0], dtype=float),
+        "c": np.array([49.5, 48.5, 48.0], dtype=float),
+        "tradable": np.array([True, True, True], dtype=bool),
+    }

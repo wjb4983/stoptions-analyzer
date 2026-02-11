@@ -27,7 +27,12 @@ from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR
 from data_access.api_client import MassiveApiClient
 from data_access.cache import _safe_ticker_name
 
-from data_access.engine_loader import EngineArrayBundle, EngineArrayMetadata, load_canonical_price_arrays
+from data_access.engine_loader import (
+    EngineArrayBundle,
+    EngineArrayMetadata,
+    load_canonical_price_arrays,
+    validate_engine_dataset_contracts,
+)
 from utils.parsing import build_npz_payload, chunk_results_by_year
 from backtesting.signals import build_targets, parse_entry_signal_config, parse_exit_signal_config, required_lookback_window
 from backtesting.portfolio import PortfolioConstructionConfig, construct_target_weights
@@ -198,6 +203,7 @@ def run_time_series_momentum_backtest(
         lookback_window=lookback_window,
     )
     arrays = _resample_engine_bundle_from_1m(arrays, timeframe=timeframe)
+    dataset_contracts = validate_engine_dataset_contracts(arrays)
 
     prices = _fill_missing_prices(arrays.close_prices)
     bet_fraction = _resolve_bet_fraction(
@@ -318,6 +324,7 @@ def run_time_series_momentum_backtest(
         trades=trades,
         risk_diagnostics=portfolio_result.diagnostics,
         metrics=metrics,
+        dataset_contracts=dataset_contracts,
     )
 
     trade_log_rows = _build_trade_log_rows(
@@ -1079,6 +1086,13 @@ def _resample_engine_bundle_from_1m(arrays: EngineArrayBundle, *, timeframe: str
         date_index=date_index,
         missingness_ratio=float(np.mean(missing_mask)) if missing_mask.size else 1.0,
         missingness_by_symbol=missingness_by_symbol,
+        coverage_by_symbol=dict(arrays.metadata.coverage_by_symbol),
+        tradable_ratio_by_symbol={
+            symbol: (1.0 - missingness_by_symbol[symbol])
+            for symbol, _ in symbol_order
+        },
+        excluded_symbols=dict(arrays.metadata.excluded_symbols),
+        audit_summary_by_symbol=dict(arrays.metadata.audit_summary_by_symbol),
     )
     return EngineArrayBundle(
         date_index=date_index,
@@ -1317,6 +1331,7 @@ def _persist_backtest_outputs(
     trades: np.ndarray,
     risk_diagnostics: dict[str, np.ndarray],
     metrics: dict[str, float],
+    dataset_contracts: object | None = None,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
@@ -1361,6 +1376,15 @@ def _persist_backtest_outputs(
         writer.writeheader()
         writer.writerows(metrics_rows)
     (run_dir / "metrics.json").write_text(json.dumps(metrics_rows, indent=2))
+
+    if dataset_contracts is not None:
+        audit_payload = {
+            "coverage_by_symbol": dataset_contracts.coverage_by_symbol,
+            "missingness_by_symbol": dataset_contracts.missingness_by_symbol,
+            "excluded_symbols": dataset_contracts.excluded_symbols,
+            "reasons_by_symbol": dataset_contracts.reasons_by_symbol,
+        }
+        (run_dir / "dataset_quality_audit.json").write_text(json.dumps(audit_payload, indent=2))
 
     return run_dir
 

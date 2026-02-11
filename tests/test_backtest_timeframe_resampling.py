@@ -16,6 +16,10 @@ def _sample_bundle(rows: int = 12) -> EngineArrayBundle:
         date_index=date_index,
         missingness_ratio=0.0,
         missingness_by_symbol={"AAA": 0.0, "BBB": 0.0},
+        coverage_by_symbol={"AAA": 1.0, "BBB": 1.0},
+        tradable_ratio_by_symbol={"AAA": 1.0, "BBB": 1.0},
+        excluded_symbols={},
+        audit_summary_by_symbol={},
     )
     return EngineArrayBundle(
         date_index=date_index,
