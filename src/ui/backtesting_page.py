@@ -6,7 +6,11 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from backtesting.cache_runner import run_multi_signal_backtest, run_time_series_momentum_backtest
+from backtesting.cache_runner import (
+    run_multi_signal_backtest,
+    run_time_series_momentum_backtest,
+    run_walk_forward_backtest,
+)
 from config import BACKTEST_CACHE_DIR, DEFAULT_BACKTEST_SETTINGS
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
@@ -94,6 +98,35 @@ class BacktestingPage(ttk.Frame):
             state="readonly",
             values=TIMEFRAMES,
         ).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        self.use_walk_forward_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            strategy_frame,
+            text="Use Walk-Forward (Momentum)",
+            variable=self.use_walk_forward_var,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=6)
+
+        row += 1
+        self.walk_forward_frame = ttk.LabelFrame(strategy_frame, text="Walk-Forward Windows (bars)")
+        self.walk_forward_frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
+        self.walk_forward_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(self.walk_forward_frame, text="Train").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        self.wf_train_bars_var = tk.StringVar(value="3900")
+        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_train_bars_var).grid(row=0, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(self.walk_forward_frame, text="Validation").grid(row=1, column=0, sticky="w", padx=8, pady=6)
+        self.wf_validation_bars_var = tk.StringVar(value="780")
+        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_validation_bars_var).grid(row=1, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(self.walk_forward_frame, text="Test").grid(row=2, column=0, sticky="w", padx=8, pady=6)
+        self.wf_test_bars_var = tk.StringVar(value="780")
+        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_test_bars_var).grid(row=2, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(self.walk_forward_frame, text="Step (blank = test size)").grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        self.wf_step_bars_var = tk.StringVar(value="")
+        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_step_bars_var).grid(row=3, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         self.strategy_specific_container = ttk.Frame(strategy_frame)
@@ -192,9 +225,11 @@ class BacktestingPage(ttk.Frame):
         if strategy == "xsmom":
             self.momentum_options_frame.grid_remove()
             self.xsmom_options_frame.grid()
+            self.walk_forward_frame.grid_remove()
         else:
             self.xsmom_options_frame.grid_remove()
             self.momentum_options_frame.grid()
+            self.walk_forward_frame.grid()
 
     def refresh(self) -> None:
         settings = dict(DEFAULT_BACKTEST_SETTINGS)
@@ -213,6 +248,11 @@ class BacktestingPage(ttk.Frame):
         self.custom_bet_pct_var.set(str(settings.get("custom_bet_pct", "10")))
         timeframe = str(settings.get("timeframe", "1m"))
         self.timeframe_var.set(timeframe if timeframe in TIMEFRAMES else "1m")
+        self.use_walk_forward_var.set(bool(settings.get("use_walk_forward", False)))
+        self.wf_train_bars_var.set(str(settings.get("wf_train_bars", "3900")))
+        self.wf_validation_bars_var.set(str(settings.get("wf_validation_bars", "780")))
+        self.wf_test_bars_var.set(str(settings.get("wf_test_bars", "780")))
+        self.wf_step_bars_var.set(str(settings.get("wf_step_bars", "")))
 
         selected_entries = self._split_csv_setting(settings.get("selected_entry_signals", "ts_momentum"))
         selected_exits = self._split_csv_setting(settings.get("selected_exit_signals", "none"))
@@ -281,6 +321,11 @@ class BacktestingPage(ttk.Frame):
             "bet_sizing_mode": self.bet_sizing_mode_var.get().strip() or "half_kelly",
             "custom_bet_pct": str(custom_bet_pct),
             "timeframe": self.timeframe_var.get().strip() or "1m",
+            "use_walk_forward": bool(self.use_walk_forward_var.get()),
+            "wf_train_bars": self.wf_train_bars_var.get().strip() or "3900",
+            "wf_validation_bars": self.wf_validation_bars_var.get().strip() or "780",
+            "wf_test_bars": self.wf_test_bars_var.get().strip() or "780",
+            "wf_step_bars": self.wf_step_bars_var.get().strip(),
             "selected_entry_signals": ",".join(selected_entries),
             "selected_exit_signals": ",".join(selected_exits),
             "start_date": self.start_date_var.get().strip(),
@@ -331,23 +376,47 @@ class BacktestingPage(ttk.Frame):
             if not selected_exits:
                 messagebox.showinfo("Invalid input", "Select at least one exit signal.")
                 return
-            worker_target = self._run_momentum_worker
-            worker_args = (
-                tickers,
-                start_date,
-                end_date,
-                cache_root,
-                lookback,
-                skip,
-                costs_bps,
-                starting_capital,
-                bet_sizing_mode,
-                custom_bet_pct,
-                timeframe,
-                selected_entries,
-                selected_exits,
-            )
-            status_line = f"Running {len(selected_entries) * len(selected_exits)} momentum entry/exit combinations...\n"
+
+            if bool(self.use_walk_forward_var.get()):
+                walk_forward_windows = self._validate_walk_forward_inputs()
+                if walk_forward_windows is None:
+                    return
+                train_bars, validation_bars, test_bars, step_bars = walk_forward_windows
+                worker_target = self._run_walk_forward_worker
+                worker_args = (
+                    tickers,
+                    start_date,
+                    end_date,
+                    cache_root,
+                    lookback,
+                    skip,
+                    costs_bps,
+                    selected_entries,
+                    selected_exits,
+                    train_bars,
+                    validation_bars,
+                    test_bars,
+                    step_bars,
+                )
+                status_line = f"Running walk-forward with {len(selected_entries) * len(selected_exits)} candidates...\n"
+            else:
+                worker_target = self._run_momentum_worker
+                worker_args = (
+                    tickers,
+                    start_date,
+                    end_date,
+                    cache_root,
+                    lookback,
+                    skip,
+                    costs_bps,
+                    starting_capital,
+                    bet_sizing_mode,
+                    custom_bet_pct,
+                    timeframe,
+                    selected_entries,
+                    selected_exits,
+                )
+                status_line = f"Running {len(selected_entries) * len(selected_exits)} momentum entry/exit combinations...\n"
         else:
             xsmom_valid = self._validate_xsmom_inputs()
             if xsmom_valid is None:
@@ -434,6 +503,69 @@ class BacktestingPage(ttk.Frame):
             return None
 
         return float(top_quantile), float(bottom_quantile), int(vol_lookback)
+
+    def _validate_walk_forward_inputs(self) -> tuple[int, int, int, int | None] | None:
+        train_bars = parse_float(self.wf_train_bars_var.get())
+        validation_bars = parse_float(self.wf_validation_bars_var.get())
+        test_bars = parse_float(self.wf_test_bars_var.get())
+        step_raw = self.wf_step_bars_var.get().strip()
+        step_bars = parse_float(step_raw) if step_raw else None
+
+        if train_bars is None or train_bars < 1 or int(train_bars) != train_bars:
+            messagebox.showinfo("Invalid input", "Walk-forward train bars must be a positive integer.")
+            return None
+        if validation_bars is None or validation_bars < 1 or int(validation_bars) != validation_bars:
+            messagebox.showinfo("Invalid input", "Walk-forward validation bars must be a positive integer.")
+            return None
+        if test_bars is None or test_bars < 1 or int(test_bars) != test_bars:
+            messagebox.showinfo("Invalid input", "Walk-forward test bars must be a positive integer.")
+            return None
+        if step_bars is not None and (step_bars < 1 or int(step_bars) != step_bars):
+            messagebox.showinfo("Invalid input", "Walk-forward step bars must be a positive integer when provided.")
+            return None
+
+        return int(train_bars), int(validation_bars), int(test_bars), None if step_bars is None else int(step_bars)
+
+    def _run_walk_forward_worker(
+        self,
+        tickers: list[str],
+        start_date: date,
+        end_date: date,
+        cache_root: Path,
+        lookback: int,
+        skip: int,
+        costs_bps: float,
+        entry_signals: list[str],
+        exit_signals: list[str],
+        train_bars: int,
+        validation_bars: int,
+        test_bars: int,
+        step_bars: int | None,
+    ) -> None:
+        try:
+            entry_grid = {signal: [{}] for signal in entry_signals}
+            exit_grid = {signal: [{}] for signal in exit_signals}
+            core_grid = {
+                "lookback_days": [int(lookback)],
+                "skip_days": [int(skip)],
+                "costs_bps": [float(costs_bps)],
+            }
+            output_text = run_walk_forward_backtest(
+                tickers=tickers,
+                start_date=start_date,
+                end_date=end_date,
+                cache_root=cache_root,
+                entry_grid=entry_grid,
+                exit_grid=exit_grid,
+                core_grid=core_grid,
+                train_bars=train_bars,
+                validation_bars=validation_bars,
+                test_bars=test_bars,
+                step_bars=step_bars,
+            )
+        except Exception as exc:
+            output_text = f"Backtest failed: {exc}"
+        self.after(0, lambda: self._finish_backtest_run(output_text))
 
     def _run_momentum_worker(
         self,
