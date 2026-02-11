@@ -72,35 +72,42 @@ class BacktestingPage(ttk.Frame):
 
         run_setup_tab = ttk.Frame(self.section_notebook)
         run_setup_tab.columnconfigure(0, weight=1)
-        run_setup_tab.rowconfigure(1, weight=1)
+        run_setup_tab.rowconfigure(2, weight=1)
         self.section_notebook.add(run_setup_tab, text="Run Setup")
 
-        strategy_frame = ttk.LabelFrame(run_setup_tab, text="Strategy")
-        strategy_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        strategy_frame.columnconfigure(1, weight=1)
-
-        row = 0
-        ttk.Label(strategy_frame, text="Mode").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.ui_mode_var = tk.StringVar(value="basic")
-        mode_row = ttk.Frame(strategy_frame)
-        mode_row.grid(row=row, column=1, sticky="w", padx=8, pady=6)
+        self.preset_var = tk.StringVar(value="Custom")
+        self._preset_display_to_key = {"Custom": "custom"}
+        for preset_key, preset_cfg in BACKTEST_STRATEGY_PRESETS.items():
+            display = f"{preset_cfg.get('label', preset_key)} ({preset_key})"
+            self._preset_display_to_key[display] = preset_key
+        self._preset_key_to_display = {value: key for key, value in self._preset_display_to_key.items()}
+
+        workflow_frame = ttk.LabelFrame(run_setup_tab, text="Workflow Mode & Presets")
+        workflow_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+        workflow_frame.columnconfigure(1, weight=1)
+        ttk.Label(workflow_frame, text="Mode").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        mode_row = ttk.Frame(workflow_frame)
+        mode_row.grid(row=0, column=1, sticky="w", padx=8, pady=6)
         ttk.Radiobutton(mode_row, text="Basic", value="basic", variable=self.ui_mode_var, command=self._on_mode_changed).pack(side="left")
         ttk.Radiobutton(mode_row, text="Advanced", value="advanced", variable=self.ui_mode_var, command=self._on_mode_changed).pack(side="left", padx=(8, 0))
 
-        row += 1
-        ttk.Label(strategy_frame, text="Preset").grid(row=row, column=0, sticky="w", padx=8, pady=6)
-        self.preset_var = tk.StringVar(value="custom")
-        preset_values = ["custom"] + list(BACKTEST_STRATEGY_PRESETS.keys())
+        ttk.Label(workflow_frame, text="Preset").grid(row=1, column=0, sticky="w", padx=8, pady=6)
+        preset_values = list(self._preset_display_to_key.keys())
         self.preset_combo = ttk.Combobox(
-            strategy_frame,
+            workflow_frame,
             textvariable=self.preset_var,
             state="readonly",
             values=preset_values,
         )
-        self.preset_combo.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.preset_combo.grid(row=1, column=1, sticky="ew", padx=8, pady=6)
         self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
 
-        row += 1
+        strategy_frame = ttk.LabelFrame(run_setup_tab, text="Strategy")
+        strategy_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        strategy_frame.columnconfigure(1, weight=1)
+
+        row = 0
         ttk.Label(strategy_frame, text="Strategy").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.strategy_var = tk.StringVar(value="momentum")
         strategy_combo = ttk.Combobox(
@@ -340,13 +347,13 @@ class BacktestingPage(ttk.Frame):
         ttk.Button(template_row, text="Save as Experiment Template", command=self.save_template).grid(row=0, column=3)
 
         notes_frame = ttk.LabelFrame(run_setup_tab, text="Run Notes")
-        notes_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        notes_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
         notes_frame.columnconfigure(0, weight=1)
         self.notes_text = tk.Text(notes_frame, height=14)
         self.notes_text.grid(row=0, column=0, sticky="nsew", padx=8, pady=6)
 
         button_row = ttk.Frame(run_setup_tab)
-        button_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 10))
+        button_row.grid(row=3, column=0, sticky="ew", padx=10, pady=(4, 10))
         button_row.columnconfigure(0, weight=1)
         button_row.columnconfigure(1, weight=1)
         button_row.columnconfigure(2, weight=1)
@@ -979,8 +986,9 @@ class BacktestingPage(ttk.Frame):
         self.refresh()
 
     def _on_preset_selected(self, _event: object | None = None) -> None:
-        preset_key = self.preset_var.get().strip()
-        if not preset_key or preset_key == "custom":
+        preset_display = self.preset_var.get().strip()
+        preset_key = self._preset_display_to_key.get(preset_display, "custom")
+        if preset_key == "custom":
             return
         preset = BACKTEST_STRATEGY_PRESETS.get(preset_key)
         if not preset:
@@ -988,7 +996,7 @@ class BacktestingPage(ttk.Frame):
         preset_settings = preset.get("settings", {})
         if isinstance(preset_settings, dict):
             self._apply_settings(preset_settings)
-            self.preset_var.set(preset_key)
+            self.preset_var.set(self._preset_key_to_display.get(preset_key, "Custom"))
             self.controller.state.backtest_settings["selected_preset"] = preset_key
             self.controller.persist_state()
 
@@ -1029,7 +1037,7 @@ class BacktestingPage(ttk.Frame):
         selected_preset = str(settings.get("selected_preset", "custom"))
         if selected_preset not in {"custom", *BACKTEST_STRATEGY_PRESETS.keys()}:
             selected_preset = "custom"
-        self.preset_var.set(selected_preset)
+        self.preset_var.set(self._preset_key_to_display.get(selected_preset, "Custom"))
 
         self.lookback_days_var.set(str(settings.get("lookback_days", "90")))
         self.skip_days_var.set(str(settings.get("skip_days", "5")))
@@ -1147,7 +1155,7 @@ class BacktestingPage(ttk.Frame):
             "backtest_data_root": self.backtest_root_var.get().strip(),
             "notes": self.notes_text.get("1.0", tk.END).strip(),
             "ui_mode": self.ui_mode_var.get().strip() or "basic",
-            "selected_preset": self.preset_var.get().strip() or "custom",
+            "selected_preset": self._preset_display_to_key.get(self.preset_var.get().strip(), "custom"),
             "selected_template": self.template_var.get().strip(),
             **xsmom_params,
         }
