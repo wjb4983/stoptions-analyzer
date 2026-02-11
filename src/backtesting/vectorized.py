@@ -15,8 +15,10 @@ import numpy as np
 
 from .execution import (
     BpsSlippage,
+    ExecutionContext,
     FeeModel,
     LiquidityContext,
+    PartialFillModel,
     ShortBorrowCost,
     SlippageModel,
     ZeroFee,
@@ -89,6 +91,7 @@ class BacktestResult:
     turnover: Any
     cost_breakdown: dict[str, Any]
     metrics: dict[str, float]
+    fills: list[dict[str, float | int | str]]
 
 
 def backtest_vectorized(
@@ -102,6 +105,12 @@ def backtest_vectorized(
     adv: Any | None = None,
     volatility: Any | None = None,
     spread_bps: Any | None = None,
+    order_type: str = "market",
+    latency_bars: int = 0,
+    latency_ms: int = 0,
+    queue_rank_proxy: Any | None = 0.5,
+    available_bar_volume: Any | None = None,
+    max_participation_per_bar: float | None = None,
     weights: Any | None = None,
     initial_equity: float = 1.0,
     execution_mode: ExecutionMode = "optimized",
@@ -142,7 +151,7 @@ def backtest_vectorized(
     portfolio_weights = _normalize_weights(weights, n_assets)
 
     positions = _shift(signal_values, 1)
-    trades = positions - _shift(positions, 1)
+    requested_trades = positions - _shift(positions, 1)
 
     gross_asset_returns = np.zeros_like(price_values, dtype=float)
     gross_asset_returns[1:] = price_values[1:] / price_values[:-1] - 1.0
@@ -158,6 +167,19 @@ def backtest_vectorized(
         adv=adv,
         volatility=volatility,
         spread_bps=spread_bps,
+        queue_rank_proxy=queue_rank_proxy,
+        available_bar_volume=available_bar_volume,
+        max_participation_per_bar=max_participation_per_bar,
+    )
+
+    fill_model = PartialFillModel(max_participation_per_bar=liquidity["max_participation_per_bar"][0, 0])
+    trades, residual_orders, fill_events = fill_model.run(
+        requested_trades,
+        liquidity["available_bar_volume"],
+        order_type=order_type,
+        latency_bars=latency_bars,
+        latency_ms=latency_ms,
+        queue_rank_proxy=float(liquidity["queue_rank_proxy"][0, 0]),
     )
 
     slippage_cost = _estimate_slippage(
@@ -216,6 +238,22 @@ def backtest_vectorized(
         turnover=_to_series(turnover, index),
         cost_breakdown=cost_breakdown,
         metrics=metrics,
+        fills=[
+            {
+                "bar_index": int(evt.bar_index),
+                "asset_index": int(evt.asset_index),
+                "requested_size": float(evt.requested_size),
+                "filled_size": float(evt.filled_size),
+                "residual_size": float(evt.residual_size),
+                "participation_rate": float(evt.participation_rate),
+                "available_volume": float(evt.available_volume),
+                "order_type": str(evt.order_type),
+                "latency_bars": int(evt.latency_bars),
+                "latency_ms": int(evt.latency_ms),
+                "queue_rank_proxy": float(evt.queue_rank_proxy),
+            }
+            for evt in fill_events
+        ],
     )
 
 
@@ -264,7 +302,7 @@ def _estimate_slippage_reference(
                 model.apply(
                     price,
                     float(trade_size),
-                    _build_bar_context(liquidity, idx, asset_idx),
+                    _build_bar_context(liquidity, idx, asset_idx, float(trade_size)),
                 )
             )
             slippage[idx] += (exec_price - price) / price * trade_size * weights[asset_idx]
@@ -319,7 +357,7 @@ def _estimate_fees_reference(
                 model.calculate(
                     float(prices[idx, asset_idx]),
                     float(trade_size),
-                    _build_bar_context(liquidity, idx, asset_idx),
+                    _build_bar_context(liquidity, idx, asset_idx, float(trade_size)),
                 )
             )
             fee_returns[idx] += fee * weights[asset_idx]
@@ -348,6 +386,9 @@ def _build_liquidity_context(
     adv: Any | None,
     volatility: Any | None,
     spread_bps: Any | None,
+    queue_rank_proxy: Any | None,
+    available_bar_volume: Any | None,
+    max_participation_per_bar: float | None,
 ) -> dict[str, np.ndarray]:
     n_periods, n_assets = prices.shape
     volumes_arr = _coerce_liquidity_array(volumes, prices.shape, default=1.0)
@@ -362,11 +403,19 @@ def _build_liquidity_context(
     else:
         volatility_arr = np.where(np.isnan(volatility_arr), _rolling_volatility(prices, window=20), volatility_arr)
     spread_arr = _coerce_liquidity_array(spread_bps, prices.shape, default=2.0)
+    queue_arr = _coerce_liquidity_array(queue_rank_proxy, prices.shape, default=0.5)
+    available_volume_arr = _coerce_liquidity_array(available_bar_volume, prices.shape, default=np.nan)
+    available_volume_arr = np.where(np.isnan(available_volume_arr), volumes_arr, available_volume_arr)
+    max_participation = 1.0 if max_participation_per_bar is None else float(max_participation_per_bar)
+    max_participation_arr = np.full(prices.shape, max_participation, dtype=float)
     return {
         "volume": volumes_arr,
         "adv": adv_arr,
         "volatility": volatility_arr,
         "spread_bps": spread_arr,
+        "queue_rank_proxy": queue_arr,
+        "available_bar_volume": available_volume_arr,
+        "max_participation_per_bar": max_participation_arr,
     }
 
 
@@ -408,14 +457,28 @@ def _rolling_volatility(prices: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
-def _build_bar_context(liquidity: dict[str, np.ndarray], idx: int, asset_idx: int) -> LiquidityContext:
-    return LiquidityContext(
+def _build_bar_context(
+    liquidity: dict[str, np.ndarray],
+    idx: int,
+    asset_idx: int,
+    trade_size: float = 0.0,
+) -> LiquidityContext | ExecutionContext:
+    available = max(float(liquidity["available_bar_volume"][idx, asset_idx]), 1e-12)
+    participation = abs(float(trade_size)) / available if trade_size != 0.0 else 0.0
+    return ExecutionContext(
         bar_index=int(idx),
         asset_index=int(asset_idx),
         volume=float(liquidity["volume"][idx, asset_idx]),
         adv=float(liquidity["adv"][idx, asset_idx]),
         volatility=float(liquidity["volatility"][idx, asset_idx]),
         spread_bps=float(liquidity["spread_bps"][idx, asset_idx]),
+        order_type="market",
+        latency_bars=0,
+        latency_ms=0,
+        queue_rank_proxy=float(liquidity["queue_rank_proxy"][idx, asset_idx]),
+        available_bar_volume=float(liquidity["available_bar_volume"][idx, asset_idx]),
+        max_participation_per_bar=float(liquidity["max_participation_per_bar"][idx, asset_idx]),
+        realized_participation=float(participation),
     )
 
 def _estimate_borrow_cost(

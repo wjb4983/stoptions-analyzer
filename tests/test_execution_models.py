@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from src.backtesting.execution import (
@@ -7,6 +9,8 @@ from src.backtesting.execution import (
     ParticipationImpactSlippage,
     SpreadSlippage,
     VolatilityScaledSlippage,
+    calibrate_impact_coefficient_bps,
+    load_impact_calibration_buckets,
 )
 from src.backtesting.vectorized import backtest_vectorized
 
@@ -18,6 +22,13 @@ def test_spread_slippage_is_side_aware() -> None:
     assert buy > 100.0
     assert sell < 100.0
     assert np.isclose((buy - 100.0) / 100.0, (100.0 - sell) / 100.0)
+
+
+def test_spread_slippage_increases_with_worse_queue_rank() -> None:
+    model = SpreadSlippage(spread_bps=10.0)
+    front = model.apply(100.0, 1.0, {"queue_rank_proxy": 0.0})
+    back = model.apply(100.0, 1.0, {"queue_rank_proxy": 1.0})
+    assert back > front
 
 
 def test_participation_impact_cost_monotonicity() -> None:
@@ -37,11 +48,39 @@ def test_participation_impact_cost_monotonicity() -> None:
     assert high.cost_breakdown["totals"]["slippage"] > low.cost_breakdown["totals"]["slippage"]
 
 
+def test_participation_impact_uses_realized_participation_when_provided() -> None:
+    model = ParticipationImpactSlippage(base_bps=0.0, impact_coefficient_bps=100.0, participation_exponent=1.0)
+    low = model.apply(100.0, 10.0, {"realized_participation": 0.1, "queue_rank_proxy": 0.0})
+    high = model.apply(100.0, 10.0, {"realized_participation": 0.4, "queue_rank_proxy": 0.0})
+    assert high > low
+
+
 def test_volatility_scaled_slippage_increases_with_volatility() -> None:
     model = VolatilityScaledSlippage(base_bps=5.0, target_volatility=0.01)
     low = model.apply(100.0, 1.0, {"volatility": 0.01})
     high = model.apply(100.0, 1.0, {"volatility": 0.05})
     assert high > low
+
+
+def test_volatility_scaled_slippage_penalizes_queue_and_participation() -> None:
+    model = VolatilityScaledSlippage(base_bps=5.0, target_volatility=0.01)
+    relaxed = model.apply(100.0, 1.0, {"volatility": 0.02, "realized_participation": 0.0, "queue_rank_proxy": 0.0})
+    stressed = model.apply(100.0, 1.0, {"volatility": 0.02, "realized_participation": 0.5, "queue_rank_proxy": 1.0})
+    assert stressed > relaxed
+
+
+def test_calibration_helpers_roundtrip(tmp_path) -> None:
+    buckets = [
+        {"participation": 0.1, "slippage_bps": 2.0, "count": 10},
+        {"participation": 0.2, "slippage_bps": 4.0, "count": 10},
+    ]
+    path = tmp_path / "impact_buckets.json"
+    path.write_text(json.dumps(buckets))
+    loaded = load_impact_calibration_buckets(path)
+    coeff = calibrate_impact_coefficient_bps(loaded)
+    model = ParticipationImpactSlippage.from_calibration_buckets(loaded)
+    assert np.isclose(coeff, 20.0)
+    assert np.isclose(model.impact_coefficient_bps, 20.0)
 
 
 def test_asset_class_carry_respects_class_rates() -> None:

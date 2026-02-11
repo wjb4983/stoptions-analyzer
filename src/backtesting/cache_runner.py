@@ -375,6 +375,8 @@ def run_time_series_momentum_backtest(
         random_seed=None,
     )
 
+    fill_rows = list(result.fills)
+
     trade_log_rows = _build_trade_log_rows(
         timestamps=timestamps,
         symbol_order=symbol_order,
@@ -398,6 +400,8 @@ def run_time_series_momentum_backtest(
     )
     (run_dir / "trade_log.csv").write_text(_trade_log_csv(trade_log_rows))
     (run_dir / "trade_log.json").write_text(json.dumps(trade_log_rows, indent=2))
+    (run_dir / "fills.csv").write_text(_fills_csv(fill_rows))
+    (run_dir / "fills.json").write_text(json.dumps(fill_rows, indent=2))
 
     final_report = report_text + "\n\n" + trade_log_summary
     (run_dir / "report.txt").write_text(final_report)
@@ -1398,6 +1402,16 @@ def _trade_log_csv(rows: list[dict[str, object]]) -> str:
     ]
     return "\n".join([header, *body]) + "\n"
 
+
+
+def _fills_csv(rows: list[dict[str, object]]) -> str:
+    header = "bar_index,asset_index,requested_size,filled_size,residual_size,participation_rate,available_volume,order_type,latency_bars,latency_ms,queue_rank_proxy"
+    body = [
+        f"{int(row.get('bar_index', 0))},{int(row.get('asset_index', 0))},{float(row.get('requested_size', 0.0))},{float(row.get('filled_size', 0.0))},{float(row.get('residual_size', 0.0))},{float(row.get('participation_rate', 0.0))},{float(row.get('available_volume', 0.0))},{str(row.get('order_type', 'market'))},{int(row.get('latency_bars', 0))},{int(row.get('latency_ms', 0))},{float(row.get('queue_rank_proxy', 0.5))}"
+        for row in rows
+    ]
+    return "\n".join([header, *body]) + "\n"
+
 def _persist_backtest_outputs(
     *,
     timestamps: np.ndarray,
@@ -1732,6 +1746,17 @@ def _build_slippage_model(*, model_name: str, costs_bps: float, params: dict[str
     if name == "spread":
         return SpreadSlippage(float(cfg.get("spread_bps", costs_bps)))
     if name == "participation":
+        calibration_path = cfg.get("calibration_path")
+        if calibration_path is not None:
+            from backtesting.execution import load_impact_calibration_buckets
+
+            buckets = load_impact_calibration_buckets(str(calibration_path))
+            return ParticipationImpactSlippage.from_calibration_buckets(
+                buckets,
+                base_bps=float(cfg.get("base_bps", 0.0)),
+                participation_exponent=float(cfg.get("participation_exponent", 1.0)),
+                max_participation=float(cfg.get("max_participation", 1.0)),
+            )
         return ParticipationImpactSlippage(
             base_bps=float(cfg.get("base_bps", 0.0)),
             impact_coefficient_bps=float(cfg.get("impact_coefficient_bps", cfg.get("impact_bps", 20.0))),
