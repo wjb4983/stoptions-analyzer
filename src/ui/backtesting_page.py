@@ -18,6 +18,7 @@ ENTRY_SIGNALS = ["ts_momentum", "ma_trend", "breakout"]
 EXIT_SIGNALS = ["none", "momentum_flip", "trailing_stop", "max_hold"]
 STRATEGIES = ["momentum", "xsmom"]
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
+PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization"]
 
 
 class BacktestingPage(ttk.Frame):
@@ -98,6 +99,51 @@ class BacktestingPage(ttk.Frame):
             state="readonly",
             values=TIMEFRAMES,
         ).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Portfolio Method").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_method_var = tk.StringVar(value="equal_weight")
+        ttk.Combobox(
+            strategy_frame,
+            textvariable=self.portfolio_method_var,
+            state="readonly",
+            values=PORTFOLIO_METHODS,
+        ).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Portfolio Vol Lookback").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_vol_lookback_var = tk.StringVar(value="20")
+        ttk.Entry(strategy_frame, textvariable=self.portfolio_vol_lookback_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Target Volatility").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_target_vol_var = tk.StringVar(value="0.10")
+        ttk.Entry(strategy_frame, textvariable=self.portfolio_target_vol_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Max Symbol Weight").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_max_symbol_var = tk.StringVar(value="0.25")
+        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_symbol_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Max Sector Weight").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_max_sector_var = tk.StringVar(value="0.60")
+        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_sector_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Max Gross Exposure").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_max_gross_var = tk.StringVar(value="1.0")
+        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_gross_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Min Net Exposure").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_min_net_var = tk.StringVar(value="-1.0")
+        ttk.Entry(strategy_frame, textvariable=self.portfolio_min_net_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Max Net Exposure").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_max_net_var = tk.StringVar(value="1.0")
+        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_net_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         self.use_walk_forward_var = tk.BooleanVar(value=False)
@@ -257,6 +303,14 @@ class BacktestingPage(ttk.Frame):
         timeframe = str(settings.get("timeframe", "1m"))
         self.timeframe_var.set(timeframe if timeframe in TIMEFRAMES else "1m")
         self.use_walk_forward_var.set(bool(settings.get("use_walk_forward", False)))
+        self.portfolio_method_var.set(str(settings.get("portfolio_method", "equal_weight")))
+        self.portfolio_vol_lookback_var.set(str(settings.get("portfolio_vol_lookback_bars", "20")))
+        self.portfolio_target_vol_var.set(str(settings.get("portfolio_target_volatility", "0.10")))
+        self.portfolio_max_symbol_var.set(str(settings.get("portfolio_max_symbol_weight", "0.25")))
+        self.portfolio_max_sector_var.set(str(settings.get("portfolio_max_sector_weight", "0.60")))
+        self.portfolio_max_gross_var.set(str(settings.get("portfolio_max_gross_exposure", "1.0")))
+        self.portfolio_min_net_var.set(str(settings.get("portfolio_min_net_exposure", "-1.0")))
+        self.portfolio_max_net_var.set(str(settings.get("portfolio_max_net_exposure", "1.0")))
         self.wf_train_bars_var.set(str(settings.get("wf_train_bars", "3900")))
         self.wf_validation_bars_var.set(str(settings.get("wf_validation_bars", "780")))
         self.wf_test_bars_var.set(str(settings.get("wf_test_bars", "780")))
@@ -334,6 +388,14 @@ class BacktestingPage(ttk.Frame):
             "wf_validation_bars": self.wf_validation_bars_var.get().strip() or "780",
             "wf_test_bars": self.wf_test_bars_var.get().strip() or "780",
             "wf_step_bars": self.wf_step_bars_var.get().strip(),
+            "portfolio_method": self.portfolio_method_var.get().strip() or "equal_weight",
+            "portfolio_vol_lookback_bars": self.portfolio_vol_lookback_var.get().strip() or "20",
+            "portfolio_target_volatility": self.portfolio_target_vol_var.get().strip() or "0.10",
+            "portfolio_max_symbol_weight": self.portfolio_max_symbol_var.get().strip() or "0.25",
+            "portfolio_max_sector_weight": self.portfolio_max_sector_var.get().strip() or "0.60",
+            "portfolio_max_gross_exposure": self.portfolio_max_gross_var.get().strip() or "1.0",
+            "portfolio_min_net_exposure": self.portfolio_min_net_var.get().strip() or "-1.0",
+            "portfolio_max_net_exposure": self.portfolio_max_net_var.get().strip() or "1.0",
             "selected_entry_signals": ",".join(selected_entries),
             "selected_exit_signals": ",".join(selected_exits),
             "start_date": self.start_date_var.get().strip(),
@@ -370,6 +432,28 @@ class BacktestingPage(ttk.Frame):
         timeframe = self.timeframe_var.get().strip() or "1m"
         if timeframe not in TIMEFRAMES:
             messagebox.showinfo("Invalid input", "Please select a valid resolution.")
+            return
+
+        parsed_vol_lookback = parse_float(self.portfolio_vol_lookback_var.get())
+        parsed_target_vol = parse_float(self.portfolio_target_vol_var.get())
+        parsed_max_symbol = parse_float(self.portfolio_max_symbol_var.get())
+        parsed_max_sector = parse_float(self.portfolio_max_sector_var.get())
+        parsed_max_gross = parse_float(self.portfolio_max_gross_var.get())
+        parsed_min_net = parse_float(self.portfolio_min_net_var.get())
+        parsed_max_net = parse_float(self.portfolio_max_net_var.get())
+
+        portfolio_cfg = {
+            "portfolio_method": self.portfolio_method_var.get().strip() or "equal_weight",
+            "portfolio_vol_lookback_bars": int(parsed_vol_lookback) if parsed_vol_lookback is not None else 20,
+            "portfolio_target_volatility": float(parsed_target_vol) if parsed_target_vol is not None else 0.10,
+            "portfolio_max_symbol_weight": float(parsed_max_symbol) if parsed_max_symbol is not None else 0.25,
+            "portfolio_max_sector_weight": float(parsed_max_sector) if parsed_max_sector is not None else 0.60,
+            "portfolio_max_gross_exposure": float(parsed_max_gross) if parsed_max_gross is not None else 1.0,
+            "portfolio_min_net_exposure": float(parsed_min_net) if parsed_min_net is not None else -1.0,
+            "portfolio_max_net_exposure": float(parsed_max_net) if parsed_max_net is not None else 1.0,
+        }
+        if portfolio_cfg["portfolio_method"] not in PORTFOLIO_METHODS:
+            messagebox.showinfo("Invalid input", "Please select a valid portfolio method.")
             return
 
         worker_args: tuple[object, ...]
@@ -423,6 +507,7 @@ class BacktestingPage(ttk.Frame):
                     timeframe,
                     selected_entries,
                     selected_exits,
+                    portfolio_cfg,
                 )
                 status_line = f"Running {len(selected_entries) * len(selected_exits)} momentum entry/exit combinations...\n"
         else:
@@ -448,6 +533,7 @@ class BacktestingPage(ttk.Frame):
                 xsmom_bottom_quantile,
                 xsmom_long_only,
                 xsmom_vol_lookback_days,
+                portfolio_cfg,
             )
             status_line = "Running cross-sectional momentum backtest...\n"
 
@@ -590,6 +676,7 @@ class BacktestingPage(ttk.Frame):
         timeframe: str,
         entry_signals: list[str],
         exit_signals: list[str],
+        portfolio_cfg: dict[str, object],
     ) -> None:
         try:
             output_text = run_multi_signal_backtest(
@@ -606,6 +693,7 @@ class BacktestingPage(ttk.Frame):
                 timeframe=timeframe,
                 entry_signals=entry_signals,
                 exit_signals=exit_signals,
+                **portfolio_cfg,
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
@@ -628,6 +716,7 @@ class BacktestingPage(ttk.Frame):
         bottom_quantile: float,
         long_only: bool,
         vol_lookback_days: int,
+        portfolio_cfg: dict[str, object],
     ) -> None:
         try:
             output_text = run_time_series_momentum_backtest(
@@ -647,6 +736,7 @@ class BacktestingPage(ttk.Frame):
                 xsmom_long_only=long_only,
                 xsmom_vol_lookback_days=vol_lookback_days,
                 timeframe=timeframe,
+                **portfolio_cfg,
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
