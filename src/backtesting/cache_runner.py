@@ -30,6 +30,7 @@ from data_access.cache import _safe_ticker_name
 from data_access.engine_loader import EngineArrayBundle, EngineArrayMetadata, load_canonical_price_arrays
 from utils.parsing import build_npz_payload, chunk_results_by_year
 from backtesting.signals import build_targets, parse_entry_signal_config, parse_exit_signal_config, required_lookback_window
+from backtesting.portfolio import PortfolioConstructionConfig, construct_target_weights
 from backtesting.strategies import CrossSectionalMomentumConfig, build_cross_sectional_momentum_targets
 from backtesting.walk_forward import (
     build_walk_forward_folds,
@@ -160,6 +161,15 @@ def run_time_series_momentum_backtest(
     xsmom_long_only: bool = False,
     xsmom_vol_lookback_days: int = 20,
     timeframe: str = "1m",
+    portfolio_method: str = "equal_weight",
+    portfolio_vol_lookback_bars: int = 20,
+    portfolio_target_volatility: float = 0.10,
+    portfolio_max_symbol_weight: float = 0.25,
+    portfolio_max_sector_weight: float = 0.60,
+    portfolio_max_gross_exposure: float = 1.0,
+    portfolio_min_net_exposure: float = -1.0,
+    portfolio_max_net_exposure: float = 1.0,
+    portfolio_sector_map: dict[str, str] | None = None,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     entry_cfg = parse_entry_signal_config(
@@ -239,9 +249,33 @@ def run_time_series_momentum_backtest(
         timeframe=timeframe,
     )
 
+    portfolio_cfg = PortfolioConstructionConfig(
+        method=str(portfolio_method),
+        vol_lookback_bars=int(portfolio_vol_lookback_bars),
+        target_volatility=float(portfolio_target_volatility),
+        max_symbol_weight=float(portfolio_max_symbol_weight),
+        max_sector_weight=float(portfolio_max_sector_weight),
+        max_gross_exposure=float(portfolio_max_gross_exposure),
+        min_net_exposure=float(portfolio_min_net_exposure),
+        max_net_exposure=float(portfolio_max_net_exposure),
+        sector_map=dict(portfolio_sector_map or {}),
+    )
+
+    portfolio_result = construct_target_weights(
+        raw_signals=sized_signals,
+        prices=prices,
+        symbol_order=[
+            symbol
+            for symbol, _idx in sorted(
+                arrays.metadata.symbol_to_column.items(), key=lambda item: item[1]
+            )
+        ],
+        config=portfolio_cfg,
+    )
+
     result = backtest_vectorized(
         prices=prices,
-        signals=sized_signals,
+        signals=portfolio_result.target_weights,
         slippage_model=slippage,
         borrow_cost_model=borrow,
         initial_equity=float(starting_capital),
@@ -282,6 +316,7 @@ def run_time_series_momentum_backtest(
         equity=equity,
         returns=returns,
         trades=trades,
+        risk_diagnostics=portfolio_result.diagnostics,
         metrics=metrics,
     )
 
@@ -323,6 +358,14 @@ def run_time_series_momentum_backtest(
             "xsmom_long_only": xsmom_long_only,
             "xsmom_vol_lookback_days": xsmom_vol_lookback_days,
             "timeframe": timeframe,
+            "portfolio_method": portfolio_method,
+            "portfolio_vol_lookback_bars": portfolio_vol_lookback_bars,
+            "portfolio_target_volatility": portfolio_target_volatility,
+            "portfolio_max_symbol_weight": portfolio_max_symbol_weight,
+            "portfolio_max_sector_weight": portfolio_max_sector_weight,
+            "portfolio_max_gross_exposure": portfolio_max_gross_exposure,
+            "portfolio_min_net_exposure": portfolio_min_net_exposure,
+            "portfolio_max_net_exposure": portfolio_max_net_exposure,
         },
         metrics=metrics,
         drawdown_rows=drawdown_rows,
@@ -470,10 +513,14 @@ def run_walk_forward_backtest(
     entry_grid: dict[str, list[dict[str, Any]]],
     exit_grid: dict[str, list[dict[str, Any]]],
     core_grid: dict[str, list[Any]],
-    train_bars: int,
-    validation_bars: int,
-    test_bars: int,
+    train_bars: int | None = None,
+    validation_bars: int | None = None,
+    test_bars: int | None = None,
     step_bars: int | None = None,
+    train_fraction: float | None = None,
+    validation_fraction: float | None = None,
+    test_fraction: float | None = None,
+    step_fraction: float | None = None,
     score_metric: str = "sharpe",
 ) -> str:
     combos, invalid_rows = generate_sweep_combinations(
@@ -510,12 +557,26 @@ def run_walk_forward_backtest(
     )
     prices = _fill_missing_prices(arrays.close_prices)
 
+    total_bars = int(prices.shape[0])
+    if train_fraction is not None or validation_fraction is not None or test_fraction is not None:
+        if train_fraction is None or validation_fraction is None or test_fraction is None:
+            raise ValueError("train/validation/test fractions must all be provided together")
+        frac_sum = float(train_fraction) + float(validation_fraction) + float(test_fraction)
+        if frac_sum <= 0:
+            raise ValueError("walk-forward fractions must sum to a positive value")
+        train_bars = max(1, int(round(total_bars * float(train_fraction) / frac_sum)))
+        validation_bars = max(1, int(round(total_bars * float(validation_fraction) / frac_sum)))
+        test_bars = max(1, int(round(total_bars * float(test_fraction) / frac_sum)))
+        step_bars = max(1, int(round(total_bars * float(step_fraction if step_fraction is not None else test_fraction))))
+    elif train_bars is None or validation_bars is None or test_bars is None:
+        raise ValueError("Either explicit bar windows or train/validation/test fractions are required")
+
     folds = build_walk_forward_folds(
-        total_bars=prices.shape[0],
-        train_bars=train_bars,
-        validation_bars=validation_bars,
-        test_bars=test_bars,
-        step_bars=step_bars,
+        total_bars=total_bars,
+        train_bars=int(train_bars),
+        validation_bars=int(validation_bars),
+        test_bars=int(test_bars),
+        step_bars=None if step_bars is None else int(step_bars),
     )
     if not folds:
         raise ValueError("No folds generated; increase date range or reduce window sizes")
@@ -555,7 +616,7 @@ def run_walk_forward_backtest(
         equity = _to_numpy_1d(result.equity_curve)
         timestamps = arrays.date_index[start_idx:end_idx]
         equity_rows = [
-            {"timestamp": timestamps[idx].isoformat(), "equity": float(equity[idx])}
+            {"timestamp": _timestamp_to_iso8601(timestamps[idx]), "equity": float(equity[idx])}
             for idx in range(min(len(timestamps), equity.size))
         ]
         return {"metrics": metrics, "equity": equity_rows}
@@ -797,6 +858,15 @@ def run_multi_signal_backtest(
     bet_sizing_mode: str = "half_kelly",
     custom_bet_pct: float = 10.0,
     timeframe: str = "1m",
+    portfolio_method: str = "equal_weight",
+    portfolio_vol_lookback_bars: int = 20,
+    portfolio_target_volatility: float = 0.10,
+    portfolio_max_symbol_weight: float = 0.25,
+    portfolio_max_sector_weight: float = 0.60,
+    portfolio_max_gross_exposure: float = 1.0,
+    portfolio_min_net_exposure: float = -1.0,
+    portfolio_max_net_exposure: float = 1.0,
+    portfolio_sector_map: dict[str, str] | None = None,
 ) -> str:
     """Run all selected entry/exit combinations with shared core parameters."""
 
@@ -832,6 +902,15 @@ def run_multi_signal_backtest(
                     "min_abs_return": 0.01,
                 } if exit_signal == "momentum_flip" else {},
                 timeframe=timeframe,
+                portfolio_method=portfolio_method,
+                portfolio_vol_lookback_bars=portfolio_vol_lookback_bars,
+                portfolio_target_volatility=portfolio_target_volatility,
+                portfolio_max_symbol_weight=portfolio_max_symbol_weight,
+                portfolio_max_sector_weight=portfolio_max_sector_weight,
+                portfolio_max_gross_exposure=portfolio_max_gross_exposure,
+                portfolio_min_net_exposure=portfolio_min_net_exposure,
+                portfolio_max_net_exposure=portfolio_max_net_exposure,
+                portfolio_sector_map=portfolio_sector_map,
             )
             run_dir = _extract_saved_output_dir(report)
             metrics = _load_metrics_from_run_dir(run_dir)
@@ -1236,13 +1315,14 @@ def _persist_backtest_outputs(
     equity: np.ndarray,
     returns: np.ndarray,
     trades: np.ndarray,
+    risk_diagnostics: dict[str, np.ndarray],
     metrics: dict[str, float],
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    time_strings = [datetime.utcfromtimestamp(int(ts) / 1000.0).isoformat() for ts in timestamps]
+    time_strings = [_timestamp_to_iso8601(ts) for ts in timestamps]
 
     _write_series_csv_json(
         run_dir=run_dir,
@@ -1266,6 +1346,14 @@ def _persist_backtest_outputs(
         trades=trades,
     )
 
+
+    _write_risk_diagnostics_csv_json(
+        run_dir=run_dir,
+        timestamps=time_strings,
+        symbol_order=symbol_order,
+        diagnostics=risk_diagnostics,
+    )
+
     metrics_rows = [{"metric": key, "value": float(value)} for key, value in metrics.items()]
     metrics_csv = run_dir / "metrics.csv"
     with metrics_csv.open("w", newline="") as handle:
@@ -1276,6 +1364,37 @@ def _persist_backtest_outputs(
 
     return run_dir
 
+
+
+
+def _timestamp_to_iso8601(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, np.datetime64):
+        nanos = value.astype("datetime64[ns]").astype(np.int64)
+        return datetime.utcfromtimestamp(float(nanos) / 1_000_000_000.0).isoformat()
+
+    if isinstance(value, (np.integer, int, np.floating, float)):
+        numeric = float(value)
+        abs_numeric = abs(numeric)
+        # heuristic based on magnitude: seconds/ms/us/ns epoch
+        if abs_numeric >= 1e17:  # ns
+            seconds = numeric / 1_000_000_000.0
+        elif abs_numeric >= 1e14:  # us
+            seconds = numeric / 1_000_000.0
+        elif abs_numeric >= 1e11:  # ms
+            seconds = numeric / 1_000.0
+        else:  # seconds
+            seconds = numeric
+        return datetime.utcfromtimestamp(seconds).isoformat()
+
+    if hasattr(value, "isoformat"):
+        try:
+            return str(value.isoformat())
+        except Exception:
+            pass
+    return str(value)
 
 def _write_series_csv_json(
     *,
@@ -1322,7 +1441,66 @@ def _write_trades_csv_json(
         writer.writerows(rows)
     (run_dir / "trades.json").write_text(json.dumps(rows, indent=2))
 
+def _write_risk_diagnostics_csv_json(
+    *,
+    run_dir: Path,
+    timestamps: list[str],
+    symbol_order: list[str],
+    diagnostics: dict[str, np.ndarray],
+) -> None:
+    gross = np.asarray(diagnostics.get("gross_exposure", np.zeros(len(timestamps))), dtype=float)
+    net = np.asarray(diagnostics.get("net_exposure", np.zeros(len(timestamps))), dtype=float)
+    concentration = np.asarray(diagnostics.get("concentration", np.zeros(len(timestamps))), dtype=float)
+    leverage = np.asarray(diagnostics.get("leverage_usage", np.zeros(len(timestamps))), dtype=float)
+    turnover = np.asarray(diagnostics.get("turnover", np.zeros(len(timestamps))), dtype=float)
+    turnover_by_symbol = np.asarray(
+        diagnostics.get("turnover_by_symbol", np.zeros((len(timestamps), len(symbol_order)))),
+        dtype=float,
+    )
 
+    rows = []
+    for idx, ts in enumerate(timestamps):
+        row = {
+            "timestamp": ts,
+            "gross_exposure": float(gross[idx]) if idx < gross.size else 0.0,
+            "net_exposure": float(net[idx]) if idx < net.size else 0.0,
+            "concentration": float(concentration[idx]) if idx < concentration.size else 0.0,
+            "leverage_usage": float(leverage[idx]) if idx < leverage.size else 0.0,
+            "turnover": float(turnover[idx]) if idx < turnover.size else 0.0,
+        }
+        rows.append(row)
+
+    csv_path = run_dir / "risk_diagnostics.csv"
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "timestamp",
+                "gross_exposure",
+                "net_exposure",
+                "concentration",
+                "leverage_usage",
+                "turnover",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    (run_dir / "risk_diagnostics.json").write_text(json.dumps(rows, indent=2))
+
+    symbol_rows: list[dict[str, object]] = []
+    for row_idx, ts in enumerate(timestamps):
+        for col_idx, symbol in enumerate(symbol_order):
+            value = 0.0
+            if turnover_by_symbol.ndim == 2 and row_idx < turnover_by_symbol.shape[0] and col_idx < turnover_by_symbol.shape[1]:
+                value = float(turnover_by_symbol[row_idx, col_idx])
+            symbol_rows.append({"timestamp": ts, "symbol": symbol, "turnover": value})
+
+    csv_sym = run_dir / "turnover_by_symbol.csv"
+    with csv_sym.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["timestamp", "symbol", "turnover"])
+        writer.writeheader()
+        writer.writerows(symbol_rows)
+    (run_dir / "turnover_by_symbol.json").write_text(json.dumps(symbol_rows, indent=2))
 
 
 def _build_slippage_model(*, model_name: str, costs_bps: float, params: dict[str, object] | None) -> object:
@@ -1412,6 +1590,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--xsmom-bottom-quantile", type=float, default=0.2)
     run_parser.add_argument("--xsmom-long-only", action="store_true")
     run_parser.add_argument("--xsmom-vol-lookback-days", type=int, default=20)
+    run_parser.add_argument("--portfolio-method", choices=["equal_weight", "vol_target", "inverse_vol", "capped_optimization"], default="equal_weight")
+    run_parser.add_argument("--portfolio-vol-lookback-bars", type=int, default=20)
+    run_parser.add_argument("--portfolio-target-volatility", type=float, default=0.10)
+    run_parser.add_argument("--portfolio-max-symbol-weight", type=float, default=0.25)
+    run_parser.add_argument("--portfolio-max-sector-weight", type=float, default=0.60)
+    run_parser.add_argument("--portfolio-max-gross-exposure", type=float, default=1.0)
+    run_parser.add_argument("--portfolio-min-net-exposure", type=float, default=-1.0)
+    run_parser.add_argument("--portfolio-max-net-exposure", type=float, default=1.0)
 
     sweep_parser = subparsers.add_parser("sweep", help="Run parameter sweep across signal/core grids.")
     _add_common_args(sweep_parser)
@@ -1429,10 +1615,14 @@ def _build_parser() -> argparse.ArgumentParser:
     wf_parser.add_argument("--entry-grid", required=True, help="JSON mapping signal->list[params].")
     wf_parser.add_argument("--exit-grid", required=True, help="JSON mapping signal->list[params].")
     wf_parser.add_argument("--core-grid", required=True, help="JSON mapping core param->list[values].")
-    wf_parser.add_argument("--train-bars", type=int, required=True)
-    wf_parser.add_argument("--validation-bars", type=int, required=True)
-    wf_parser.add_argument("--test-bars", type=int, required=True)
+    wf_parser.add_argument("--train-bars", type=int, required=False)
+    wf_parser.add_argument("--validation-bars", type=int, required=False)
+    wf_parser.add_argument("--test-bars", type=int, required=False)
     wf_parser.add_argument("--step-bars", type=int, default=None)
+    wf_parser.add_argument("--train-fraction", type=float, default=None)
+    wf_parser.add_argument("--validation-fraction", type=float, default=None)
+    wf_parser.add_argument("--test-fraction", type=float, default=None)
+    wf_parser.add_argument("--step-fraction", type=float, default=None)
     wf_parser.add_argument("--score-metric", default="sharpe")
 
     parser.set_defaults(command="run")
@@ -1473,10 +1663,14 @@ def main() -> None:
             entry_grid={str(k): list(v) for k, v in _parse_json_object(args.entry_grid).items()},
             exit_grid={str(k): list(v) for k, v in _parse_json_object(args.exit_grid).items()},
             core_grid={str(k): list(v) for k, v in _parse_json_object(args.core_grid).items()},
-            train_bars=int(args.train_bars),
-            validation_bars=int(args.validation_bars),
-            test_bars=int(args.test_bars),
+            train_bars=None if args.train_bars is None else int(args.train_bars),
+            validation_bars=None if args.validation_bars is None else int(args.validation_bars),
+            test_bars=None if args.test_bars is None else int(args.test_bars),
             step_bars=args.step_bars,
+            train_fraction=args.train_fraction,
+            validation_fraction=args.validation_fraction,
+            test_fraction=args.test_fraction,
+            step_fraction=args.step_fraction,
             score_metric=str(args.score_metric),
         )
     else:
@@ -1506,6 +1700,14 @@ def main() -> None:
             xsmom_long_only=bool(args.xsmom_long_only),
             xsmom_vol_lookback_days=args.xsmom_vol_lookback_days,
             timeframe=str(args.timeframe),
+            portfolio_method=str(args.portfolio_method),
+            portfolio_vol_lookback_bars=int(args.portfolio_vol_lookback_bars),
+            portfolio_target_volatility=float(args.portfolio_target_volatility),
+            portfolio_max_symbol_weight=float(args.portfolio_max_symbol_weight),
+            portfolio_max_sector_weight=float(args.portfolio_max_sector_weight),
+            portfolio_max_gross_exposure=float(args.portfolio_max_gross_exposure),
+            portfolio_min_net_exposure=float(args.portfolio_min_net_exposure),
+            portfolio_max_net_exposure=float(args.portfolio_max_net_exposure),
         )
     print(output)
 
