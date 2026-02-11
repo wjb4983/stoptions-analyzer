@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 
 import numpy as np
 import pytest
 
-from src.data_access.engine_loader import load_canonical_price_arrays
+from src.data_access.engine_loader import load_canonical_price_arrays, validate_engine_dataset_contracts
+from tests.fixtures_datasets import delisting_fixture, pit_membership_fixture
 
 
 def _write_npz(cache_root, symbol: str, year: int, **arrays) -> None:
@@ -104,3 +106,51 @@ def test_loader_minimum_lookback_validation(tmp_path) -> None:
             cache_root=tmp_path,
             lookback_window=2,
         )
+
+
+def test_loader_applies_point_in_time_universe_contract(tmp_path) -> None:
+    fixture = pit_membership_fixture()
+    _write_npz(tmp_path, "AAPL", 2024, **fixture)
+
+    bundle = load_canonical_price_arrays(
+        symbols=["AAPL"],
+        start="2024-01-02T14:30:00+00:00",
+        end="2024-01-02T14:33:00+00:00",
+        cache_root=tmp_path,
+    )
+
+    assert bundle.open_prices.shape == (4, 1)
+    assert bundle.missing_mask[:, 0].tolist() == [True, False, False, True]
+    assert bundle.metadata.coverage_by_symbol["AAPL"] == pytest.approx(1.0)
+
+
+def test_loader_applies_delisting_return_to_terminal_bar(tmp_path) -> None:
+    fixture = delisting_fixture()
+    _write_npz(tmp_path, "AAPL", 2024, **fixture)
+    terminal_path = tmp_path / "AAPL" / "1m" / "terminal.json"
+    terminal_path.write_text(json.dumps({"delisting_return": -1.0}))
+
+    bundle = load_canonical_price_arrays(
+        symbols=["AAPL"],
+        start="2024-01-02T14:30:00+00:00",
+        end="2024-01-02T14:32:00+00:00",
+        cache_root=tmp_path,
+    )
+
+    assert bundle.close_prices[-1, 0] == pytest.approx(0.0)
+
+
+def test_dataset_contracts_validation_summary_contains_exclusions(tmp_path) -> None:
+    fixture = pit_membership_fixture()
+    _write_npz(tmp_path, "AAPL", 2024, **fixture)
+
+    bundle = load_canonical_price_arrays(
+        symbols=["AAPL", "MSFT"],
+        start="2024-01-02T14:30:00+00:00",
+        end="2024-01-02T14:33:00+00:00",
+        cache_root=tmp_path,
+    )
+    summary = validate_engine_dataset_contracts(bundle)
+
+    assert "MSFT" in summary.excluded_symbols
+    assert summary.missingness_by_symbol["AAPL"] == pytest.approx(0.5)

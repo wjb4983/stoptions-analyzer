@@ -84,6 +84,7 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "trade_log.csv",
         "trade_log.json",
         "report.txt",
+        "dataset_quality_audit.json",
     ]:
         assert (run_dir / name).exists(), name
 
