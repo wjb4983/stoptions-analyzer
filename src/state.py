@@ -16,6 +16,7 @@ class AppState:
     backtest_settings: dict[str, object] = field(
         default_factory=lambda: dict(DEFAULT_BACKTEST_SETTINGS)
     )
+    backtest_templates: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def save(self) -> None:
         payload = {
@@ -25,6 +26,7 @@ class AppState:
             "option_strategy": self.option_strategy,
             "general_analysis_settings": self.general_analysis_settings,
             "backtest_settings": self.backtest_settings,
+            "backtest_templates": self.backtest_templates,
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2))
 
@@ -47,4 +49,5 @@ class AppState:
             backtest_settings=payload.get(
                 "backtest_settings", dict(DEFAULT_BACKTEST_SETTINGS)
             ),
+            backtest_templates=payload.get("backtest_templates", {}),
         )

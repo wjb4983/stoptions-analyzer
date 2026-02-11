@@ -13,7 +13,7 @@ from backtesting.cache_runner import (
     run_time_series_momentum_backtest,
     run_walk_forward_backtest,
 )
-from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, DEFAULT_BACKTEST_SETTINGS
+from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PRESETS, DEFAULT_BACKTEST_SETTINGS
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
 ENTRY_SIGNALS = ["ts_momentum", "ma_trend", "breakout"]
@@ -22,12 +22,16 @@ STRATEGIES = ["momentum", "xsmom"]
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization"]
 
+TIMEFRAME_MIN_LOOKBACK = {"1m": 120, "5m": 80, "15m": 60, "30m": 40, "1h": 30, "1d": 20}
+TIMEFRAME_HISTORY_DAYS = {"1m": 14, "5m": 30, "15m": 60, "30m": 120, "1h": 365, "1d": 3650}
 
 class BacktestingPage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
         super().__init__(parent)
         self.controller = controller
         self._updating_wf_fractions = False
+        self._advanced_widgets: dict[str, tk.Widget] = {}
+        self._validation_messages: list[str] = []
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -68,11 +72,50 @@ class BacktestingPage(ttk.Frame):
 
         run_setup_tab = ttk.Frame(self.section_notebook)
         run_setup_tab.columnconfigure(0, weight=1)
-        run_setup_tab.rowconfigure(1, weight=1)
+        run_setup_tab.rowconfigure(3, weight=1)
         self.section_notebook.add(run_setup_tab, text="Run Setup")
 
+        ttk.Label(
+            run_setup_tab,
+            text="Workflow Mode & Presets",
+            font=("Arial", 12, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+        ttk.Label(
+            run_setup_tab,
+            text="Choose Basic/Advanced mode and optionally apply a preset before tuning strategy fields.",
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 6))
+
+        self.ui_mode_var = tk.StringVar(value="basic")
+        self.preset_var = tk.StringVar(value="Custom")
+        self._preset_display_to_key = {"Custom": "custom"}
+        for preset_key, preset_cfg in BACKTEST_STRATEGY_PRESETS.items():
+            display = f"{preset_cfg.get('label', preset_key)} ({preset_key})"
+            self._preset_display_to_key[display] = preset_key
+        self._preset_key_to_display = {value: key for key, value in self._preset_display_to_key.items()}
+
+        workflow_frame = ttk.LabelFrame(run_setup_tab, text="Workflow Mode & Presets")
+        workflow_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 8))
+        workflow_frame.columnconfigure(1, weight=1)
+        ttk.Label(workflow_frame, text="Mode").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        mode_row = ttk.Frame(workflow_frame)
+        mode_row.grid(row=0, column=1, sticky="w", padx=8, pady=6)
+        ttk.Radiobutton(mode_row, text="Basic", value="basic", variable=self.ui_mode_var, command=self._on_mode_changed).pack(side="left")
+        ttk.Radiobutton(mode_row, text="Advanced", value="advanced", variable=self.ui_mode_var, command=self._on_mode_changed).pack(side="left", padx=(8, 0))
+
+        ttk.Label(workflow_frame, text="Preset").grid(row=1, column=0, sticky="w", padx=8, pady=6)
+        preset_values = list(self._preset_display_to_key.keys())
+        self.preset_combo = ttk.Combobox(
+            workflow_frame,
+            textvariable=self.preset_var,
+            state="readonly",
+            values=preset_values,
+        )
+        self.preset_combo.grid(row=1, column=1, sticky="ew", padx=8, pady=6)
+        self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
+
         strategy_frame = ttk.LabelFrame(run_setup_tab, text="Strategy")
-        strategy_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        strategy_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=10)
         strategy_frame.columnconfigure(1, weight=1)
 
         row = 0
@@ -120,7 +163,8 @@ class BacktestingPage(ttk.Frame):
         row += 1
         ttk.Label(strategy_frame, text="Custom Bet %").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.custom_bet_pct_var = tk.StringVar()
-        ttk.Entry(strategy_frame, textvariable=self.custom_bet_pct_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.custom_bet_pct_entry = ttk.Entry(strategy_frame, textvariable=self.custom_bet_pct_var)
+        self.custom_bet_pct_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Resolution").grid(row=row, column=0, sticky="w", padx=8, pady=6)
@@ -135,55 +179,65 @@ class BacktestingPage(ttk.Frame):
         row += 1
         ttk.Label(strategy_frame, text="Portfolio Method").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_method_var = tk.StringVar(value="equal_weight")
-        ttk.Combobox(
+        self.portfolio_method_combo = ttk.Combobox(
             strategy_frame,
             textvariable=self.portfolio_method_var,
             state="readonly",
             values=PORTFOLIO_METHODS,
-        ).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        )
+        self.portfolio_method_combo.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Portfolio Vol Lookback").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_vol_lookback_var = tk.StringVar(value="20")
-        ttk.Entry(strategy_frame, textvariable=self.portfolio_vol_lookback_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.portfolio_vol_lookback_entry = ttk.Entry(strategy_frame, textvariable=self.portfolio_vol_lookback_var)
+        self.portfolio_vol_lookback_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Target Volatility").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_target_vol_var = tk.StringVar(value="0.10")
-        ttk.Entry(strategy_frame, textvariable=self.portfolio_target_vol_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.portfolio_target_vol_entry = ttk.Entry(strategy_frame, textvariable=self.portfolio_target_vol_var)
+        self.portfolio_target_vol_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Max Symbol Weight").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_max_symbol_var = tk.StringVar(value="0.25")
-        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_symbol_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.portfolio_max_symbol_entry = ttk.Entry(strategy_frame, textvariable=self.portfolio_max_symbol_var)
+        self.portfolio_max_symbol_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Max Sector Weight").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_max_sector_var = tk.StringVar(value="0.60")
-        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_sector_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.portfolio_max_sector_entry = ttk.Entry(strategy_frame, textvariable=self.portfolio_max_sector_var)
+        self.portfolio_max_sector_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Max Gross Exposure").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_max_gross_var = tk.StringVar(value="1.0")
-        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_gross_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.portfolio_max_gross_entry = ttk.Entry(strategy_frame, textvariable=self.portfolio_max_gross_var)
+        self.portfolio_max_gross_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Min Net Exposure").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_min_net_var = tk.StringVar(value="-1.0")
-        ttk.Entry(strategy_frame, textvariable=self.portfolio_min_net_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.portfolio_min_net_entry = ttk.Entry(strategy_frame, textvariable=self.portfolio_min_net_var)
+        self.portfolio_min_net_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Max Net Exposure").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_max_net_var = tk.StringVar(value="1.0")
-        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_net_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.portfolio_max_net_entry = ttk.Entry(strategy_frame, textvariable=self.portfolio_max_net_var)
+        self.portfolio_max_net_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         self.use_walk_forward_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.use_walk_forward_check = ttk.Checkbutton(
             strategy_frame,
             text="Use Walk-Forward (Momentum)",
             variable=self.use_walk_forward_var,
-        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=6)
+            command=self._update_validation_hint,
+        )
+        self.use_walk_forward_check.grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=6)
 
         row += 1
         ttk.Label(
@@ -281,14 +335,36 @@ class BacktestingPage(ttk.Frame):
         self.backtest_root_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.backtest_root_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
+        row += 1
+        self.validation_hint_var = tk.StringVar(value="")
+        self.validation_hint_label = ttk.Label(
+            strategy_frame,
+            textvariable=self.validation_hint_var,
+            foreground="#995500",
+            wraplength=620,
+            justify="left",
+        )
+        self.validation_hint_label.grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 8))
+
+        row += 1
+        template_row = ttk.Frame(strategy_frame)
+        template_row.grid(row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
+        template_row.columnconfigure(1, weight=1)
+        ttk.Label(template_row, text="Experiment Template").grid(row=0, column=0, sticky="w")
+        self.template_var = tk.StringVar(value="")
+        self.template_combo = ttk.Combobox(template_row, textvariable=self.template_var, state="normal", values=[])
+        self.template_combo.grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        ttk.Button(template_row, text="Load Template", command=self.load_template).grid(row=0, column=2, padx=(0, 6))
+        ttk.Button(template_row, text="Save as Experiment Template", command=self.save_template).grid(row=0, column=3)
+
         notes_frame = ttk.LabelFrame(run_setup_tab, text="Run Notes")
-        notes_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        notes_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=10)
         notes_frame.columnconfigure(0, weight=1)
         self.notes_text = tk.Text(notes_frame, height=14)
         self.notes_text.grid(row=0, column=0, sticky="nsew", padx=8, pady=6)
 
         button_row = ttk.Frame(run_setup_tab)
-        button_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 10))
+        button_row.grid(row=5, column=0, sticky="ew", padx=10, pady=(4, 10))
         button_row.columnconfigure(0, weight=1)
         button_row.columnconfigure(1, weight=1)
         button_row.columnconfigure(2, weight=1)
@@ -302,8 +378,13 @@ class BacktestingPage(ttk.Frame):
             command=lambda: controller.show_frame("MainMenu"),
         ).grid(row=0, column=2, padx=10, pady=4)
 
+        self._register_advanced_widgets()
+        self._bind_validation_watchers()
         self._build_results_tabs()
         self._on_strategy_changed()
+        self._on_mode_changed()
+        self._refresh_template_choices()
+        self._update_validation_hint()
 
     def _on_page_canvas_configure(self, event: tk.Event) -> None:
         self.page_canvas.itemconfigure(self._page_canvas_window, width=event.width)
@@ -824,6 +905,136 @@ class BacktestingPage(ttk.Frame):
             self.xsmom_options_frame.grid_remove()
             self.momentum_options_frame.grid()
             self.walk_forward_frame.grid()
+        self._update_validation_hint()
+
+    def _register_advanced_widgets(self) -> None:
+        self._advanced_widgets = {
+            "custom_bet_pct": self.custom_bet_pct_entry,
+            "portfolio_method": self.portfolio_method_combo,
+            "portfolio_vol_lookback": self.portfolio_vol_lookback_entry,
+            "portfolio_target_vol": self.portfolio_target_vol_entry,
+            "portfolio_max_symbol": self.portfolio_max_symbol_entry,
+            "portfolio_max_sector": self.portfolio_max_sector_entry,
+            "portfolio_max_gross": self.portfolio_max_gross_entry,
+            "portfolio_min_net": self.portfolio_min_net_entry,
+            "portfolio_max_net": self.portfolio_max_net_entry,
+            "use_walk_forward": self.use_walk_forward_check,
+            "walk_forward_frame": self.walk_forward_frame,
+        }
+
+    def _bind_validation_watchers(self) -> None:
+        for var in (
+            self.lookback_days_var,
+            self.skip_days_var,
+            self.timeframe_var,
+            self.start_date_var,
+            self.end_date_var,
+            self.strategy_var,
+            self.use_walk_forward_var,
+        ):
+            var.trace_add("write", lambda *_args: self._update_validation_hint())
+
+    def _on_mode_changed(self) -> None:
+        is_advanced = self.ui_mode_var.get() == "advanced"
+        state = "normal" if is_advanced else "disabled"
+        for key, widget in self._advanced_widgets.items():
+            if key == "walk_forward_frame":
+                if is_advanced and self.strategy_var.get().strip() == "momentum":
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+                continue
+            try:
+                widget.config(state=state)
+            except tk.TclError:
+                pass
+        if not is_advanced:
+            self.use_walk_forward_var.set(False)
+        self._update_validation_hint()
+
+    def _update_validation_hint(self) -> bool:
+        messages: list[str] = []
+        disable_run = False
+        timeframe = self.timeframe_var.get().strip() or "1m"
+        lookback = parse_float(self.lookback_days_var.get())
+        start_date = parse_date(self.start_date_var.get())
+        end_date = parse_date(self.end_date_var.get())
+
+        if timeframe in TIMEFRAME_MIN_LOOKBACK and lookback is not None:
+            min_lookback = TIMEFRAME_MIN_LOOKBACK[timeframe]
+            if int(lookback) < min_lookback:
+                messages.append(f"{timeframe} usually needs lookback >= {min_lookback} bars for stable signals.")
+                disable_run = True
+
+        if timeframe in TIMEFRAME_HISTORY_DAYS and start_date is not None and end_date is not None and start_date < end_date:
+            requested_days = (end_date - start_date).days
+            needed_days = TIMEFRAME_HISTORY_DAYS[timeframe]
+            if requested_days < needed_days:
+                messages.append(
+                    f"Selected window has {requested_days} days; {timeframe} commonly needs {needed_days}+ days of history."
+                )
+
+        if bool(self.use_walk_forward_var.get()) and self.ui_mode_var.get() != "advanced":
+            messages.append("Walk-forward requires Advanced mode.")
+            disable_run = True
+
+        self._validation_messages = messages
+        self.validation_hint_var.set("\n".join(messages))
+        self.run_button.config(state="disabled" if disable_run else "normal")
+        return disable_run
+
+    def _refresh_template_choices(self) -> None:
+        names = sorted(self.controller.state.backtest_templates.keys())
+        self.template_combo.configure(values=names)
+        selected = self.template_var.get().strip()
+        if selected and selected not in names:
+            self.template_var.set("")
+
+    def _apply_settings(self, settings: dict[str, object]) -> None:
+        merged = dict(DEFAULT_BACKTEST_SETTINGS)
+        merged.update(settings)
+        self.controller.state.backtest_settings = merged
+        self.refresh()
+
+    def _on_preset_selected(self, _event: object | None = None) -> None:
+        preset_display = self.preset_var.get().strip()
+        preset_key = self._preset_display_to_key.get(preset_display, "custom")
+        if preset_key == "custom":
+            return
+        preset = BACKTEST_STRATEGY_PRESETS.get(preset_key)
+        if not preset:
+            return
+        preset_settings = preset.get("settings", {})
+        if isinstance(preset_settings, dict):
+            self._apply_settings(preset_settings)
+            self.preset_var.set(self._preset_key_to_display.get(preset_key, "Custom"))
+            self.controller.state.backtest_settings["selected_preset"] = preset_key
+            self.controller.persist_state()
+
+    def save_template(self) -> None:
+        template_name = self.template_var.get().strip()
+        if not template_name:
+            messagebox.showinfo("Template name required", "Choose a template name in the Experiment Template field.")
+            return
+        if not self.save_settings(show_confirmation=False):
+            return
+        snapshot = dict(self.controller.state.backtest_settings)
+        self.controller.state.backtest_templates[template_name] = snapshot
+        self.controller.state.backtest_settings["selected_template"] = template_name
+        self.controller.persist_state()
+        self._refresh_template_choices()
+        messagebox.showinfo("Saved", f"Template '{template_name}' saved.")
+
+    def load_template(self) -> None:
+        template_name = self.template_var.get().strip()
+        template = self.controller.state.backtest_templates.get(template_name)
+        if template is None:
+            messagebox.showinfo("Template missing", "Select a saved template first.")
+            return
+        self._apply_settings(template)
+        self.controller.state.backtest_settings["selected_template"] = template_name
+        self.controller.persist_state()
+        messagebox.showinfo("Loaded", f"Template '{template_name}' loaded.")
 
     def refresh(self) -> None:
         settings = dict(DEFAULT_BACKTEST_SETTINGS)
@@ -833,6 +1044,11 @@ class BacktestingPage(ttk.Frame):
         if strategy not in STRATEGIES:
             strategy = "momentum"
         self.strategy_var.set(strategy)
+        self.ui_mode_var.set(str(settings.get("ui_mode", "basic")))
+        selected_preset = str(settings.get("selected_preset", "custom"))
+        if selected_preset not in {"custom", *BACKTEST_STRATEGY_PRESETS.keys()}:
+            selected_preset = "custom"
+        self.preset_var.set(self._preset_key_to_display.get(selected_preset, "Custom"))
 
         self.lookback_days_var.set(str(settings.get("lookback_days", "90")))
         self.skip_days_var.set(str(settings.get("skip_days", "5")))
@@ -872,17 +1088,21 @@ class BacktestingPage(ttk.Frame):
         self.start_date_var.set(str(settings.get("start_date", "")))
         self.end_date_var.set(str(settings.get("end_date", "")))
         self.backtest_root_var.set(str(settings.get("backtest_data_root", str(BACKTEST_CACHE_DIR))))
+        self.template_var.set(str(settings.get("selected_template", "")))
 
         self.notes_text.delete("1.0", tk.END)
         self.notes_text.insert("1.0", str(settings.get("notes", "")))
         self.logs_text.delete("1.0", tk.END)
         self.logs_text.insert("1.0", str(settings.get("notes", "")))
+        self._refresh_template_choices()
         self._on_strategy_changed()
+        self._on_mode_changed()
+        self._update_validation_hint()
 
-    def save_settings(self) -> None:
+    def save_settings(self, show_confirmation: bool = True) -> bool:
         validated = self._validate_common_inputs()
         if validated is None:
-            return
+            return False
 
         strategy, lookback, skip, costs_bps, starting_capital, custom_bet_pct = validated
 
@@ -900,14 +1120,14 @@ class BacktestingPage(ttk.Frame):
             selected_exits = self._selected_signal_names(self.exit_signal_vars)
             if not selected_entries:
                 messagebox.showinfo("Invalid input", "Select at least one entry signal.")
-                return
+                return False
             if not selected_exits:
                 messagebox.showinfo("Invalid input", "Select at least one exit signal.")
-                return
+                return False
         else:
             xsmom_valid = self._validate_xsmom_inputs()
             if xsmom_valid is None:
-                return
+                return False
             xsmom_top_quantile, xsmom_bottom_quantile, xsmom_vol_lookback_days = xsmom_valid
             xsmom_params = {
                 "xsmom_top_quantile": str(xsmom_top_quantile),
@@ -945,12 +1165,22 @@ class BacktestingPage(ttk.Frame):
             "end_date": self.end_date_var.get().strip(),
             "backtest_data_root": self.backtest_root_var.get().strip(),
             "notes": self.notes_text.get("1.0", tk.END).strip(),
+            "ui_mode": self.ui_mode_var.get().strip() or "basic",
+            "selected_preset": self._preset_display_to_key.get(self.preset_var.get().strip(), "custom"),
+            "selected_template": self.template_var.get().strip(),
             **xsmom_params,
         }
         self.controller.persist_state()
-        messagebox.showinfo("Saved", "Backtesting parameters saved.")
+        self._refresh_template_choices()
+        if show_confirmation:
+            messagebox.showinfo("Saved", "Backtesting parameters saved.")
+        return True
 
     def run_backtest(self) -> None:
+        if self._update_validation_hint():
+            messagebox.showinfo("Validation warning", "Resolve validation hints before running the backtest.")
+            return
+
         tickers = list(self.controller.state.tickers)
         if not tickers:
             messagebox.showinfo("No tickers", "Add tickers before running a backtest.")
@@ -1114,6 +1344,15 @@ class BacktestingPage(ttk.Frame):
             return None
         if custom_bet_pct is None or custom_bet_pct <= 0:
             messagebox.showinfo("Invalid input", "Custom bet % must be > 0.")
+            return None
+
+        timeframe = self.timeframe_var.get().strip() or "1m"
+        if timeframe not in TIMEFRAMES:
+            messagebox.showinfo("Invalid input", "Please select a valid resolution.")
+            return None
+        min_lookback = TIMEFRAME_MIN_LOOKBACK.get(timeframe)
+        if min_lookback is not None and int(lookback) < min_lookback:
+            messagebox.showinfo("Invalid input", f"{timeframe} requires lookback >= {min_lookback} bars.")
             return None
 
         return (
