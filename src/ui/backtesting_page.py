@@ -351,7 +351,8 @@ class BacktestingPage(ttk.Frame):
 
         self.run_listbox = tk.Listbox(leaderboard_tab, selectmode="extended", exportselection=False, height=5)
         self.run_listbox.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
-        self.run_listbox.bind("<<ListboxSelect>>", lambda _event: self._on_compare_selection_changed())
+        self._selection_job: str | None = None
+        self.run_listbox.bind("<<ListboxSelect>>", self._on_run_selection_event)
 
         compare_row = ttk.Frame(leaderboard_tab)
         compare_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 4))
@@ -374,11 +375,17 @@ class BacktestingPage(ttk.Frame):
         equity_tab.rowconfigure(1, weight=1)
         self.section_notebook.add(equity_tab, text="Equity/Drawdown charts")
 
-        self.equity_overlap_text = tk.Text(equity_tab, height=12)
-        self.equity_overlap_text.grid(row=0, column=0, sticky="ew", padx=10, pady=6)
+        self.chart_status_var = tk.StringVar(value="Select one or more runs to visualize equity and drawdown.")
+        ttk.Label(equity_tab, textvariable=self.chart_status_var, justify="left").grid(row=0, column=0, sticky="ew", padx=10, pady=(6, 0))
+
+        self.equity_canvas = tk.Canvas(equity_tab, height=240, bg="#ffffff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.equity_canvas.grid(row=1, column=0, sticky="nsew", padx=10, pady=6)
+        self.equity_canvas.bind("<Configure>", lambda _event: self._update_equity_overlap(self._last_equity_run_dirs))
 
         self.drawdown_tree = ttk.Treeview(equity_tab, show="headings", height=12)
-        self.drawdown_tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        self.drawdown_tree.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        equity_tab.rowconfigure(2, weight=1)
+        self._last_equity_run_dirs: list[Path] = []
 
         trades_tab = ttk.Frame(self.section_notebook)
         trades_tab.columnconfigure(0, weight=1)
@@ -451,7 +458,13 @@ class BacktestingPage(ttk.Frame):
             if idx in selected:
                 self.run_listbox.selection_set(idx)
 
+    def _on_run_selection_event(self, _event: tk.Event) -> None:
+        if self._selection_job is not None:
+            self.after_cancel(self._selection_job)
+        self._selection_job = self.after(40, self._on_compare_selection_changed)
+
     def _on_compare_selection_changed(self) -> None:
+        self._selection_job = None
         selected = [self.current_run_dirs[idx] for idx in self.run_listbox.curselection() if idx < len(self.current_run_dirs)]
         if len(selected) == 1:
             self._render_single_run(selected[0])
@@ -477,18 +490,83 @@ class BacktestingPage(ttk.Frame):
         self._update_equity_overlap(selected)
 
     def _update_equity_overlap(self, run_dirs: list[Path]) -> None:
-        snippets: list[str] = []
-        for run_dir in run_dirs:
+        self._last_equity_run_dirs = list(run_dirs)
+        self.equity_canvas.delete("all")
+        width = max(10, int(self.equity_canvas.winfo_width()))
+        height = max(10, int(self.equity_canvas.winfo_height()))
+        if width <= 20 or height <= 20:
+            return
+
+        margin_left = 50
+        margin_right = 12
+        margin_top = 12
+        margin_bottom = 20
+        plot_w = max(10, width - margin_left - margin_right)
+        plot_h = max(10, height - margin_top - margin_bottom)
+
+        palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+        curves: list[tuple[str, list[float], str]] = []
+        for idx, run_dir in enumerate(run_dirs):
             equity_rows = self._load_rows(run_dir, "equity")
             if not equity_rows:
                 continue
-            samples = equity_rows[-5:]
-            sample_text = ", ".join(
-                f"{row.get('timestamp', '')}:{float(row.get('equity', 0.0)):.4f}" for row in samples
-            )
-            snippets.append(f"{run_dir.name}: {sample_text}")
-        self.equity_overlap_text.delete("1.0", tk.END)
-        self.equity_overlap_text.insert("1.0", "\n".join(snippets) if snippets else "No overlapping equity data.")
+            values: list[float] = []
+            for row in equity_rows:
+                value = self._safe_float(row.get("equity"))
+                if value is not None:
+                    values.append(value)
+            if values:
+                curves.append((run_dir.name, values, palette[idx % len(palette)]))
+
+        if not curves:
+            self.chart_status_var.set("No equity series available for selected runs.")
+            self.equity_canvas.create_text(width // 2, height // 2, text="No equity data", fill="#777")
+            return
+
+        all_values = [v for _name, series, _color in curves for v in series]
+        min_v = min(all_values)
+        max_v = max(all_values)
+        if max_v <= min_v:
+            max_v = min_v + 1.0
+
+        self.equity_canvas.create_rectangle(
+            margin_left,
+            margin_top,
+            margin_left + plot_w,
+            margin_top + plot_h,
+            outline="#d0d0d0",
+        )
+
+        def map_x(i: int, n: int) -> float:
+            if n <= 1:
+                return margin_left
+            return margin_left + (i / (n - 1)) * plot_w
+
+        def map_y(v: float) -> float:
+            return margin_top + (1.0 - (v - min_v) / (max_v - min_v)) * plot_h
+
+        legend_y = margin_top + 8
+        for name, series, color in curves[:6]:
+            points: list[float] = []
+            for i, value in enumerate(series):
+                points.extend([map_x(i, len(series)), map_y(value)])
+            if len(points) >= 4:
+                self.equity_canvas.create_line(*points, fill=color, width=1.8)
+            self.equity_canvas.create_rectangle(margin_left + plot_w - 170, legend_y - 6, margin_left + plot_w - 158, legend_y + 6, fill=color, outline=color)
+            self.equity_canvas.create_text(margin_left + plot_w - 154, legend_y, anchor="w", text=name[:30], fill="#222")
+            legend_y += 16
+
+        self.equity_canvas.create_text(8, margin_top + 2, anchor="nw", text=f"{max_v:.2f}", fill="#666")
+        self.equity_canvas.create_text(8, margin_top + plot_h - 10, anchor="nw", text=f"{min_v:.2f}", fill="#666")
+        self.chart_status_var.set(f"Showing overlap for {len(curves)} run(s).")
+
+    def _safe_float(self, value: object) -> float | None:
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _load_metric_map(self, run_dir: Path) -> dict[str, float]:
         metrics_path = run_dir / "metrics.json"
@@ -629,14 +707,15 @@ class BacktestingPage(ttk.Frame):
         self.current_run_dirs = merged
 
     def _format_run_label(self, run_dir: Path) -> str:
-        metrics = self._load_metric_map(run_dir)
-        sharpe = metrics.get("sharpe")
-        ret = metrics.get("total_return")
         parts = [run_dir.name]
-        if ret is not None:
-            parts.append(f"ret={ret:.4f}")
-        if sharpe is not None:
-            parts.append(f"sharpe={sharpe:.4f}")
+        manifest = self._read_json(run_dir / "manifest.json")
+        if isinstance(manifest, dict):
+            strategy = manifest.get("strategy")
+            timeframe = manifest.get("timeframe")
+            if isinstance(strategy, str) and strategy:
+                parts.append(strategy)
+            if isinstance(timeframe, str) and timeframe:
+                parts.append(timeframe)
         return " | ".join(parts)
 
     def _refresh_wf_fraction_labels(self) -> None:
