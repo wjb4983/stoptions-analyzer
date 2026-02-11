@@ -15,11 +15,11 @@ import numpy as np
 
 from .execution import (
     BpsSlippage,
+    CarryContext,
     ExecutionContext,
     FeeModel,
     LiquidityContext,
     PartialFillModel,
-    ShortBorrowCost,
     SlippageModel,
     ZeroFee,
     ZeroSlippage,
@@ -116,6 +116,15 @@ def backtest_vectorized(
     execution_mode: ExecutionMode = "optimized",
     timeframe: str | None = None,
     periods_per_year: float | None = None,
+    carry_asset_classes: list[str] | tuple[str, ...] | None = None,
+    carry_expiry_by_asset: list[str | None] | tuple[str | None, ...] | None = None,
+    carry_multipliers: list[float] | tuple[float, ...] | None = None,
+    carry_borrow_availability_tiers: list[str] | tuple[str, ...] | None = None,
+    carry_financing_benchmarks: list[str] | tuple[str, ...] | None = None,
+    borrow_rate_series: Any | None = None,
+    borrow_available_flags: Any | None = None,
+    symbols: list[str] | tuple[str, ...] | None = None,
+    dates: Any | None = None,
 ) -> BacktestResult:
     """Run a pure vectorized backtest with next-open execution.
 
@@ -159,7 +168,20 @@ def backtest_vectorized(
 
     execution_model = slippage_model or ZeroSlippage()
     fees = fee_model or ZeroFee()
-    borrow_costs = borrow_cost_model or ShortBorrowCost(0.0)
+    borrow_costs = borrow_cost_model
+    if borrow_costs is None:
+        from .execution import CarryModel
+
+        borrow_costs = CarryModel(
+            asset_classes=carry_asset_classes or ["equity"] * n_assets,
+            expiry_by_asset=carry_expiry_by_asset,
+            multipliers=carry_multipliers,
+            borrow_availability_tiers=carry_borrow_availability_tiers,
+            financing_benchmarks=carry_financing_benchmarks,
+            borrow_rate_series=np.asarray(borrow_rate_series, dtype=float) if borrow_rate_series is not None else None,
+            borrow_available_flags=np.asarray(borrow_available_flags, dtype=bool) if borrow_available_flags is not None else None,
+            periods_per_year=_resolve_periods_per_year(timeframe=timeframe, periods_per_year=periods_per_year),
+        )
 
     liquidity = _build_liquidity_context(
         prices=price_values,
@@ -198,7 +220,21 @@ def backtest_vectorized(
         mode=execution_mode,
         liquidity=liquidity,
     )
-    borrow_cost = _estimate_borrow_cost(positions, borrow_costs, portfolio_weights)
+    carry_result = _estimate_borrow_cost(
+        positions,
+        borrow_costs,
+        portfolio_weights,
+        dates=np.asarray(dates) if dates is not None else None,
+        symbols=tuple(symbols) if symbols is not None else None,
+        metadata={
+            "asset_classes": list(carry_asset_classes or ["equity"] * n_assets),
+            "expiry": list(carry_expiry_by_asset or [None] * n_assets),
+            "multipliers": list(carry_multipliers or [1.0] * n_assets),
+            "borrow_availability_tiers": list(carry_borrow_availability_tiers or ["normal"] * n_assets),
+            "financing_benchmarks": list(carry_financing_benchmarks or ["overnight"] * n_assets),
+        },
+    )
+    borrow_cost = carry_result["portfolio"]
 
     net_returns = gross_returns - slippage_cost - fee_cost - borrow_cost
 
@@ -219,6 +255,8 @@ def backtest_vectorized(
         "slippage": _to_series(slippage_cost, index),
         "fees": _to_series(fee_cost, index),
         "borrow": _to_series(borrow_cost, index),
+        "borrow_by_asset": _to_aligned_output(carry_result["weighted_by_asset"], index),
+        "carry_attribution_by_asset": _to_aligned_output(carry_result["raw_by_asset"], index),
         "total": _to_series(slippage_cost + fee_cost + borrow_cost, index),
         "totals": {
             "slippage": float(np.sum(slippage_cost)),
@@ -483,11 +521,26 @@ def _build_bar_context(
 
 def _estimate_borrow_cost(
     positions: np.ndarray,
-    model: ShortBorrowCost,
+    model: Any,
     weights: np.ndarray,
-) -> np.ndarray:
-    borrow_by_asset = model.calculate(positions)
-    return np.sum(borrow_by_asset * weights, axis=1)
+    *,
+    dates: np.ndarray | None,
+    symbols: tuple[str, ...] | None,
+    metadata: dict[str, Any] | None,
+) -> dict[str, np.ndarray]:
+    context = CarryContext(dates=dates, symbols=symbols, metadata=metadata)
+    try:
+        borrow_by_asset = np.asarray(model.calculate(positions, context), dtype=float)
+    except TypeError:
+        borrow_by_asset = np.asarray(model.calculate(positions), dtype=float)
+    if borrow_by_asset.ndim == 1:
+        borrow_by_asset = borrow_by_asset.reshape(-1, 1)
+    weighted_by_asset = borrow_by_asset * weights.reshape(1, -1)
+    return {
+        "raw_by_asset": borrow_by_asset,
+        "weighted_by_asset": weighted_by_asset,
+        "portfolio": np.sum(weighted_by_asset, axis=1),
+    }
 
 
 def _to_array(values: Any) -> tuple[np.ndarray, Any]:

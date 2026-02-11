@@ -23,6 +23,11 @@ class EngineArrayMetadata:
     tradable_ratio_by_symbol: dict[str, float]
     excluded_symbols: dict[str, str]
     audit_summary_by_symbol: dict[str, dict[str, float | int]]
+    asset_class_by_symbol: dict[str, str]
+    expiry_by_symbol: dict[str, str | None]
+    multiplier_by_symbol: dict[str, float]
+    borrow_availability_tier_by_symbol: dict[str, str]
+    financing_benchmark_by_symbol: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,11 @@ class _LoadedSymbolDataset:
     dividends: np.ndarray | None
     in_universe_total: int
     original_total: int
+    asset_class: str
+    expiry: str | None
+    multiplier: float
+    borrow_availability_tier: str
+    financing_benchmark: str
 
 
 def load_canonical_price_arrays(
@@ -201,6 +211,13 @@ def load_canonical_price_arrays(
             }
             for symbol, audit in per_symbol_audit.items()
         },
+        asset_class_by_symbol={symbol: symbol_series[symbol].asset_class for symbol in accepted_symbols},
+        expiry_by_symbol={symbol: symbol_series[symbol].expiry for symbol in accepted_symbols},
+        multiplier_by_symbol={symbol: symbol_series[symbol].multiplier for symbol in accepted_symbols},
+        borrow_availability_tier_by_symbol={
+            symbol: symbol_series[symbol].borrow_availability_tier for symbol in accepted_symbols
+        },
+        financing_benchmark_by_symbol={symbol: symbol_series[symbol].financing_benchmark for symbol in accepted_symbols},
     )
 
     return EngineArrayBundle(
@@ -234,12 +251,20 @@ def _load_symbol_npz_range(
     tradable_parts: list[np.ndarray] = []
     universe_total = 0
     original_total = 0
+    symbol_metadata: dict[str, str | float | None] = {
+        "asset_class": "equity",
+        "expiry": None,
+        "multiplier": 1.0,
+        "borrow_availability_tier": "normal",
+        "financing_benchmark": "overnight",
+    }
 
     for year in range(start_dt.year, end_dt.year + 1):
         path = ticker_root / f"{safe}_{timeframe}_{year}.npz"
         if not path.exists():
             continue
         with np.load(path, mmap_mode="r") as payload:
+            symbol_metadata.update(_extract_instrument_metadata(payload))
             timestamps = np.asarray(payload.get("t"), dtype=np.int64)
             if timestamps.size == 0:
                 continue
@@ -284,6 +309,11 @@ def _load_symbol_npz_range(
             dividends=None,
             in_universe_total=0,
             original_total=original_total,
+            asset_class=str(symbol_metadata["asset_class"]),
+            expiry=str(symbol_metadata["expiry"]) if symbol_metadata["expiry"] is not None else None,
+            multiplier=float(symbol_metadata["multiplier"]),
+            borrow_availability_tier=str(symbol_metadata["borrow_availability_tier"]),
+            financing_benchmark=str(symbol_metadata["financing_benchmark"]),
         )
 
     ts = np.concatenate(timestamps_parts)
@@ -307,7 +337,42 @@ def _load_symbol_npz_range(
         dividends=dividend_values,
         in_universe_total=universe_total,
         original_total=original_total,
+        asset_class=str(symbol_metadata["asset_class"]),
+        expiry=str(symbol_metadata["expiry"]) if symbol_metadata["expiry"] is not None else None,
+        multiplier=float(symbol_metadata["multiplier"]),
+        borrow_availability_tier=str(symbol_metadata["borrow_availability_tier"]),
+        financing_benchmark=str(symbol_metadata["financing_benchmark"]),
     )
+
+
+def _extract_instrument_metadata(payload: np.lib.npyio.NpzFile) -> dict[str, str | float | None]:
+    def _first_scalar(name: str) -> str | float | None:
+        values = payload.get(name)
+        if values is None:
+            return None
+        arr = np.asarray(values)
+        if arr.size == 0:
+            return None
+        value = arr.reshape(-1)[0]
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return value.item() if hasattr(value, "item") else value
+
+    asset_class = _first_scalar("asset_class")
+    expiry = _first_scalar("expiry")
+    multiplier = _first_scalar("multiplier")
+    borrow_tier = _first_scalar("borrow_availability_tier")
+    financing_benchmark = _first_scalar("financing_benchmark")
+
+    return {
+        "asset_class": str(asset_class).strip().lower() if asset_class is not None else "equity",
+        "expiry": str(expiry).strip() if expiry not in (None, "", "none") else None,
+        "multiplier": float(multiplier) if multiplier is not None else 1.0,
+        "borrow_availability_tier": str(borrow_tier).strip().lower() if borrow_tier is not None else "normal",
+        "financing_benchmark": str(financing_benchmark).strip().lower()
+        if financing_benchmark is not None
+        else "overnight",
+    }
 
 
 def _extract_active_window(payload: np.lib.npyio.NpzFile) -> tuple[int | None, int | None]:
