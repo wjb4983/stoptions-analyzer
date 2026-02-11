@@ -13,7 +13,7 @@ from backtesting.cache_runner import (
     run_time_series_momentum_backtest,
     run_walk_forward_backtest,
 )
-from config import BACKTEST_CACHE_DIR, DEFAULT_BACKTEST_SETTINGS
+from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, DEFAULT_BACKTEST_SETTINGS
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
 ENTRY_SIGNALS = ["ts_momentum", "ma_trend", "breakout"]
@@ -335,6 +335,7 @@ class BacktestingPage(ttk.Frame):
     def _build_results_tabs(self) -> None:
         self.current_run_dirs: list[Path] = []
         self.current_fold_dirs: list[Path] = []
+        self._run_dir_to_label: dict[Path, str] = {}
         self._last_output_text = ""
 
         leaderboard_tab = ttk.Frame(self.section_notebook)
@@ -402,6 +403,8 @@ class BacktestingPage(ttk.Frame):
         self.logs_text = tk.Text(logs_tab, height=14)
         self.logs_text.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
 
+        self._load_historical_runs()
+
     def _set_tree_data(self, tree: ttk.Treeview, rows: list[dict[str, object]]) -> None:
         for item in tree.get_children():
             tree.delete(item)
@@ -439,16 +442,21 @@ class BacktestingPage(ttk.Frame):
 
     def _refresh_artifacts_view(self) -> None:
         if not self.current_run_dirs:
+            self.run_listbox.delete(0, tk.END)
             return
         selected = set(self.run_listbox.curselection())
         self.run_listbox.delete(0, tk.END)
         for idx, run_dir in enumerate(self.current_run_dirs):
-            self.run_listbox.insert(tk.END, run_dir.name)
+            self.run_listbox.insert(tk.END, self._run_dir_to_label.get(run_dir, run_dir.name))
             if idx in selected:
                 self.run_listbox.selection_set(idx)
 
     def _on_compare_selection_changed(self) -> None:
         selected = [self.current_run_dirs[idx] for idx in self.run_listbox.curselection() if idx < len(self.current_run_dirs)]
+        if len(selected) == 1:
+            self._render_single_run(selected[0])
+            self.delta_summary_var.set("Select at least two runs for delta metrics.")
+            return
         if len(selected) < 2:
             self.delta_summary_var.set("Select at least two runs for delta metrics.")
             return
@@ -541,18 +549,19 @@ class BacktestingPage(ttk.Frame):
             return
 
         primary_dir = run_dirs[-1]
-        self.current_run_dirs = []
+        self._register_run_dirs(run_dirs)
         leaderboard_rows = self._load_rows(primary_dir, "leaderboard")
         if leaderboard_rows:
+            combo_dirs: list[Path] = []
             for row in leaderboard_rows:
                 run_dir_str = str(row.get("run_dir", "")).strip()
                 if run_dir_str:
                     candidate = Path(run_dir_str)
                     if candidate.exists():
-                        self.current_run_dirs.append(candidate)
+                        combo_dirs.append(candidate)
+            self._register_run_dirs(combo_dirs)
             self._set_tree_data(self.leaderboard_tree, leaderboard_rows)
         else:
-            self.current_run_dirs = [primary_dir]
             metrics = self._load_metric_map(primary_dir)
             self._set_tree_data(
                 self.leaderboard_tree,
@@ -560,28 +569,75 @@ class BacktestingPage(ttk.Frame):
             )
 
         self._refresh_artifacts_view()
+        self._render_single_run(primary_dir)
 
-        selected_run = self.current_run_dirs[0] if self.current_run_dirs else primary_dir
-        drawdown_rows = self._load_rows(selected_run, "drawdown")
+    def _render_single_run(self, run_dir: Path) -> None:
+        drawdown_rows = self._load_rows(run_dir, "drawdown")
         if not drawdown_rows:
-            drawdown_rows = self._load_rows(selected_run, "risk_diagnostics")
+            drawdown_rows = self._load_rows(run_dir, "risk_diagnostics")
         self._set_tree_data(self.drawdown_tree, drawdown_rows[:200])
 
-        trade_rows = self._load_rows(selected_run, "trades")
+        trade_rows = self._load_rows(run_dir, "trades")
         if not trade_rows:
-            trade_rows = self._load_rows(selected_run, "trade_log")
+            trade_rows = self._load_rows(run_dir, "trade_log")
         self._set_tree_data(self.trades_tree, trade_rows[:200])
 
-        fold_summary = self._read_json(primary_dir / "fold_summary.json")
+        fold_summary = self._read_json(run_dir / "fold_summary.json")
         if isinstance(fold_summary, list):
             wf_rows = [row for row in fold_summary if isinstance(row, dict)]
             self._set_tree_data(self.wf_tree, wf_rows)
-            self.wf_status_var.set(f"Loaded {len(wf_rows)} walk-forward folds from {primary_dir.name}.")
+            self.wf_status_var.set(f"Loaded {len(wf_rows)} walk-forward folds from {run_dir.name}.")
         else:
             self._set_tree_data(self.wf_tree, [])
             self.wf_status_var.set("No walk-forward diagnostics loaded.")
 
-        self._update_equity_overlap([selected_run])
+        self._update_equity_overlap([run_dir])
+
+    def _load_historical_runs(self) -> None:
+        run_dirs = self._scan_backtest_output_runs()
+        if not run_dirs:
+            return
+        self._register_run_dirs(run_dirs)
+        self._refresh_artifacts_view()
+        self._render_single_run(self.current_run_dirs[0])
+
+    def _scan_backtest_output_runs(self) -> list[Path]:
+        if not BACKTEST_OUTPUT_DIR.exists():
+            return []
+        candidates: list[Path] = []
+        for path in BACKTEST_OUTPUT_DIR.iterdir():
+            if not path.is_dir():
+                continue
+            if (path / "leaderboard.json").exists() or (path / "metrics.json").exists() or (path / "aggregate_metrics.json").exists() or (path / "manifest.json").exists() or (path / "fold_summary.json").exists():
+                candidates.append(path)
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates
+
+    def _register_run_dirs(self, run_dirs: list[Path]) -> None:
+        merged: list[Path] = list(self.current_run_dirs)
+        seen = {run.resolve() for run in self.current_run_dirs if run.exists()}
+        for run_dir in run_dirs:
+            if not run_dir.exists():
+                continue
+            resolved = run_dir.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            merged.append(run_dir)
+            self._run_dir_to_label[run_dir] = self._format_run_label(run_dir)
+        merged.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        self.current_run_dirs = merged
+
+    def _format_run_label(self, run_dir: Path) -> str:
+        metrics = self._load_metric_map(run_dir)
+        sharpe = metrics.get("sharpe")
+        ret = metrics.get("total_return")
+        parts = [run_dir.name]
+        if ret is not None:
+            parts.append(f"ret={ret:.4f}")
+        if sharpe is not None:
+            parts.append(f"sharpe={sharpe:.4f}")
+        return " | ".join(parts)
 
     def _refresh_wf_fraction_labels(self) -> None:
         self.wf_train_fraction_label.config(text=f"{float(self.wf_train_fraction_var.get()):.2f}")
