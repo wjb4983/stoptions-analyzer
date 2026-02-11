@@ -450,3 +450,121 @@ class AssetClassCarryCost:
         if squeeze:
             return carry[:, 0]
         return carry
+
+
+@dataclass(frozen=True)
+class CarryContext:
+    """Optional context for carry/financing models."""
+
+    dates: np.ndarray | None = None
+    symbols: tuple[str, ...] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class CarryModel:
+    """Extended carry model supporting asset-class and time-varying borrow inputs."""
+
+    def __init__(
+        self,
+        *,
+        asset_classes: list[str] | tuple[str, ...],
+        expiry_by_asset: list[str | None] | tuple[str | None, ...] | None = None,
+        multipliers: list[float] | tuple[float, ...] | None = None,
+        borrow_availability_tiers: list[str] | tuple[str, ...] | None = None,
+        financing_benchmarks: list[str] | tuple[str, ...] | None = None,
+        annual_short_borrow_rates: dict[str, float] | None = None,
+        annual_long_financing_rates: dict[str, float] | None = None,
+        borrow_rate_series: np.ndarray | None = None,
+        borrow_available_flags: np.ndarray | None = None,
+        hard_to_borrow_spike_multiplier: float = 2.0,
+        annual_futures_roll_rates: dict[str, float] | None = None,
+        annual_options_theta_rates: dict[str, float] | None = None,
+        periods_per_year: float = 252.0,
+    ) -> None:
+        if periods_per_year <= 0:
+            raise ValueError("periods_per_year must be positive.")
+        self.asset_classes = tuple(str(v).lower() for v in asset_classes)
+        self.expiry_by_asset = tuple(expiry_by_asset or [None] * len(self.asset_classes))
+        self.multipliers = tuple(float(v) for v in (multipliers or [1.0] * len(self.asset_classes)))
+        self.borrow_availability_tiers = tuple(
+            str(v).lower() for v in (borrow_availability_tiers or ["normal"] * len(self.asset_classes))
+        )
+        self.financing_benchmarks = tuple(
+            str(v).lower() for v in (financing_benchmarks or ["overnight"] * len(self.asset_classes))
+        )
+        self.periods_per_year = float(periods_per_year)
+        self.annual_short_borrow_rates = {str(k).lower(): float(v) for k, v in (annual_short_borrow_rates or {}).items()}
+        self.annual_long_financing_rates = {str(k).lower(): float(v) for k, v in (annual_long_financing_rates or {}).items()}
+        self.annual_futures_roll_rates = {str(k).lower(): float(v) for k, v in (annual_futures_roll_rates or {}).items()}
+        self.annual_options_theta_rates = {str(k).lower(): float(v) for k, v in (annual_options_theta_rates or {}).items()}
+        self.borrow_rate_series = None if borrow_rate_series is None else np.asarray(borrow_rate_series, dtype=float)
+        self.borrow_available_flags = None if borrow_available_flags is None else np.asarray(borrow_available_flags, dtype=bool)
+        self.hard_to_borrow_spike_multiplier = float(max(hard_to_borrow_spike_multiplier, 1.0))
+
+    def calculate(self, position: float | np.ndarray, context: CarryContext | None = None) -> np.ndarray:
+        positions = np.asarray(position, dtype=float)
+        if positions.ndim == 1:
+            matrix = positions.reshape(-1, 1)
+        else:
+            matrix = positions
+        n_periods, n_assets = matrix.shape
+        if n_assets != len(self.asset_classes):
+            raise ValueError("asset_classes length must match number of assets.")
+
+        carry = np.zeros_like(matrix, dtype=float)
+        dynamic_borrow = self._coerce_dynamic(self.borrow_rate_series, (n_periods, n_assets), default=np.nan)
+        available_flags = self._coerce_dynamic(self.borrow_available_flags, (n_periods, n_assets), default=True).astype(bool)
+
+        for asset_idx, asset_class in enumerate(self.asset_classes):
+            asset_positions = matrix[:, asset_idx]
+            multiplier = self.multipliers[asset_idx]
+
+            short_rate = self.annual_short_borrow_rates.get(asset_class, 0.0)
+            long_rate = self.annual_long_financing_rates.get(asset_class, 0.0)
+            if np.isfinite(dynamic_borrow[:, asset_idx]).any():
+                short_rate_series = np.where(
+                    np.isfinite(dynamic_borrow[:, asset_idx]),
+                    dynamic_borrow[:, asset_idx],
+                    short_rate,
+                )
+            else:
+                short_rate_series = np.full(n_periods, short_rate, dtype=float)
+
+            tier = self.borrow_availability_tiers[asset_idx]
+            availability_penalty = np.where(available_flags[:, asset_idx], 1.0, self.hard_to_borrow_spike_multiplier)
+            if tier in {"hard", "hard_to_borrow", "htb"}:
+                availability_penalty = availability_penalty * self.hard_to_borrow_spike_multiplier
+
+            short_component = np.clip(-asset_positions, 0.0, None) * (short_rate_series / self.periods_per_year) * availability_penalty
+            long_component = np.clip(asset_positions, 0.0, None) * (long_rate / self.periods_per_year)
+
+            futures_component = np.zeros(n_periods, dtype=float)
+            if asset_class in {"futures", "future"}:
+                roll_rate = self.annual_futures_roll_rates.get(asset_class, 0.0) / self.periods_per_year
+                futures_component = np.abs(asset_positions) * roll_rate
+
+            options_component = np.zeros(n_periods, dtype=float)
+            if asset_class in {"option", "options"}:
+                theta_rate = self.annual_options_theta_rates.get(asset_class, 0.0) / self.periods_per_year
+                options_component = np.abs(asset_positions) * theta_rate
+
+            carry[:, asset_idx] = (short_component + long_component + futures_component + options_component) * multiplier
+
+        return carry
+
+    @staticmethod
+    def _coerce_dynamic(values: np.ndarray | None, shape: tuple[int, int], default: float | bool) -> np.ndarray:
+        if values is None:
+            return np.full(shape, default)
+        arr = np.asarray(values)
+        if arr.ndim == 0:
+            return np.full(shape, arr.item())
+        if arr.ndim == 1:
+            if arr.shape[0] == shape[0]:
+                return np.repeat(arr.reshape(-1, 1), shape[1], axis=1)
+            if arr.shape[0] == shape[1]:
+                return np.repeat(arr.reshape(1, -1), shape[0], axis=0)
+            raise ValueError("Dynamic carry array must match n_periods or n_assets.")
+        if arr.shape != shape:
+            raise ValueError("Dynamic carry array must match positions shape.")
+        return arr

@@ -6,6 +6,7 @@ import numpy as np
 
 from src.backtesting.execution import (
     AssetClassCarryCost,
+    CarryModel,
     ParticipationImpactSlippage,
     SpreadSlippage,
     VolatilityScaledSlippage,
@@ -94,3 +95,71 @@ def test_asset_class_carry_respects_class_rates() -> None:
     carry = model.calculate(positions)
     assert carry.shape == positions.shape
     assert carry[0, 0] > carry[0, 1]
+
+
+def test_carry_model_applies_time_varying_borrow_and_availability() -> None:
+    positions = np.array([
+        [-1.0],
+        [-1.0],
+        [-1.0],
+    ])
+    model = CarryModel(
+        asset_classes=["equity"],
+        annual_short_borrow_rates={"equity": 0.03},
+        borrow_rate_series=np.array([0.01, 0.10, 0.01]),
+        borrow_available_flags=np.array([True, False, True]),
+        hard_to_borrow_spike_multiplier=3.0,
+        periods_per_year=1.0,
+    )
+    carry = model.calculate(positions)
+    assert carry.shape == positions.shape
+    assert carry[1, 0] > carry[0, 0]
+    assert carry[1, 0] > carry[2, 0]
+
+
+def test_carry_model_applies_asset_class_specific_components() -> None:
+    positions = np.array([[1.0, 1.0, -1.0]])
+    model = CarryModel(
+        asset_classes=["futures", "options", "equity"],
+        annual_short_borrow_rates={"equity": 0.02},
+        annual_futures_roll_rates={"futures": 0.06},
+        annual_options_theta_rates={"options": 0.12},
+        periods_per_year=12.0,
+    )
+    carry = model.calculate(positions)
+    assert carry.shape == positions.shape
+    # options theta proxy (0.01) > futures roll (0.005) > equity borrow (0.00166..)
+    assert carry[0, 1] > carry[0, 0] > carry[0, 2]
+
+
+def test_backtest_vectorized_exports_carry_attribution_by_asset() -> None:
+    prices = np.array(
+        [
+            [100.0, 50.0],
+            [100.0, 50.0],
+            [100.0, 50.0],
+        ]
+    )
+    signals = np.array(
+        [
+            [0.0, 0.0],
+            [-1.0, 1.0],
+            [-1.0, 1.0],
+        ]
+    )
+    carry = CarryModel(
+        asset_classes=["equity", "futures"],
+        annual_short_borrow_rates={"equity": 0.12},
+        annual_futures_roll_rates={"futures": 0.24},
+        periods_per_year=12.0,
+    )
+    result = backtest_vectorized(
+        prices,
+        signals,
+        borrow_cost_model=carry,
+        carry_asset_classes=["equity", "futures"],
+    )
+    assert "carry_attribution_by_asset" in result.cost_breakdown
+    attribution = np.asarray(result.cost_breakdown["carry_attribution_by_asset"])
+    assert attribution.shape == prices.shape
+    assert np.any(attribution > 0.0)

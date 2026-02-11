@@ -286,6 +286,14 @@ def run_time_series_momentum_backtest(
         config=portfolio_cfg,
     )
 
+    borrow_rate_series = None
+    borrow_available_flags = None
+    if isinstance(carry_model_params, dict):
+        if "borrow_rate_series" in carry_model_params:
+            borrow_rate_series = np.asarray(carry_model_params.get("borrow_rate_series"), dtype=float)
+        if "borrow_available_flags" in carry_model_params:
+            borrow_available_flags = np.asarray(carry_model_params.get("borrow_available_flags"), dtype=bool)
+
     result = backtest_vectorized(
         prices=prices,
         signals=portfolio_result.target_weights,
@@ -293,6 +301,17 @@ def run_time_series_momentum_backtest(
         borrow_cost_model=borrow,
         initial_equity=float(starting_capital),
         timeframe=timeframe,
+        dates=arrays.date_index,
+        symbols=symbol_order,
+        carry_asset_classes=[arrays.metadata.asset_class_by_symbol[symbol] for symbol in symbol_order],
+        carry_expiry_by_asset=[arrays.metadata.expiry_by_symbol[symbol] for symbol in symbol_order],
+        carry_multipliers=[arrays.metadata.multiplier_by_symbol[symbol] for symbol in symbol_order],
+        carry_borrow_availability_tiers=[
+            arrays.metadata.borrow_availability_tier_by_symbol[symbol] for symbol in symbol_order
+        ],
+        carry_financing_benchmarks=[arrays.metadata.financing_benchmark_by_symbol[symbol] for symbol in symbol_order],
+        borrow_rate_series=borrow_rate_series,
+        borrow_available_flags=borrow_available_flags,
     )
 
     timestamps = arrays.date_index
@@ -1173,6 +1192,11 @@ def _resample_engine_bundle_from_1m(arrays: EngineArrayBundle, *, timeframe: str
         },
         excluded_symbols=dict(arrays.metadata.excluded_symbols),
         audit_summary_by_symbol=dict(arrays.metadata.audit_summary_by_symbol),
+        asset_class_by_symbol=dict(arrays.metadata.asset_class_by_symbol),
+        expiry_by_symbol=dict(arrays.metadata.expiry_by_symbol),
+        multiplier_by_symbol=dict(arrays.metadata.multiplier_by_symbol),
+        borrow_availability_tier_by_symbol=dict(arrays.metadata.borrow_availability_tier_by_symbol),
+        financing_benchmark_by_symbol=dict(arrays.metadata.financing_benchmark_by_symbol),
     )
     return EngineArrayBundle(
         date_index=date_index,
