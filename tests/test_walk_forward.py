@@ -140,3 +140,7 @@ def test_run_walk_forward_backtest_persists_fold_artifacts(monkeypatch, tmp_path
     assert (fold_dirs[0] / "oos_metrics.json").exists()
     assert (fold_dirs[0] / "oos_equity.csv").exists()
     assert (fold_dirs[0] / "diagnostics.json").exists()
+    report_path = run_dirs[0] / "report.txt"
+    assert report_path.exists()
+    assert "Walk-Forward Backtest Report" in report_path.read_text()
+    assert "Report:" in output

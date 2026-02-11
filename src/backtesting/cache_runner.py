@@ -571,12 +571,74 @@ def run_walk_forward_backtest(
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_walk_forward_{timestamp}"
     persist_walk_forward_outputs(run_dir=run_dir, result=wf_result)
     (run_dir / "skipped_invalid_combos.json").write_text(json.dumps(invalid_rows, indent=2))
+    report_text = _format_walk_forward_report(
+        folds=wf_result.folds,
+        aggregate_metrics=wf_result.aggregate_metrics,
+        stability=wf_result.stability,
+        score_metric=score_metric,
+        candidate_count=len(combos),
+        skipped_invalid_count=len(invalid_rows),
+    )
+    (run_dir / "report.txt").write_text(report_text)
 
     return (
         f"Walk-forward complete: {len(wf_result.folds)} folds, "
         f"{len(combos)} candidates, {len(invalid_rows)} skipped invalid combos. "
-        f"Saved outputs to: {run_dir}"
+        f"Saved outputs to: {run_dir}\n"
+        f"Report: {run_dir / 'report.txt'}"
     )
+
+
+def _format_walk_forward_report(
+    *,
+    folds: list[dict[str, Any]],
+    aggregate_metrics: dict[str, float],
+    stability: dict[str, Any],
+    score_metric: str,
+    candidate_count: int,
+    skipped_invalid_count: int,
+) -> str:
+    lines = [
+        "Walk-Forward Backtest Report",
+        "============================",
+        "",
+        f"Folds: {len(folds)}",
+        f"Candidates evaluated per fold: {candidate_count}",
+        f"Skipped invalid combinations: {skipped_invalid_count}",
+        f"Selection score metric: {score_metric}",
+        "",
+        "Aggregate OOS Metrics",
+        "---------------------",
+    ]
+    if aggregate_metrics:
+        for key in sorted(aggregate_metrics):
+            lines.append(f"- {key}: {aggregate_metrics[key]:.6f}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "Stability", "---------"])
+    unique_count = int(stability.get("unique_selected_params", 0))
+    lines.append(f"- unique_selected_params: {unique_count}")
+    lines.append(f"- validation_score_mean: {float(stability.get('validation_score_mean', 0.0)):.6f}")
+    lines.append(f"- validation_score_std: {float(stability.get('validation_score_std', 0.0)):.6f}")
+
+    selection_counts = stability.get("selection_counts", {})
+    if isinstance(selection_counts, dict) and selection_counts:
+        lines.append("- selection_counts:")
+        for key, value in sorted(
+            selection_counts.items(),
+            key=lambda item: (-int(item[1]), str(item[0])),
+        ):
+            lines.append(f"  - {key}: {int(value)}")
+
+    lines.extend(["", "Fold Picks", "---------"])
+    for fold in folds:
+        lines.append(
+            f"- fold={int(fold.get('fold_id', -1))} validation_score={float(fold.get('validation_score', 0.0)):.6f} "
+            f"selected_params={json.dumps(fold.get('selected_params', {}), sort_keys=True)}"
+        )
+
+    return "\n".join(lines)
 
 
 def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:

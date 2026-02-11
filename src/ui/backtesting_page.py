@@ -108,6 +108,14 @@ class BacktestingPage(ttk.Frame):
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=6)
 
         row += 1
+        ttk.Label(
+            strategy_frame,
+            text="Walk-forward tunes on train+validation, then evaluates only on out-of-sample test folds.",
+            wraplength=520,
+            justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
+
+        row += 1
         self.walk_forward_frame = ttk.LabelFrame(strategy_frame, text="Walk-Forward Windows (bars)")
         self.walk_forward_frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
         self.walk_forward_frame.columnconfigure(1, weight=1)
