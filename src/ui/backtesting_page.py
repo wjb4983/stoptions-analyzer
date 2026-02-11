@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import threading
+import csv
+import json
 from datetime import date
 from pathlib import Path
 import tkinter as tk
@@ -59,9 +61,17 @@ class BacktestingPage(ttk.Frame):
         content = ttk.Frame(content)
         content.pack(fill="both", expand=True, padx=30, pady=10)
         content.columnconfigure(0, weight=1)
-        content.rowconfigure(1, weight=1)
+        content.rowconfigure(0, weight=1)
 
-        strategy_frame = ttk.LabelFrame(content, text="Strategy")
+        self.section_notebook = ttk.Notebook(content)
+        self.section_notebook.grid(row=0, column=0, sticky="nsew")
+
+        run_setup_tab = ttk.Frame(self.section_notebook)
+        run_setup_tab.columnconfigure(0, weight=1)
+        run_setup_tab.rowconfigure(1, weight=1)
+        self.section_notebook.add(run_setup_tab, text="Run Setup")
+
+        strategy_frame = ttk.LabelFrame(run_setup_tab, text="Strategy")
         strategy_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         strategy_frame.columnconfigure(1, weight=1)
 
@@ -271,13 +281,13 @@ class BacktestingPage(ttk.Frame):
         self.backtest_root_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.backtest_root_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
-        notes_frame = ttk.LabelFrame(content, text="Run Output")
+        notes_frame = ttk.LabelFrame(run_setup_tab, text="Run Notes")
         notes_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
         notes_frame.columnconfigure(0, weight=1)
         self.notes_text = tk.Text(notes_frame, height=14)
         self.notes_text.grid(row=0, column=0, sticky="nsew", padx=8, pady=6)
 
-        button_row = ttk.Frame(content)
+        button_row = ttk.Frame(run_setup_tab)
         button_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 10))
         button_row.columnconfigure(0, weight=1)
         button_row.columnconfigure(1, weight=1)
@@ -292,6 +302,7 @@ class BacktestingPage(ttk.Frame):
             command=lambda: controller.show_frame("MainMenu"),
         ).grid(row=0, column=2, padx=10, pady=4)
 
+        self._build_results_tabs()
         self._on_strategy_changed()
 
     def _on_page_canvas_configure(self, event: tk.Event) -> None:
@@ -320,6 +331,257 @@ class BacktestingPage(ttk.Frame):
         delta = getattr(event, "delta", 0)
         if delta:
             self.page_canvas.yview_scroll(int(-delta / 120), "units")
+
+    def _build_results_tabs(self) -> None:
+        self.current_run_dirs: list[Path] = []
+        self.current_fold_dirs: list[Path] = []
+        self._last_output_text = ""
+
+        leaderboard_tab = ttk.Frame(self.section_notebook)
+        leaderboard_tab.columnconfigure(0, weight=1)
+        leaderboard_tab.rowconfigure(2, weight=1)
+        self.section_notebook.add(leaderboard_tab, text="Results Leaderboard")
+
+        controls = ttk.Frame(leaderboard_tab)
+        controls.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        controls.columnconfigure(2, weight=1)
+        ttk.Label(controls, text="Detected Run Artifacts").grid(row=0, column=0, sticky="w")
+        ttk.Button(controls, text="Refresh", command=self._refresh_artifacts_view).grid(row=0, column=1, padx=(8, 0))
+
+        self.run_listbox = tk.Listbox(leaderboard_tab, selectmode="extended", exportselection=False, height=5)
+        self.run_listbox.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
+        self.run_listbox.bind("<<ListboxSelect>>", lambda _event: self._on_compare_selection_changed())
+
+        compare_row = ttk.Frame(leaderboard_tab)
+        compare_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 4))
+        ttk.Button(compare_row, text="Compare Selected Runs", command=self._on_compare_selection_changed).pack(side="left")
+
+        self.leaderboard_tree = ttk.Treeview(leaderboard_tab, show="headings", height=10)
+        self.leaderboard_tree.grid(row=3, column=0, sticky="nsew", padx=10, pady=4)
+        self.leaderboard_tree_scroll = ttk.Scrollbar(leaderboard_tab, orient="vertical", command=self.leaderboard_tree.yview)
+        self.leaderboard_tree_scroll.grid(row=3, column=1, sticky="ns", pady=4)
+        self.leaderboard_tree.configure(yscrollcommand=self.leaderboard_tree_scroll.set)
+        leaderboard_tab.rowconfigure(3, weight=1)
+
+        self.delta_summary_var = tk.StringVar(value="Select at least two runs for delta metrics.")
+        ttk.Label(leaderboard_tab, textvariable=self.delta_summary_var, justify="left").grid(
+            row=4, column=0, sticky="ew", padx=10, pady=(4, 8)
+        )
+
+        equity_tab = ttk.Frame(self.section_notebook)
+        equity_tab.columnconfigure(0, weight=1)
+        equity_tab.rowconfigure(1, weight=1)
+        self.section_notebook.add(equity_tab, text="Equity/Drawdown charts")
+
+        self.equity_overlap_text = tk.Text(equity_tab, height=12)
+        self.equity_overlap_text.grid(row=0, column=0, sticky="ew", padx=10, pady=6)
+
+        self.drawdown_tree = ttk.Treeview(equity_tab, show="headings", height=12)
+        self.drawdown_tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+
+        trades_tab = ttk.Frame(self.section_notebook)
+        trades_tab.columnconfigure(0, weight=1)
+        trades_tab.rowconfigure(0, weight=1)
+        self.section_notebook.add(trades_tab, text="Trades/Costs diagnostics")
+        self.trades_tree = ttk.Treeview(trades_tab, show="headings", height=14)
+        self.trades_tree.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
+
+        wf_tab = ttk.Frame(self.section_notebook)
+        wf_tab.columnconfigure(0, weight=1)
+        wf_tab.rowconfigure(1, weight=1)
+        self.section_notebook.add(wf_tab, text="Fold/WF diagnostics")
+        self.wf_status_var = tk.StringVar(value="No walk-forward diagnostics loaded.")
+        ttk.Label(wf_tab, textvariable=self.wf_status_var, justify="left").grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        self.wf_tree = ttk.Treeview(wf_tab, show="headings", height=14)
+        self.wf_tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+
+        logs_tab = ttk.Frame(self.section_notebook)
+        logs_tab.columnconfigure(0, weight=1)
+        logs_tab.rowconfigure(0, weight=1)
+        self.section_notebook.add(logs_tab, text="Logs (Debug)")
+        self.logs_text = tk.Text(logs_tab, height=14)
+        self.logs_text.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
+
+    def _set_tree_data(self, tree: ttk.Treeview, rows: list[dict[str, object]]) -> None:
+        for item in tree.get_children():
+            tree.delete(item)
+        if not rows:
+            tree["columns"] = ()
+            return
+        columns = list(rows[0].keys())
+        tree["columns"] = columns
+        for col in columns:
+            tree.heading(col, text=col, command=lambda c=col: self._sort_treeview(tree, c, False))
+            tree.column(col, width=130, anchor="w")
+        for row in rows:
+            values = [self._format_cell(row.get(col)) for col in columns]
+            tree.insert("", "end", values=values)
+
+    def _sort_treeview(self, tree: ttk.Treeview, col: str, reverse: bool) -> None:
+        data = [(tree.set(item, col), item) for item in tree.get_children("")]
+        def sort_key(pair: tuple[str, str]) -> object:
+            raw = pair[0]
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return str(raw)
+        data.sort(key=sort_key, reverse=reverse)
+        for index, (_value, item) in enumerate(data):
+            tree.move(item, "", index)
+        tree.heading(col, command=lambda: self._sort_treeview(tree, col, not reverse))
+
+    def _format_cell(self, value: object) -> str:
+        if isinstance(value, float):
+            return f"{value:.6f}"
+        if value is None:
+            return ""
+        return str(value)
+
+    def _refresh_artifacts_view(self) -> None:
+        if not self.current_run_dirs:
+            return
+        selected = set(self.run_listbox.curselection())
+        self.run_listbox.delete(0, tk.END)
+        for idx, run_dir in enumerate(self.current_run_dirs):
+            self.run_listbox.insert(tk.END, run_dir.name)
+            if idx in selected:
+                self.run_listbox.selection_set(idx)
+
+    def _on_compare_selection_changed(self) -> None:
+        selected = [self.current_run_dirs[idx] for idx in self.run_listbox.curselection() if idx < len(self.current_run_dirs)]
+        if len(selected) < 2:
+            self.delta_summary_var.set("Select at least two runs for delta metrics.")
+            return
+        metric_maps = [self._load_metric_map(run_dir) for run_dir in selected]
+        common_keys = sorted(set.intersection(*(set(metrics.keys()) for metrics in metric_maps if metrics))) if metric_maps else []
+        if not common_keys:
+            self.delta_summary_var.set("No overlapping metrics found across selected runs.")
+            return
+        base = metric_maps[0]
+        lines = [f"Base run: {selected[0].name}"]
+        for run_dir, metrics in zip(selected[1:], metric_maps[1:]):
+            deltas = []
+            for key in common_keys[:8]:
+                delta = float(metrics.get(key, 0.0)) - float(base.get(key, 0.0))
+                deltas.append(f"{key}: {delta:+.6f}")
+            lines.append(f"vs {run_dir.name} -> " + ", ".join(deltas))
+        self.delta_summary_var.set("\n".join(lines))
+        self._update_equity_overlap(selected)
+
+    def _update_equity_overlap(self, run_dirs: list[Path]) -> None:
+        snippets: list[str] = []
+        for run_dir in run_dirs:
+            equity_rows = self._load_rows(run_dir, "equity")
+            if not equity_rows:
+                continue
+            samples = equity_rows[-5:]
+            sample_text = ", ".join(
+                f"{row.get('timestamp', '')}:{float(row.get('equity', 0.0)):.4f}" for row in samples
+            )
+            snippets.append(f"{run_dir.name}: {sample_text}")
+        self.equity_overlap_text.delete("1.0", tk.END)
+        self.equity_overlap_text.insert("1.0", "\n".join(snippets) if snippets else "No overlapping equity data.")
+
+    def _load_metric_map(self, run_dir: Path) -> dict[str, float]:
+        metrics_path = run_dir / "metrics.json"
+        if not metrics_path.exists():
+            metrics_path = run_dir / "aggregate_metrics.json"
+            if metrics_path.exists():
+                parsed = self._read_json(metrics_path)
+                if isinstance(parsed, dict):
+                    return {str(k): float(v) for k, v in parsed.items() if isinstance(v, (int, float))}
+            return {}
+        rows = self._read_json(metrics_path)
+        if not isinstance(rows, list):
+            return {}
+        output: dict[str, float] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            metric = str(row.get("metric", ""))
+            value = row.get("value")
+            if metric and isinstance(value, (int, float)):
+                output[metric] = float(value)
+        return output
+
+    def _load_rows(self, run_dir: Path, stem: str) -> list[dict[str, object]]:
+        json_path = run_dir / f"{stem}.json"
+        if json_path.exists():
+            parsed = self._read_json(json_path)
+            if isinstance(parsed, list):
+                return [row for row in parsed if isinstance(row, dict)]
+        csv_path = run_dir / f"{stem}.csv"
+        if csv_path.exists():
+            with csv_path.open("r", newline="") as handle:
+                reader = csv.DictReader(handle)
+                return [dict(row) for row in reader]
+        return []
+
+    def _read_json(self, path: Path) -> object:
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return None
+
+    def _consume_run_outputs(self, output_text: str) -> None:
+        self._last_output_text = output_text
+        self.logs_text.delete("1.0", tk.END)
+        self.logs_text.insert("1.0", output_text)
+
+        run_dirs: list[Path] = []
+        for marker in ("Leaderboard outputs:", "Saved outputs to:"):
+            idx = output_text.rfind(marker)
+            if idx < 0:
+                continue
+            raw = output_text[idx + len(marker):].strip().splitlines()[0].strip()
+            candidate = Path(raw)
+            if candidate.exists():
+                run_dirs.append(candidate)
+        if not run_dirs:
+            return
+
+        primary_dir = run_dirs[-1]
+        self.current_run_dirs = []
+        leaderboard_rows = self._load_rows(primary_dir, "leaderboard")
+        if leaderboard_rows:
+            for row in leaderboard_rows:
+                run_dir_str = str(row.get("run_dir", "")).strip()
+                if run_dir_str:
+                    candidate = Path(run_dir_str)
+                    if candidate.exists():
+                        self.current_run_dirs.append(candidate)
+            self._set_tree_data(self.leaderboard_tree, leaderboard_rows)
+        else:
+            self.current_run_dirs = [primary_dir]
+            metrics = self._load_metric_map(primary_dir)
+            self._set_tree_data(
+                self.leaderboard_tree,
+                [{"metric": key, "value": value} for key, value in sorted(metrics.items())],
+            )
+
+        self._refresh_artifacts_view()
+
+        selected_run = self.current_run_dirs[0] if self.current_run_dirs else primary_dir
+        drawdown_rows = self._load_rows(selected_run, "drawdown")
+        if not drawdown_rows:
+            drawdown_rows = self._load_rows(selected_run, "risk_diagnostics")
+        self._set_tree_data(self.drawdown_tree, drawdown_rows[:200])
+
+        trade_rows = self._load_rows(selected_run, "trades")
+        if not trade_rows:
+            trade_rows = self._load_rows(selected_run, "trade_log")
+        self._set_tree_data(self.trades_tree, trade_rows[:200])
+
+        fold_summary = self._read_json(primary_dir / "fold_summary.json")
+        if isinstance(fold_summary, list):
+            wf_rows = [row for row in fold_summary if isinstance(row, dict)]
+            self._set_tree_data(self.wf_tree, wf_rows)
+            self.wf_status_var.set(f"Loaded {len(wf_rows)} walk-forward folds from {primary_dir.name}.")
+        else:
+            self._set_tree_data(self.wf_tree, [])
+            self.wf_status_var.set("No walk-forward diagnostics loaded.")
+
+        self._update_equity_overlap([selected_run])
 
     def _refresh_wf_fraction_labels(self) -> None:
         self.wf_train_fraction_label.config(text=f"{float(self.wf_train_fraction_var.get()):.2f}")
@@ -478,6 +740,8 @@ class BacktestingPage(ttk.Frame):
 
         self.notes_text.delete("1.0", tk.END)
         self.notes_text.insert("1.0", str(settings.get("notes", "")))
+        self.logs_text.delete("1.0", tk.END)
+        self.logs_text.insert("1.0", str(settings.get("notes", "")))
         self._on_strategy_changed()
 
     def save_settings(self) -> None:
@@ -682,8 +946,9 @@ class BacktestingPage(ttk.Frame):
             status_line = "Running cross-sectional momentum backtest...\n"
 
         self.run_button.config(state="disabled")
-        self.notes_text.delete("1.0", tk.END)
-        self.notes_text.insert("1.0", status_line)
+        self.logs_text.delete("1.0", tk.END)
+        self.logs_text.insert("1.0", status_line)
+        self.section_notebook.select(5)
 
         thread = threading.Thread(target=worker_target, args=worker_args, daemon=True)
         thread.start()
@@ -884,8 +1149,7 @@ class BacktestingPage(ttk.Frame):
         self.after(0, lambda: self._finish_backtest_run(output_text))
 
     def _finish_backtest_run(self, output_text: str) -> None:
-        self.notes_text.delete("1.0", tk.END)
-        self.notes_text.insert("1.0", output_text)
+        self._consume_run_outputs(output_text)
         self.run_button.config(state="normal")
 
     def _split_csv_setting(self, raw: object) -> set[str]:
