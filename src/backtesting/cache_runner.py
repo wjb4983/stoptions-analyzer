@@ -31,6 +31,11 @@ from data_access.engine_loader import EngineArrayBundle, EngineArrayMetadata, lo
 from utils.parsing import build_npz_payload, chunk_results_by_year
 from backtesting.signals import build_targets, parse_entry_signal_config, parse_exit_signal_config, required_lookback_window
 from backtesting.strategies import CrossSectionalMomentumConfig, build_cross_sectional_momentum_targets
+from backtesting.walk_forward import (
+    build_walk_forward_folds,
+    persist_walk_forward_outputs,
+    run_walk_forward_optimization,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -454,6 +459,186 @@ def run_parameter_sweep(
         f"{len(invalid_rows)} skipped, {len(errors)} failed. "
         f"Saved outputs to: {run_dir}"
     )
+
+
+def run_walk_forward_backtest(
+    *,
+    tickers: list[str],
+    start_date: date,
+    end_date: date,
+    cache_root: Path,
+    entry_grid: dict[str, list[dict[str, Any]]],
+    exit_grid: dict[str, list[dict[str, Any]]],
+    core_grid: dict[str, list[Any]],
+    train_bars: int,
+    validation_bars: int,
+    test_bars: int,
+    step_bars: int | None = None,
+    score_metric: str = "sharpe",
+) -> str:
+    combos, invalid_rows = generate_sweep_combinations(
+        entry_grid=entry_grid,
+        exit_grid=exit_grid,
+        core_grid=core_grid,
+    )
+    if not combos:
+        raise ValueError("No valid combinations generated for walk-forward")
+
+    max_lookback = 1
+    for combo in combos:
+        entry_cfg = parse_entry_signal_config(
+            str(combo["entry_signal"]),
+            dict(combo.get("entry_signal_params", {})),
+            default_lookback_days=int(combo["lookback_days"]),
+            default_skip_days=int(combo["skip_days"]),
+        )
+        exit_cfg = parse_exit_signal_config(
+            str(combo["exit_signal"]),
+            dict(combo.get("exit_signal_params", {})),
+            default_lookback_days=int(combo["lookback_days"]),
+            default_skip_days=int(combo["skip_days"]),
+        )
+        max_lookback = max(max_lookback, required_lookback_window(entry_cfg, exit_cfg))
+
+    arrays = load_backtest_engine_arrays(
+        tickers=tickers,
+        start=datetime.combine(start_date, datetime.min.time()).isoformat(),
+        end=datetime.combine(end_date, datetime.max.time()).isoformat(),
+        cache_root=cache_root,
+        timeframe="1m",
+        lookback_window=max_lookback,
+    )
+    prices = _fill_missing_prices(arrays.close_prices)
+
+    folds = build_walk_forward_folds(
+        total_bars=prices.shape[0],
+        train_bars=train_bars,
+        validation_bars=validation_bars,
+        test_bars=test_bars,
+        step_bars=step_bars,
+    )
+    if not folds:
+        raise ValueError("No folds generated; increase date range or reduce window sizes")
+
+    def evaluate_segment(candidate: dict[str, Any], start_idx: int, end_idx: int) -> dict[str, Any]:
+        if end_idx <= start_idx:
+            return {"metrics": {}, "equity": []}
+
+        entry_cfg = parse_entry_signal_config(
+            str(candidate["entry_signal"]),
+            dict(candidate.get("entry_signal_params", {})),
+            default_lookback_days=int(candidate["lookback_days"]),
+            default_skip_days=int(candidate["skip_days"]),
+        )
+        exit_cfg = parse_exit_signal_config(
+            str(candidate["exit_signal"]),
+            dict(candidate.get("exit_signal_params", {})),
+            default_lookback_days=int(candidate["lookback_days"]),
+            default_skip_days=int(candidate["skip_days"]),
+        )
+        segment_prices = prices[start_idx:end_idx]
+        segment_missing = arrays.missing_mask[start_idx:end_idx]
+        signals = build_targets(
+            close_prices=segment_prices,
+            missing_mask=segment_missing,
+            entry_config=entry_cfg,
+            exit_config=exit_cfg,
+        )
+        result = backtest_vectorized(
+            prices=segment_prices,
+            signals=signals,
+            slippage_model=BpsSlippage(float(candidate["costs_bps"])),
+            initial_equity=1.0,
+            timeframe="1m",
+        )
+        metrics = {key: float(value) for key, value in dict(result.metrics).items()}
+        equity = _to_numpy_1d(result.equity_curve)
+        timestamps = arrays.date_index[start_idx:end_idx]
+        equity_rows = [
+            {"timestamp": timestamps[idx].isoformat(), "equity": float(equity[idx])}
+            for idx in range(min(len(timestamps), equity.size))
+        ]
+        return {"metrics": metrics, "equity": equity_rows}
+
+    wf_result = run_walk_forward_optimization(
+        folds=folds,
+        parameter_candidates=combos,
+        evaluate_segment=evaluate_segment,
+        score_metric=score_metric,
+    )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_walk_forward_{timestamp}"
+    persist_walk_forward_outputs(run_dir=run_dir, result=wf_result)
+    (run_dir / "skipped_invalid_combos.json").write_text(json.dumps(invalid_rows, indent=2))
+    report_text = _format_walk_forward_report(
+        folds=wf_result.folds,
+        aggregate_metrics=wf_result.aggregate_metrics,
+        stability=wf_result.stability,
+        score_metric=score_metric,
+        candidate_count=len(combos),
+        skipped_invalid_count=len(invalid_rows),
+    )
+    (run_dir / "report.txt").write_text(report_text)
+
+    return (
+        f"Walk-forward complete: {len(wf_result.folds)} folds, "
+        f"{len(combos)} candidates, {len(invalid_rows)} skipped invalid combos. "
+        f"Saved outputs to: {run_dir}\n"
+        f"Report: {run_dir / 'report.txt'}"
+    )
+
+
+def _format_walk_forward_report(
+    *,
+    folds: list[dict[str, Any]],
+    aggregate_metrics: dict[str, float],
+    stability: dict[str, Any],
+    score_metric: str,
+    candidate_count: int,
+    skipped_invalid_count: int,
+) -> str:
+    lines = [
+        "Walk-Forward Backtest Report",
+        "============================",
+        "",
+        f"Folds: {len(folds)}",
+        f"Candidates evaluated per fold: {candidate_count}",
+        f"Skipped invalid combinations: {skipped_invalid_count}",
+        f"Selection score metric: {score_metric}",
+        "",
+        "Aggregate OOS Metrics",
+        "---------------------",
+    ]
+    if aggregate_metrics:
+        for key in sorted(aggregate_metrics):
+            lines.append(f"- {key}: {aggregate_metrics[key]:.6f}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "Stability", "---------"])
+    unique_count = int(stability.get("unique_selected_params", 0))
+    lines.append(f"- unique_selected_params: {unique_count}")
+    lines.append(f"- validation_score_mean: {float(stability.get('validation_score_mean', 0.0)):.6f}")
+    lines.append(f"- validation_score_std: {float(stability.get('validation_score_std', 0.0)):.6f}")
+
+    selection_counts = stability.get("selection_counts", {})
+    if isinstance(selection_counts, dict) and selection_counts:
+        lines.append("- selection_counts:")
+        for key, value in sorted(
+            selection_counts.items(),
+            key=lambda item: (-int(item[1]), str(item[0])),
+        ):
+            lines.append(f"  - {key}: {int(value)}")
+
+    lines.extend(["", "Fold Picks", "---------"])
+    for fold in folds:
+        lines.append(
+            f"- fold={int(fold.get('fold_id', -1))} validation_score={float(fold.get('validation_score', 0.0)):.6f} "
+            f"selected_params={json.dumps(fold.get('selected_params', {}), sort_keys=True)}"
+        )
+
+    return "\n".join(lines)
 
 
 def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1239,6 +1424,17 @@ def _build_parser() -> argparse.ArgumentParser:
     sweep_parser.add_argument("--fail-fast", action="store_true")
     sweep_parser.add_argument("--continue-on-error", action="store_true")
 
+    wf_parser = subparsers.add_parser("walk_forward", help="Run rolling walk-forward optimization/evaluation.")
+    _add_common_args(wf_parser)
+    wf_parser.add_argument("--entry-grid", required=True, help="JSON mapping signal->list[params].")
+    wf_parser.add_argument("--exit-grid", required=True, help="JSON mapping signal->list[params].")
+    wf_parser.add_argument("--core-grid", required=True, help="JSON mapping core param->list[values].")
+    wf_parser.add_argument("--train-bars", type=int, required=True)
+    wf_parser.add_argument("--validation-bars", type=int, required=True)
+    wf_parser.add_argument("--test-bars", type=int, required=True)
+    wf_parser.add_argument("--step-bars", type=int, default=None)
+    wf_parser.add_argument("--score-metric", default="sharpe")
+
     parser.set_defaults(command="run")
     return parser
 
@@ -1267,6 +1463,21 @@ def main() -> None:
             fail_fast=bool(args.fail_fast),
             continue_on_error=bool(args.continue_on_error),
             top_n=args.top_n,
+        )
+    elif args.command == "walk_forward":
+        output = run_walk_forward_backtest(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            cache_root=cache_root,
+            entry_grid={str(k): list(v) for k, v in _parse_json_object(args.entry_grid).items()},
+            exit_grid={str(k): list(v) for k, v in _parse_json_object(args.exit_grid).items()},
+            core_grid={str(k): list(v) for k, v in _parse_json_object(args.core_grid).items()},
+            train_bars=int(args.train_bars),
+            validation_bars=int(args.validation_bars),
+            test_bars=int(args.test_bars),
+            step_bars=args.step_bars,
+            score_metric=str(args.score_metric),
         )
     else:
         output = run_time_series_momentum_backtest(
