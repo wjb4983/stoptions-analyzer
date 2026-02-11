@@ -225,3 +225,84 @@ def test_apply_discrete_bet_sizing_rounds_down_shares() -> None:
     )
     # 50% budget => $500, at $101/share -> floor(4) shares => $404 exposure => 0.404 weight
     assert float(sized[0, 0]) == 404.0 / 1000.0
+
+
+def test_run_parameter_sweep_persists_manifest_and_reproducible_fingerprint(tmp_path) -> None:
+    entry_grid = {"ts_momentum": [{"lookback_days": 20, "skip_days": 5}, {"lookback_days": 30, "skip_days": 3}]}
+    exit_grid = {"none": [{}]}
+    core_grid = {"lookback_days": [20], "skip_days": [5], "costs_bps": [1.0, 3.0]}
+
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+
+    def fake_eval(payload: dict[str, object]) -> dict[str, object]:
+        combo_index = int(payload["combo_index"])
+        sharpe = 10.0 - combo_index
+        return {
+            "entry_signal": payload["entry_signal"],
+            "entry_signal_params": "{}",
+            "exit_signal": payload["exit_signal"],
+            "exit_signal_params": "{}",
+            "lookback_days": int(payload["lookback_days"]),
+            "skip_days": int(payload["skip_days"]),
+            "costs_bps": float(payload["costs_bps"]),
+            "total_return": sharpe / 100.0,
+            "sharpe": sharpe,
+            "cagr": sharpe / 120.0,
+            "max_drawdown": -0.1,
+            "calmar": sharpe / 12.0,
+            "volatility": 0.2,
+            "sortino": sharpe / 2.0,
+            "downside_deviation": 0.1,
+            "hit_rate": 0.6,
+            "profit_factor": 1.5,
+            "exposure_time": 0.8,
+            "turnover_adjusted_return": 0.03,
+            "rolling_sharpe_mean": sharpe - 1.0,
+            "rolling_drawdown_worst": -0.08,
+            "turnover_total": 1.0,
+            "cost_total": 0.01,
+        }
+
+    cache_runner.run_parameter_sweep(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        entry_grid=entry_grid,
+        exit_grid=exit_grid,
+        core_grid=core_grid,
+        seed=123,
+        top_n=3,
+        evaluator=fake_eval,
+    )
+    cache_runner.run_parameter_sweep(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        entry_grid=entry_grid,
+        exit_grid=exit_grid,
+        core_grid=core_grid,
+        seed=123,
+        top_n=3,
+        evaluator=fake_eval,
+    )
+
+    run_dirs = sorted((tmp_path / "outputs").glob("tsmom_sweep_*"))
+    assert len(run_dirs) == 2
+
+    manifest_one = __import__("json").loads((run_dirs[0] / "manifest.json").read_text())
+    manifest_two = __import__("json").loads((run_dirs[1] / "manifest.json").read_text())
+
+    for manifest in (manifest_one, manifest_two):
+        assert manifest["metric_schema_version"] == cache_runner.CANONICAL_METRIC_SCHEMA_VERSION
+        assert manifest["code_version"]
+        assert manifest["parameters"]["core_grid"] == core_grid
+        assert manifest["random_seed"] == 123
+        assert "data_snapshot_identifiers" in manifest
+        assert "environment" in manifest
+
+    assert manifest_one["reproducibility_fingerprint"] == manifest_two["reproducibility_fingerprint"]
+
+    index_rows = (tmp_path / "outputs" / "experiment_index.jsonl").read_text().strip().splitlines()
+    assert len(index_rows) == 2

@@ -85,8 +85,23 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "trade_log.json",
         "report.txt",
         "dataset_quality_audit.json",
+        "manifest.json",
+        "metric_schema_version.txt",
     ]:
         assert (run_dir / name).exists(), name
+
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["metric_schema_version"] == cache_runner.CANONICAL_METRIC_SCHEMA_VERSION
+    assert manifest["code_version"]
+    assert "parameters" in manifest
+    assert "data_snapshot_identifiers" in manifest
+    assert "environment" in manifest
+
+    index_rows = (output_root / "experiment_index.jsonl").read_text().strip().splitlines()
+    assert len(index_rows) == 1
+    index_entry = json.loads(index_rows[0])
+    assert index_entry["run_type"] == "backtest"
+    assert index_entry["manifest_path"].endswith("manifest.json")
 
     metrics_rows = json.loads((run_dir / "metrics.json").read_text())
     metric_names = {row["metric"] for row in metrics_rows}

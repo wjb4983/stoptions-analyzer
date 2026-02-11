@@ -5,6 +5,12 @@ import json
 import random
 import argparse
 import logging
+import hashlib
+import os
+import platform
+import socket
+import subprocess
+import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from itertools import product
@@ -45,6 +51,7 @@ from backtesting.walk_forward import (
 
 
 LOGGER = logging.getLogger(__name__)
+CANONICAL_METRIC_SCHEMA_VERSION = "1.0"
 
 
 def run_backtest_cache(
@@ -316,6 +323,44 @@ def run_time_series_momentum_backtest(
     metrics["turnover_total"] = turnover_stats["total"]
     metrics["cost_total"] = cost_totals.get("total", 0.0)
 
+    parameter_payload = {
+        "tickers": list(tickers),
+        "lookback_days": lookback_days,
+        "skip_days": skip_days,
+        "costs_bps": costs_bps,
+        "execution_model": execution_model,
+        "execution_model_params": execution_model_params or {},
+        "carry_model": carry_model,
+        "carry_model_params": carry_model_params or {},
+        "entry_signal": entry_signal,
+        "entry_signal_params": entry_signal_params or {},
+        "exit_signal": exit_signal,
+        "exit_signal_params": exit_signal_params or {},
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "signal_rebalance_interval": signal_rebalance_interval,
+        "starting_capital": starting_capital,
+        "bet_sizing_mode": bet_sizing_mode,
+        "custom_bet_pct": custom_bet_pct,
+        "resolved_bet_pct": bet_fraction * 100.0,
+        "strategy": strategy,
+        "xsmom_top_quantile": xsmom_top_quantile,
+        "xsmom_bottom_quantile": xsmom_bottom_quantile,
+        "xsmom_long_only": xsmom_long_only,
+        "xsmom_vol_lookback_days": xsmom_vol_lookback_days,
+        "timeframe": timeframe,
+        "portfolio_method": portfolio_method,
+        "portfolio_vol_lookback_bars": portfolio_vol_lookback_bars,
+        "portfolio_target_volatility": portfolio_target_volatility,
+        "portfolio_max_symbol_weight": portfolio_max_symbol_weight,
+        "portfolio_max_sector_weight": portfolio_max_sector_weight,
+        "portfolio_max_gross_exposure": portfolio_max_gross_exposure,
+        "portfolio_min_net_exposure": portfolio_min_net_exposure,
+        "portfolio_max_net_exposure": portfolio_max_net_exposure,
+        "portfolio_sector_map": dict(portfolio_sector_map or {}),
+        "cache_root": str(cache_root),
+    }
+
     run_dir = _persist_backtest_outputs(
         timestamps=timestamps,
         symbol_order=symbol_order,
@@ -325,6 +370,9 @@ def run_time_series_momentum_backtest(
         risk_diagnostics=portfolio_result.diagnostics,
         metrics=metrics,
         dataset_contracts=dataset_contracts,
+        parameters=parameter_payload,
+        data_snapshot=_build_data_snapshot_identifiers(arrays=arrays, cache_root=cache_root, timeframe=timeframe),
+        random_seed=None,
     )
 
     trade_log_rows = _build_trade_log_rows(
@@ -341,38 +389,7 @@ def run_time_series_momentum_backtest(
         title=f"{strategy.upper()} Backtest" if strategy != "momentum" else "Time-Series Momentum Backtest",
         params={
             "tickers": ", ".join(tickers),
-            "lookback_days": lookback_days,
-            "skip_days": skip_days,
-            "costs_bps": costs_bps,
-            "execution_model": execution_model,
-            "execution_model_params": json.dumps(execution_model_params or {}),
-            "carry_model": carry_model,
-            "carry_model_params": json.dumps(carry_model_params or {}),
-            "entry_signal": entry_signal,
-            "entry_signal_params": json.dumps(entry_signal_params or {}),
-            "exit_signal": exit_signal,
-            "exit_signal_params": json.dumps(exit_signal_params or {}),
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "signal_rebalance_interval": signal_rebalance_interval,
-            "starting_capital": starting_capital,
-            "bet_sizing_mode": bet_sizing_mode,
-            "custom_bet_pct": custom_bet_pct,
-            "resolved_bet_pct": bet_fraction * 100.0,
-            "strategy": strategy,
-            "xsmom_top_quantile": xsmom_top_quantile,
-            "xsmom_bottom_quantile": xsmom_bottom_quantile,
-            "xsmom_long_only": xsmom_long_only,
-            "xsmom_vol_lookback_days": xsmom_vol_lookback_days,
-            "timeframe": timeframe,
-            "portfolio_method": portfolio_method,
-            "portfolio_vol_lookback_bars": portfolio_vol_lookback_bars,
-            "portfolio_target_volatility": portfolio_target_volatility,
-            "portfolio_max_symbol_weight": portfolio_max_symbol_weight,
-            "portfolio_max_sector_weight": portfolio_max_sector_weight,
-            "portfolio_max_gross_exposure": portfolio_max_gross_exposure,
-            "portfolio_min_net_exposure": portfolio_min_net_exposure,
-            "portfolio_max_net_exposure": portfolio_max_net_exposure,
+            **{k: v for k, v in parameter_payload.items() if k not in {"tickers", "cache_root", "portfolio_sector_map"}},
         },
         metrics=metrics,
         drawdown_rows=drawdown_rows,
@@ -503,6 +520,20 @@ def run_parameter_sweep(
         invalid_rows=invalid_rows,
         errors=errors,
         top_n=top_n,
+        parameters={
+            "tickers": list(tickers),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "cache_root": str(cache_root),
+            "entry_grid": entry_grid,
+            "exit_grid": exit_grid,
+            "core_grid": core_grid,
+            "max_workers": n_workers,
+            "fail_fast": fail_fast,
+            "continue_on_error": continue_on_error,
+            "top_n": top_n,
+        },
+        random_seed=seed,
     )
     return (
         f"Sweep complete: {len(ranked_rows)} successful combos, "
@@ -796,6 +827,8 @@ def _persist_sweep_outputs(
     invalid_rows: list[dict[str, Any]],
     errors: list[dict[str, Any]],
     top_n: int,
+    parameters: dict[str, Any],
+    random_seed: int,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_sweep_{timestamp}"
@@ -823,6 +856,49 @@ def _persist_sweep_outputs(
             f"core=(lookback_days={row['lookback_days']}, skip_days={row['skip_days']}, costs_bps={row['costs_bps']})"
         )
     (run_dir / "top_n_report.txt").write_text("\n".join(report_lines))
+
+    manifest = {
+        "run_type": "parameter_sweep",
+        "created_at": datetime.now().isoformat(),
+        "code_version": _resolve_git_commit(),
+        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+        "parameters": parameters,
+        "data_snapshot_identifiers": _build_sweep_snapshot_identifiers(parameters),
+        "random_seed": int(random_seed),
+        "environment": _collect_environment_metadata(),
+        "result_summary": {
+            "successful_combos": len(ranked_rows),
+            "invalid_combos": len(invalid_rows),
+            "failed_combos": len(errors),
+            "best_sharpe": float(ranked_rows[0]["sharpe"]) if ranked_rows else 0.0,
+        },
+        "reproducibility_fingerprint": _stable_fingerprint(
+            {
+                "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+                "parameters": parameters,
+                "random_seed": int(random_seed),
+                "top_row": ranked_rows[0] if ranked_rows else {},
+            }
+        ),
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+    _append_experiment_index(
+        {
+            "timestamp": manifest["created_at"],
+            "run_type": "parameter_sweep",
+            "run_dir": str(run_dir),
+            "code_version": manifest["code_version"],
+            "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+            "random_seed": int(random_seed),
+            "primary_metric": "sharpe",
+            "primary_metric_value": float(ranked_rows[0]["sharpe"]) if ranked_rows else 0.0,
+            "manifest_path": str(run_dir / "manifest.json"),
+            "reproducibility_fingerprint": manifest["reproducibility_fingerprint"],
+            "parameters": parameters,
+            "data_snapshot_identifiers": manifest["data_snapshot_identifiers"],
+        }
+    )
 
     return run_dir
 
@@ -1332,6 +1408,9 @@ def _persist_backtest_outputs(
     risk_diagnostics: dict[str, np.ndarray],
     metrics: dict[str, float],
     dataset_contracts: object | None = None,
+    parameters: dict[str, Any] | None = None,
+    data_snapshot: dict[str, Any] | None = None,
+    random_seed: int | None = None,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
@@ -1376,6 +1455,7 @@ def _persist_backtest_outputs(
         writer.writeheader()
         writer.writerows(metrics_rows)
     (run_dir / "metrics.json").write_text(json.dumps(metrics_rows, indent=2))
+    (run_dir / "metric_schema_version.txt").write_text(f"{CANONICAL_METRIC_SCHEMA_VERSION}\n")
 
     if dataset_contracts is not None:
         audit_payload = {
@@ -1386,7 +1466,124 @@ def _persist_backtest_outputs(
         }
         (run_dir / "dataset_quality_audit.json").write_text(json.dumps(audit_payload, indent=2))
 
+    manifest = {
+        "run_type": "backtest",
+        "created_at": datetime.now().isoformat(),
+        "code_version": _resolve_git_commit(),
+        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+        "parameters": parameters or {},
+        "data_snapshot_identifiers": data_snapshot or {},
+        "random_seed": random_seed,
+        "environment": _collect_environment_metadata(),
+        "reproducibility_fingerprint": _stable_fingerprint(
+            {
+                "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+                "parameters": parameters or {},
+                "random_seed": random_seed,
+                "data_snapshot_identifiers": data_snapshot or {},
+            }
+        ),
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    _append_experiment_index(
+        {
+            "timestamp": manifest["created_at"],
+            "run_type": "backtest",
+            "run_dir": str(run_dir),
+            "code_version": manifest["code_version"],
+            "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+            "random_seed": random_seed,
+            "primary_metric": "sharpe",
+            "primary_metric_value": float(metrics.get("sharpe", 0.0)),
+            "manifest_path": str(run_dir / "manifest.json"),
+            "reproducibility_fingerprint": manifest["reproducibility_fingerprint"],
+            "parameters": parameters or {},
+            "data_snapshot_identifiers": data_snapshot or {},
+        }
+    )
+
     return run_dir
+
+
+def _resolve_git_commit() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    except Exception:
+        return "unknown"
+
+
+def _collect_environment_metadata() -> dict[str, Any]:
+    return {
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "hostname": socket.gethostname(),
+        "pid": os.getpid(),
+        "numpy_version": np.__version__,
+    }
+
+
+def _stable_fingerprint(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _build_data_snapshot_identifiers(*, arrays: EngineArrayBundle, cache_root: Path, timeframe: str) -> dict[str, Any]:
+    symbols = [symbol for symbol, _ in sorted(arrays.metadata.symbol_to_column.items(), key=lambda item: item[1])]
+    range_start = _timestamp_to_iso8601(arrays.date_index[0]) if arrays.date_index.size else None
+    range_end = _timestamp_to_iso8601(arrays.date_index[-1]) if arrays.date_index.size else None
+    payload = {
+        "symbols": symbols,
+        "timeframe": timeframe,
+        "cache_root": str(cache_root),
+        "range_start": range_start,
+        "range_end": range_end,
+        "coverage_by_symbol": arrays.metadata.coverage_by_symbol,
+        "missingness_by_symbol": arrays.metadata.missingness_by_symbol,
+    }
+    payload["dataset_fingerprint"] = _stable_fingerprint(payload)
+    return payload
+
+
+def _build_sweep_snapshot_identifiers(parameters: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "tickers": list(parameters.get("tickers", [])),
+        "start_date": parameters.get("start_date"),
+        "end_date": parameters.get("end_date"),
+        "cache_root": parameters.get("cache_root"),
+        "core_grid": parameters.get("core_grid", {}),
+    }
+    payload["dataset_fingerprint"] = _stable_fingerprint(payload)
+    return payload
+
+
+def _append_experiment_index(entry: dict[str, Any]) -> None:
+    BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    jsonl_path = BACKTEST_OUTPUT_DIR / "experiment_index.jsonl"
+    with jsonl_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    csv_path = BACKTEST_OUTPUT_DIR / "experiment_index.csv"
+    row = {
+        "timestamp": entry.get("timestamp"),
+        "run_type": entry.get("run_type"),
+        "run_dir": entry.get("run_dir"),
+        "code_version": entry.get("code_version"),
+        "metric_schema_version": entry.get("metric_schema_version"),
+        "random_seed": entry.get("random_seed"),
+        "primary_metric": entry.get("primary_metric"),
+        "primary_metric_value": entry.get("primary_metric_value"),
+        "manifest_path": entry.get("manifest_path"),
+        "reproducibility_fingerprint": entry.get("reproducibility_fingerprint"),
+        "parameters_json": json.dumps(entry.get("parameters", {}), sort_keys=True),
+        "data_snapshot_json": json.dumps(entry.get("data_snapshot_identifiers", {}), sort_keys=True),
+    }
+    fieldnames = list(row.keys())
+    write_header = not csv_path.exists()
+    with csv_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 
