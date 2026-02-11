@@ -188,3 +188,44 @@ def test_run_walk_forward_backtest_supports_fraction_windows(monkeypatch, tmp_pa
     assert "Walk-forward complete" in output
     run_dirs = list((tmp_path / "outputs").glob("tsmom_walk_forward_*"))
     assert len(run_dirs) == 1
+
+
+def test_run_walk_forward_backtest_handles_integer_timestamps(monkeypatch, tmp_path) -> None:
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+
+    class _Arrays:
+        def __init__(self) -> None:
+            import numpy as np
+
+            self.close_prices = np.ones((20, 1), dtype=float)
+            self.missing_mask = np.zeros((20, 1), dtype=bool)
+            base_ms = 1704067200000
+            self.date_index = np.array([base_ms + (i * 60_000) for i in range(20)], dtype=np.int64)
+
+    monkeypatch.setattr(cache_runner, "load_backtest_engine_arrays", lambda **kwargs: _Arrays())
+
+    class _Result:
+        def __init__(self, n: int) -> None:
+            import numpy as np
+
+            self.metrics = {"sharpe": 1.0, "total_return": 0.01 * n}
+            self.equity_curve = np.linspace(1.0, 1.0 + (0.01 * n), num=n)
+
+    monkeypatch.setattr(cache_runner, "build_targets", lambda **kwargs: kwargs["close_prices"] * 0.0)
+    monkeypatch.setattr(cache_runner, "backtest_vectorized", lambda **kwargs: _Result(kwargs["prices"].shape[0]))
+
+    output = cache_runner.run_walk_forward_backtest(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        entry_grid={"ts_momentum": [{"lookback_days": 5, "skip_days": 1}]},
+        exit_grid={"none": [{}]},
+        core_grid={"lookback_days": [5], "skip_days": [1], "costs_bps": [1.0]},
+        train_fraction=0.6,
+        validation_fraction=0.2,
+        test_fraction=0.2,
+        step_fraction=0.2,
+    )
+
+    assert "Walk-forward complete" in output

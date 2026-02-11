@@ -616,7 +616,7 @@ def run_walk_forward_backtest(
         equity = _to_numpy_1d(result.equity_curve)
         timestamps = arrays.date_index[start_idx:end_idx]
         equity_rows = [
-            {"timestamp": timestamps[idx].isoformat(), "equity": float(equity[idx])}
+            {"timestamp": _timestamp_to_iso8601(timestamps[idx]), "equity": float(equity[idx])}
             for idx in range(min(len(timestamps), equity.size))
         ]
         return {"metrics": metrics, "equity": equity_rows}
@@ -1322,7 +1322,7 @@ def _persist_backtest_outputs(
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    time_strings = [datetime.utcfromtimestamp(int(ts) / 1000.0).isoformat() for ts in timestamps]
+    time_strings = [_timestamp_to_iso8601(ts) for ts in timestamps]
 
     _write_series_csv_json(
         run_dir=run_dir,
@@ -1364,6 +1364,37 @@ def _persist_backtest_outputs(
 
     return run_dir
 
+
+
+
+def _timestamp_to_iso8601(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, np.datetime64):
+        nanos = value.astype("datetime64[ns]").astype(np.int64)
+        return datetime.utcfromtimestamp(float(nanos) / 1_000_000_000.0).isoformat()
+
+    if isinstance(value, (np.integer, int, np.floating, float)):
+        numeric = float(value)
+        abs_numeric = abs(numeric)
+        # heuristic based on magnitude: seconds/ms/us/ns epoch
+        if abs_numeric >= 1e17:  # ns
+            seconds = numeric / 1_000_000_000.0
+        elif abs_numeric >= 1e14:  # us
+            seconds = numeric / 1_000_000.0
+        elif abs_numeric >= 1e11:  # ms
+            seconds = numeric / 1_000.0
+        else:  # seconds
+            seconds = numeric
+        return datetime.utcfromtimestamp(seconds).isoformat()
+
+    if hasattr(value, "isoformat"):
+        try:
+            return str(value.isoformat())
+        except Exception:
+            pass
+    return str(value)
 
 def _write_series_csv_json(
     *,
