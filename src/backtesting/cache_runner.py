@@ -513,10 +513,14 @@ def run_walk_forward_backtest(
     entry_grid: dict[str, list[dict[str, Any]]],
     exit_grid: dict[str, list[dict[str, Any]]],
     core_grid: dict[str, list[Any]],
-    train_bars: int,
-    validation_bars: int,
-    test_bars: int,
+    train_bars: int | None = None,
+    validation_bars: int | None = None,
+    test_bars: int | None = None,
     step_bars: int | None = None,
+    train_fraction: float | None = None,
+    validation_fraction: float | None = None,
+    test_fraction: float | None = None,
+    step_fraction: float | None = None,
     score_metric: str = "sharpe",
 ) -> str:
     combos, invalid_rows = generate_sweep_combinations(
@@ -553,12 +557,26 @@ def run_walk_forward_backtest(
     )
     prices = _fill_missing_prices(arrays.close_prices)
 
+    total_bars = int(prices.shape[0])
+    if train_fraction is not None or validation_fraction is not None or test_fraction is not None:
+        if train_fraction is None or validation_fraction is None or test_fraction is None:
+            raise ValueError("train/validation/test fractions must all be provided together")
+        frac_sum = float(train_fraction) + float(validation_fraction) + float(test_fraction)
+        if frac_sum <= 0:
+            raise ValueError("walk-forward fractions must sum to a positive value")
+        train_bars = max(1, int(round(total_bars * float(train_fraction) / frac_sum)))
+        validation_bars = max(1, int(round(total_bars * float(validation_fraction) / frac_sum)))
+        test_bars = max(1, int(round(total_bars * float(test_fraction) / frac_sum)))
+        step_bars = max(1, int(round(total_bars * float(step_fraction if step_fraction is not None else test_fraction))))
+    elif train_bars is None or validation_bars is None or test_bars is None:
+        raise ValueError("Either explicit bar windows or train/validation/test fractions are required")
+
     folds = build_walk_forward_folds(
-        total_bars=prices.shape[0],
-        train_bars=train_bars,
-        validation_bars=validation_bars,
-        test_bars=test_bars,
-        step_bars=step_bars,
+        total_bars=total_bars,
+        train_bars=int(train_bars),
+        validation_bars=int(validation_bars),
+        test_bars=int(test_bars),
+        step_bars=None if step_bars is None else int(step_bars),
     )
     if not folds:
         raise ValueError("No folds generated; increase date range or reduce window sizes")
@@ -1566,10 +1584,14 @@ def _build_parser() -> argparse.ArgumentParser:
     wf_parser.add_argument("--entry-grid", required=True, help="JSON mapping signal->list[params].")
     wf_parser.add_argument("--exit-grid", required=True, help="JSON mapping signal->list[params].")
     wf_parser.add_argument("--core-grid", required=True, help="JSON mapping core param->list[values].")
-    wf_parser.add_argument("--train-bars", type=int, required=True)
-    wf_parser.add_argument("--validation-bars", type=int, required=True)
-    wf_parser.add_argument("--test-bars", type=int, required=True)
+    wf_parser.add_argument("--train-bars", type=int, required=False)
+    wf_parser.add_argument("--validation-bars", type=int, required=False)
+    wf_parser.add_argument("--test-bars", type=int, required=False)
     wf_parser.add_argument("--step-bars", type=int, default=None)
+    wf_parser.add_argument("--train-fraction", type=float, default=None)
+    wf_parser.add_argument("--validation-fraction", type=float, default=None)
+    wf_parser.add_argument("--test-fraction", type=float, default=None)
+    wf_parser.add_argument("--step-fraction", type=float, default=None)
     wf_parser.add_argument("--score-metric", default="sharpe")
 
     parser.set_defaults(command="run")
@@ -1610,10 +1632,14 @@ def main() -> None:
             entry_grid={str(k): list(v) for k, v in _parse_json_object(args.entry_grid).items()},
             exit_grid={str(k): list(v) for k, v in _parse_json_object(args.exit_grid).items()},
             core_grid={str(k): list(v) for k, v in _parse_json_object(args.core_grid).items()},
-            train_bars=int(args.train_bars),
-            validation_bars=int(args.validation_bars),
-            test_bars=int(args.test_bars),
+            train_bars=None if args.train_bars is None else int(args.train_bars),
+            validation_bars=None if args.validation_bars is None else int(args.validation_bars),
+            test_bars=None if args.test_bars is None else int(args.test_bars),
             step_bars=args.step_bars,
+            train_fraction=args.train_fraction,
+            validation_fraction=args.validation_fraction,
+            test_fraction=args.test_fraction,
+            step_fraction=args.step_fraction,
             score_metric=str(args.score_metric),
         )
     else:

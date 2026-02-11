@@ -25,6 +25,7 @@ class BacktestingPage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
         super().__init__(parent)
         self.controller = controller
+        self._updating_wf_fractions = False
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -183,25 +184,69 @@ class BacktestingPage(ttk.Frame):
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
 
         row += 1
-        self.walk_forward_frame = ttk.LabelFrame(strategy_frame, text="Walk-Forward Windows (bars)")
+        self.walk_forward_frame = ttk.LabelFrame(strategy_frame, text="Walk-Forward Windows (fractions of data)")
         self.walk_forward_frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
         self.walk_forward_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(self.walk_forward_frame, text="Train").grid(row=0, column=0, sticky="w", padx=8, pady=6)
-        self.wf_train_bars_var = tk.StringVar(value="3900")
-        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_train_bars_var).grid(row=0, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Label(self.walk_forward_frame, text="Train Fraction").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        self.wf_train_fraction_var = tk.DoubleVar(value=0.70)
+        self.wf_train_fraction_label = ttk.Label(self.walk_forward_frame, text="0.70")
+        self.wf_train_scale = tk.Scale(
+            self.walk_forward_frame,
+            from_=0.05,
+            to=0.90,
+            resolution=0.01,
+            orient="horizontal",
+            variable=self.wf_train_fraction_var,
+            command=lambda _value: self._on_wf_fraction_changed("train"),
+        )
+        self.wf_train_scale.grid(row=0, column=1, sticky="ew", padx=8, pady=6)
+        self.wf_train_fraction_label.grid(row=0, column=2, sticky="e", padx=8, pady=6)
 
-        ttk.Label(self.walk_forward_frame, text="Validation").grid(row=1, column=0, sticky="w", padx=8, pady=6)
-        self.wf_validation_bars_var = tk.StringVar(value="780")
-        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_validation_bars_var).grid(row=1, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Label(self.walk_forward_frame, text="Validation Fraction").grid(row=1, column=0, sticky="w", padx=8, pady=6)
+        self.wf_validation_fraction_var = tk.DoubleVar(value=0.15)
+        self.wf_validation_fraction_label = ttk.Label(self.walk_forward_frame, text="0.15")
+        self.wf_validation_scale = tk.Scale(
+            self.walk_forward_frame,
+            from_=0.05,
+            to=0.90,
+            resolution=0.01,
+            orient="horizontal",
+            variable=self.wf_validation_fraction_var,
+            command=lambda _value: self._on_wf_fraction_changed("validation"),
+        )
+        self.wf_validation_scale.grid(row=1, column=1, sticky="ew", padx=8, pady=6)
+        self.wf_validation_fraction_label.grid(row=1, column=2, sticky="e", padx=8, pady=6)
 
-        ttk.Label(self.walk_forward_frame, text="Test").grid(row=2, column=0, sticky="w", padx=8, pady=6)
-        self.wf_test_bars_var = tk.StringVar(value="780")
-        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_test_bars_var).grid(row=2, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Label(self.walk_forward_frame, text="Test Fraction").grid(row=2, column=0, sticky="w", padx=8, pady=6)
+        self.wf_test_fraction_var = tk.DoubleVar(value=0.15)
+        self.wf_test_fraction_label = ttk.Label(self.walk_forward_frame, text="0.15")
+        self.wf_test_scale = tk.Scale(
+            self.walk_forward_frame,
+            from_=0.05,
+            to=0.90,
+            resolution=0.01,
+            orient="horizontal",
+            variable=self.wf_test_fraction_var,
+            command=lambda _value: self._on_wf_fraction_changed("test"),
+        )
+        self.wf_test_scale.grid(row=2, column=1, sticky="ew", padx=8, pady=6)
+        self.wf_test_fraction_label.grid(row=2, column=2, sticky="e", padx=8, pady=6)
 
-        ttk.Label(self.walk_forward_frame, text="Step (blank = test size)").grid(row=3, column=0, sticky="w", padx=8, pady=6)
-        self.wf_step_bars_var = tk.StringVar(value="")
-        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_step_bars_var).grid(row=3, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Label(self.walk_forward_frame, text="Step Fraction").grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        self.wf_step_fraction_var = tk.DoubleVar(value=0.15)
+        self.wf_step_fraction_label = ttk.Label(self.walk_forward_frame, text="0.15")
+        self.wf_step_scale = tk.Scale(
+            self.walk_forward_frame,
+            from_=0.05,
+            to=1.00,
+            resolution=0.01,
+            orient="horizontal",
+            variable=self.wf_step_fraction_var,
+            command=lambda _value: self._refresh_wf_fraction_labels(),
+        )
+        self.wf_step_scale.grid(row=3, column=1, sticky="ew", padx=8, pady=6)
+        self.wf_step_fraction_label.grid(row=3, column=2, sticky="e", padx=8, pady=6)
 
         row += 1
         self.strategy_specific_container = ttk.Frame(strategy_frame)
@@ -275,6 +320,56 @@ class BacktestingPage(ttk.Frame):
         delta = getattr(event, "delta", 0)
         if delta:
             self.page_canvas.yview_scroll(int(-delta / 120), "units")
+
+    def _refresh_wf_fraction_labels(self) -> None:
+        self.wf_train_fraction_label.config(text=f"{float(self.wf_train_fraction_var.get()):.2f}")
+        self.wf_validation_fraction_label.config(text=f"{float(self.wf_validation_fraction_var.get()):.2f}")
+        self.wf_test_fraction_label.config(text=f"{float(self.wf_test_fraction_var.get()):.2f}")
+        self.wf_step_fraction_label.config(text=f"{float(self.wf_step_fraction_var.get()):.2f}")
+
+    def _on_wf_fraction_changed(self, changed: str) -> None:
+        if self._updating_wf_fractions:
+            return
+        values = {
+            "train": max(0.01, float(self.wf_train_fraction_var.get())),
+            "validation": max(0.01, float(self.wf_validation_fraction_var.get())),
+            "test": max(0.01, float(self.wf_test_fraction_var.get())),
+        }
+        total = values["train"] + values["validation"] + values["test"]
+        if total <= 0:
+            return
+        if abs(total - 1.0) < 1e-6:
+            self._refresh_wf_fraction_labels()
+            return
+
+        others = [key for key in values if key != changed]
+        other_total = values[others[0]] + values[others[1]]
+        target_other_total = max(0.02, 1.0 - values[changed])
+
+        if other_total <= 0:
+            values[others[0]] = target_other_total / 2.0
+            values[others[1]] = target_other_total / 2.0
+        else:
+            scale = target_other_total / other_total
+            values[others[0]] *= scale
+            values[others[1]] *= scale
+
+        # clamp and renormalize
+        for key in values:
+            values[key] = min(0.98, max(0.01, values[key]))
+        renorm = values["train"] + values["validation"] + values["test"]
+        values["train"] /= renorm
+        values["validation"] /= renorm
+        values["test"] /= renorm
+
+        self._updating_wf_fractions = True
+        try:
+            self.wf_train_fraction_var.set(values["train"])
+            self.wf_validation_fraction_var.set(values["validation"])
+            self.wf_test_fraction_var.set(values["test"])
+        finally:
+            self._updating_wf_fractions = False
+        self._refresh_wf_fraction_labels()
 
     def _build_momentum_options(self, parent: ttk.Frame) -> None:
         self.momentum_options_frame = ttk.LabelFrame(parent, text="Momentum Options")
@@ -359,10 +454,11 @@ class BacktestingPage(ttk.Frame):
         self.portfolio_max_gross_var.set(str(settings.get("portfolio_max_gross_exposure", "1.0")))
         self.portfolio_min_net_var.set(str(settings.get("portfolio_min_net_exposure", "-1.0")))
         self.portfolio_max_net_var.set(str(settings.get("portfolio_max_net_exposure", "1.0")))
-        self.wf_train_bars_var.set(str(settings.get("wf_train_bars", "3900")))
-        self.wf_validation_bars_var.set(str(settings.get("wf_validation_bars", "780")))
-        self.wf_test_bars_var.set(str(settings.get("wf_test_bars", "780")))
-        self.wf_step_bars_var.set(str(settings.get("wf_step_bars", "")))
+        self.wf_train_fraction_var.set(float(settings.get("wf_train_fraction", "0.70")))
+        self.wf_validation_fraction_var.set(float(settings.get("wf_validation_fraction", "0.15")))
+        self.wf_test_fraction_var.set(float(settings.get("wf_test_fraction", "0.15")))
+        self.wf_step_fraction_var.set(float(settings.get("wf_step_fraction", "0.15")))
+        self._refresh_wf_fraction_labels()
 
         selected_entries = self._split_csv_setting(settings.get("selected_entry_signals", "ts_momentum"))
         selected_exits = self._split_csv_setting(settings.get("selected_exit_signals", "none"))
@@ -432,10 +528,10 @@ class BacktestingPage(ttk.Frame):
             "custom_bet_pct": str(custom_bet_pct),
             "timeframe": self.timeframe_var.get().strip() or "1m",
             "use_walk_forward": bool(self.use_walk_forward_var.get()),
-            "wf_train_bars": self.wf_train_bars_var.get().strip() or "3900",
-            "wf_validation_bars": self.wf_validation_bars_var.get().strip() or "780",
-            "wf_test_bars": self.wf_test_bars_var.get().strip() or "780",
-            "wf_step_bars": self.wf_step_bars_var.get().strip(),
+            "wf_train_fraction": f"{float(self.wf_train_fraction_var.get()):.2f}",
+            "wf_validation_fraction": f"{float(self.wf_validation_fraction_var.get()):.2f}",
+            "wf_test_fraction": f"{float(self.wf_test_fraction_var.get()):.2f}",
+            "wf_step_fraction": f"{float(self.wf_step_fraction_var.get()):.2f}",
             "portfolio_method": self.portfolio_method_var.get().strip() or "equal_weight",
             "portfolio_vol_lookback_bars": self.portfolio_vol_lookback_var.get().strip() or "20",
             "portfolio_target_volatility": self.portfolio_target_vol_var.get().strip() or "0.10",
@@ -521,7 +617,7 @@ class BacktestingPage(ttk.Frame):
                 walk_forward_windows = self._validate_walk_forward_inputs()
                 if walk_forward_windows is None:
                     return
-                train_bars, validation_bars, test_bars, step_bars = walk_forward_windows
+                train_fraction, validation_fraction, test_fraction, step_fraction = walk_forward_windows
                 worker_target = self._run_walk_forward_worker
                 worker_args = (
                     tickers,
@@ -533,10 +629,10 @@ class BacktestingPage(ttk.Frame):
                     costs_bps,
                     selected_entries,
                     selected_exits,
-                    train_bars,
-                    validation_bars,
-                    test_bars,
-                    step_bars,
+                    train_fraction,
+                    validation_fraction,
+                    test_fraction,
+                    step_fraction,
                 )
                 status_line = f"Running walk-forward with {len(selected_entries) * len(selected_exits)} candidates...\n"
             else:
@@ -646,27 +742,24 @@ class BacktestingPage(ttk.Frame):
 
         return float(top_quantile), float(bottom_quantile), int(vol_lookback)
 
-    def _validate_walk_forward_inputs(self) -> tuple[int, int, int, int | None] | None:
-        train_bars = parse_float(self.wf_train_bars_var.get())
-        validation_bars = parse_float(self.wf_validation_bars_var.get())
-        test_bars = parse_float(self.wf_test_bars_var.get())
-        step_raw = self.wf_step_bars_var.get().strip()
-        step_bars = parse_float(step_raw) if step_raw else None
+    def _validate_walk_forward_inputs(self) -> tuple[float, float, float, float] | None:
+        train_fraction = float(self.wf_train_fraction_var.get())
+        validation_fraction = float(self.wf_validation_fraction_var.get())
+        test_fraction = float(self.wf_test_fraction_var.get())
+        step_fraction = float(self.wf_step_fraction_var.get())
 
-        if train_bars is None or train_bars < 1 or int(train_bars) != train_bars:
-            messagebox.showinfo("Invalid input", "Walk-forward train bars must be a positive integer.")
+        values = [train_fraction, validation_fraction, test_fraction]
+        if any(value <= 0.0 or value >= 1.0 for value in values):
+            messagebox.showinfo("Invalid input", "Train/validation/test fractions must be in (0, 1).")
             return None
-        if validation_bars is None or validation_bars < 1 or int(validation_bars) != validation_bars:
-            messagebox.showinfo("Invalid input", "Walk-forward validation bars must be a positive integer.")
+        if abs(sum(values) - 1.0) > 1e-6:
+            messagebox.showinfo("Invalid input", "Train, validation, and test fractions must sum to 1.0.")
             return None
-        if test_bars is None or test_bars < 1 or int(test_bars) != test_bars:
-            messagebox.showinfo("Invalid input", "Walk-forward test bars must be a positive integer.")
-            return None
-        if step_bars is not None and (step_bars < 1 or int(step_bars) != step_bars):
-            messagebox.showinfo("Invalid input", "Walk-forward step bars must be a positive integer when provided.")
+        if step_fraction <= 0.0 or step_fraction > 1.0:
+            messagebox.showinfo("Invalid input", "Step fraction must be in (0, 1].")
             return None
 
-        return int(train_bars), int(validation_bars), int(test_bars), None if step_bars is None else int(step_bars)
+        return train_fraction, validation_fraction, test_fraction, step_fraction
 
     def _run_walk_forward_worker(
         self,
@@ -679,10 +772,10 @@ class BacktestingPage(ttk.Frame):
         costs_bps: float,
         entry_signals: list[str],
         exit_signals: list[str],
-        train_bars: int,
-        validation_bars: int,
-        test_bars: int,
-        step_bars: int | None,
+        train_fraction: float,
+        validation_fraction: float,
+        test_fraction: float,
+        step_fraction: float,
     ) -> None:
         try:
             entry_grid = {signal: [{}] for signal in entry_signals}
@@ -700,10 +793,10 @@ class BacktestingPage(ttk.Frame):
                 entry_grid=entry_grid,
                 exit_grid=exit_grid,
                 core_grid=core_grid,
-                train_bars=train_bars,
-                validation_bars=validation_bars,
-                test_bars=test_bars,
-                step_bars=step_bars,
+                train_fraction=train_fraction,
+                validation_fraction=validation_fraction,
+                test_fraction=test_fraction,
+                step_fraction=step_fraction,
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
