@@ -72,5 +72,51 @@ DEFAULT_BACKTEST_SETTINGS = {
     "start_date": "",
     "end_date": "",
     "notes": "",
+    "ui_mode": "basic",
+    "selected_preset": "custom",
+    "selected_template": "",
     "backtest_data_root": str(BACKTEST_CACHE_DIR),
+}
+
+BACKTEST_STRATEGY_PRESETS = {
+    "daily_trend": {
+        "label": "Daily Trend",
+        "settings": {
+            "strategy": "momentum",
+            "timeframe": "1d",
+            "lookback_days": "120",
+            "skip_days": "5",
+            "selected_entry_signals": "ma_trend,breakout",
+            "selected_exit_signals": "momentum_flip,max_hold",
+            "portfolio_method": "equal_weight",
+            "costs_bps": "2",
+        },
+    },
+    "intraday_momentum": {
+        "label": "Intraday Momentum",
+        "settings": {
+            "strategy": "momentum",
+            "timeframe": "5m",
+            "lookback_days": "80",
+            "skip_days": "3",
+            "selected_entry_signals": "ts_momentum,breakout",
+            "selected_exit_signals": "trailing_stop,momentum_flip",
+            "portfolio_method": "vol_target",
+            "costs_bps": "8",
+        },
+    },
+    "xsmom_baseline": {
+        "label": "XSMOM Baseline",
+        "settings": {
+            "strategy": "xsmom",
+            "timeframe": "1d",
+            "lookback_days": "90",
+            "skip_days": "5",
+            "xsmom_top_quantile": "0.2",
+            "xsmom_bottom_quantile": "0.2",
+            "xsmom_long_only": False,
+            "xsmom_vol_lookback_days": "20",
+            "costs_bps": "5",
+        },
+    },
 }
