@@ -26,37 +26,43 @@ class BacktestingPage(ttk.Frame):
         super().__init__(parent)
         self.controller = controller
 
-        ttk.Label(self, text="Backtesting Parameters", font=("Arial", 18, "bold")).pack(pady=10)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        page_container = ttk.Frame(self)
+        page_container.grid(row=0, column=0, sticky="nsew")
+        page_container.columnconfigure(0, weight=1)
+        page_container.rowconfigure(0, weight=1)
+
+        self.page_canvas = tk.Canvas(page_container, highlightthickness=0)
+        self.page_canvas.grid(row=0, column=0, sticky="nsew")
+        page_scrollbar = ttk.Scrollbar(page_container, orient="vertical", command=self.page_canvas.yview)
+        page_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.page_canvas.configure(yscrollcommand=page_scrollbar.set)
+
+        content = ttk.Frame(self.page_canvas)
+        self._page_canvas_window = self.page_canvas.create_window((0, 0), window=content, anchor="nw")
+        self.page_canvas.bind("<Configure>", self._on_page_canvas_configure)
+        content.bind("<Configure>", self._on_page_frame_configure)
+        self.page_canvas.bind("<Enter>", self._bind_mousewheel)
+        self.page_canvas.bind("<Leave>", self._unbind_mousewheel)
+
+        ttk.Label(content, text="Backtesting Parameters", font=("Arial", 18, "bold")).pack(pady=10)
 
         intro = (
             "Choose a strategy and configure its parameters. Shared settings stay visible, "
             "and strategy-specific controls appear only for the selected strategy."
         )
-        ttk.Label(self, text=intro, wraplength=950, justify="center").pack(pady=5)
+        ttk.Label(content, text=intro, wraplength=950, justify="center").pack(pady=5)
 
-        content = ttk.Frame(self)
+        content = ttk.Frame(content)
         content.pack(fill="both", expand=True, padx=30, pady=10)
         content.columnconfigure(0, weight=1)
         content.rowconfigure(1, weight=1)
 
-        params_container = ttk.Frame(content)
-        params_container.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        params_container.columnconfigure(0, weight=1)
-        params_container.rowconfigure(0, weight=1)
-
-        self.params_canvas = tk.Canvas(params_container, highlightthickness=0)
-        self.params_canvas.grid(row=0, column=0, sticky="nsew")
-        params_scrollbar = ttk.Scrollbar(params_container, orient="vertical", command=self.params_canvas.yview)
-        params_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.params_canvas.configure(yscrollcommand=params_scrollbar.set)
-
-        strategy_frame = ttk.LabelFrame(self.params_canvas, text="Strategy")
+        strategy_frame = ttk.LabelFrame(content, text="Strategy")
+        strategy_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         strategy_frame.columnconfigure(1, weight=1)
-        self._params_canvas_window = self.params_canvas.create_window((0, 0), window=strategy_frame, anchor="nw")
-        self.params_canvas.bind("<Configure>", self._on_params_canvas_configure)
-        strategy_frame.bind("<Configure>", self._on_params_frame_configure)
-        self.params_canvas.bind("<Enter>", self._bind_mousewheel)
-        self.params_canvas.bind("<Leave>", self._unbind_mousewheel)
 
         row = 0
         ttk.Label(strategy_frame, text="Strategy").grid(row=row, column=0, sticky="w", padx=8, pady=6)
@@ -243,32 +249,32 @@ class BacktestingPage(ttk.Frame):
 
         self._on_strategy_changed()
 
-    def _on_params_canvas_configure(self, event: tk.Event) -> None:
-        self.params_canvas.itemconfigure(self._params_canvas_window, width=event.width)
+    def _on_page_canvas_configure(self, event: tk.Event) -> None:
+        self.page_canvas.itemconfigure(self._page_canvas_window, width=event.width)
 
-    def _on_params_frame_configure(self, _event: tk.Event) -> None:
-        self.params_canvas.configure(scrollregion=self.params_canvas.bbox("all"))
+    def _on_page_frame_configure(self, _event: tk.Event) -> None:
+        self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))
 
     def _bind_mousewheel(self, _event: tk.Event) -> None:
-        self.params_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.params_canvas.bind_all("<Button-4>", self._on_mousewheel)
-        self.params_canvas.bind_all("<Button-5>", self._on_mousewheel)
+        self.page_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.page_canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.page_canvas.bind_all("<Button-5>", self._on_mousewheel)
 
     def _unbind_mousewheel(self, _event: tk.Event) -> None:
-        self.params_canvas.unbind_all("<MouseWheel>")
-        self.params_canvas.unbind_all("<Button-4>")
-        self.params_canvas.unbind_all("<Button-5>")
+        self.page_canvas.unbind_all("<MouseWheel>")
+        self.page_canvas.unbind_all("<Button-4>")
+        self.page_canvas.unbind_all("<Button-5>")
 
     def _on_mousewheel(self, event: tk.Event) -> None:
         if getattr(event, "num", None) == 4:
-            self.params_canvas.yview_scroll(-1, "units")
+            self.page_canvas.yview_scroll(-1, "units")
             return
         if getattr(event, "num", None) == 5:
-            self.params_canvas.yview_scroll(1, "units")
+            self.page_canvas.yview_scroll(1, "units")
             return
         delta = getattr(event, "delta", 0)
         if delta:
-            self.params_canvas.yview_scroll(int(-delta / 120), "units")
+            self.page_canvas.yview_scroll(int(-delta / 120), "units")
 
     def _build_momentum_options(self, parent: ttk.Frame) -> None:
         self.momentum_options_frame = ttk.LabelFrame(parent, text="Momentum Options")
