@@ -8,6 +8,8 @@ at that next-open execution time.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
@@ -124,10 +126,31 @@ class LiquidityContext:
     spread_bps: float
 
 
+@dataclass(frozen=True)
+class ExecutionContext:
+    """Per-order execution state used by fill + slippage models."""
+
+    bar_index: int
+    asset_index: int
+    volume: float
+    adv: float
+    volatility: float
+    spread_bps: float
+    order_type: str = "market"
+    latency_bars: int = 0
+    latency_ms: int = 0
+    queue_rank_proxy: float = 0.5
+    available_bar_volume: float = 0.0
+    max_participation_per_bar: float = 1.0
+    realized_participation: float = 0.0
+
+
 def _context_value(liquidity_context: Any | None, key: str, default: float) -> float:
     if liquidity_context is None:
         return float(default)
     if isinstance(liquidity_context, LiquidityContext):
+        return float(getattr(liquidity_context, key, default))
+    if isinstance(liquidity_context, ExecutionContext):
         return float(getattr(liquidity_context, key, default))
     if isinstance(liquidity_context, dict):
         return float(liquidity_context.get(key, default))
@@ -146,7 +169,9 @@ class SpreadSlippage:
         if size == 0:
             return float(price)
         spread_bps = _context_value(liquidity_context, "spread_bps", self.spread_bps)
-        half_spread = max(spread_bps, 0.0) / 2.0 / 10_000.0
+        queue_rank_proxy = np.clip(_context_value(liquidity_context, "queue_rank_proxy", 0.5), 0.0, 1.0)
+        queue_penalty = 1.0 + queue_rank_proxy
+        half_spread = max(spread_bps, 0.0) / 2.0 / 10_000.0 * queue_penalty
         return float(price * (1.0 + np.sign(size) * half_spread))
 
 
@@ -174,13 +199,36 @@ class ParticipationImpactSlippage:
     def apply(self, price: float, size: float, liquidity_context: Any | None = None) -> float:
         if size == 0:
             return float(price)
-        volume = max(_context_value(liquidity_context, "volume", 0.0), 1e-12)
-        adv = max(_context_value(liquidity_context, "adv", volume), 1e-12)
-        denom = max(volume, adv)
-        participation = min(abs(size) / denom, self.max_participation)
+        realized_participation = _context_value(liquidity_context, "realized_participation", np.nan)
+        if np.isfinite(realized_participation) and realized_participation >= 0.0:
+            participation = min(float(realized_participation), self.max_participation)
+        else:
+            volume = max(_context_value(liquidity_context, "volume", 0.0), 1e-12)
+            adv = max(_context_value(liquidity_context, "adv", volume), 1e-12)
+            denom = max(volume, adv)
+            participation = min(abs(size) / denom, self.max_participation)
+        queue_rank_proxy = np.clip(_context_value(liquidity_context, "queue_rank_proxy", 0.5), 0.0, 1.0)
+        participation = participation * (1.0 + queue_rank_proxy)
         impact_bps = self.base_bps + self.impact_coefficient_bps * (participation ** self.participation_exponent)
         impact = impact_bps / 10_000.0
         return float(price * (1.0 + np.sign(size) * impact))
+
+    @classmethod
+    def from_calibration_buckets(
+        cls,
+        buckets: list[dict[str, float]],
+        *,
+        base_bps: float = 0.0,
+        participation_exponent: float = 1.0,
+        max_participation: float = 1.0,
+    ) -> "ParticipationImpactSlippage":
+        impact_coefficient = calibrate_impact_coefficient_bps(buckets)
+        return cls(
+            base_bps=base_bps,
+            impact_coefficient_bps=impact_coefficient,
+            participation_exponent=participation_exponent,
+            max_participation=max_participation,
+        )
 
 
 class VolatilityScaledSlippage:
@@ -206,9 +254,124 @@ class VolatilityScaledSlippage:
         if size == 0:
             return float(price)
         volatility = max(_context_value(liquidity_context, "volatility", self.target_volatility), self.min_volatility)
+        realized_participation = max(_context_value(liquidity_context, "realized_participation", 0.0), 0.0)
+        queue_rank_proxy = np.clip(_context_value(liquidity_context, "queue_rank_proxy", 0.5), 0.0, 1.0)
         scale = (volatility / self.target_volatility) ** self.volatility_exponent
+        execution_stress = 1.0 + realized_participation + queue_rank_proxy * 0.25
         impact = (self.base_bps * scale) / 10_000.0
-        return float(price * (1.0 + np.sign(size) * impact))
+        return float(price * (1.0 + np.sign(size) * impact * execution_stress))
+
+
+@dataclass(frozen=True)
+class FillEvent:
+    bar_index: int
+    asset_index: int
+    requested_size: float
+    filled_size: float
+    residual_size: float
+    participation_rate: float
+    available_volume: float
+    order_type: str
+    latency_bars: int
+    latency_ms: int
+    queue_rank_proxy: float
+
+
+class PartialFillModel:
+    """Applies per-bar participation caps and carries residual orders forward."""
+
+    def __init__(self, max_participation_per_bar: float = 1.0) -> None:
+        if max_participation_per_bar <= 0:
+            raise ValueError("max_participation_per_bar must be positive.")
+        self.max_participation_per_bar = float(max_participation_per_bar)
+
+    def run(
+        self,
+        requested_trades: np.ndarray,
+        available_volume: np.ndarray,
+        *,
+        order_type: str = "market",
+        latency_bars: int = 0,
+        latency_ms: int = 0,
+        queue_rank_proxy: float = 0.5,
+    ) -> tuple[np.ndarray, np.ndarray, list[FillEvent]]:
+        trades = np.asarray(requested_trades, dtype=float)
+        volume = np.asarray(available_volume, dtype=float)
+        if trades.shape != volume.shape:
+            raise ValueError("requested_trades and available_volume must have the same shape.")
+
+        n_periods, n_assets = trades.shape
+        executed = np.zeros_like(trades)
+        residual = np.zeros_like(trades)
+        pending = np.zeros(n_assets, dtype=float)
+        fills: list[FillEvent] = []
+
+        latency = max(int(latency_bars), 0)
+        queue = float(np.clip(queue_rank_proxy, 0.0, 1.0))
+
+        for idx in range(n_periods):
+            source_idx = idx - latency
+            if source_idx >= 0:
+                pending += trades[source_idx]
+            for asset_idx in range(n_assets):
+                requested = float(pending[asset_idx])
+                bar_volume = max(float(volume[idx, asset_idx]), 0.0)
+                cap = bar_volume * self.max_participation_per_bar
+                cap = max(cap, 0.0)
+                fill_size = 0.0
+                if requested != 0.0 and cap > 0.0:
+                    fill_size = np.sign(requested) * min(abs(requested), cap)
+                    pending[asset_idx] -= fill_size
+                executed[idx, asset_idx] = fill_size
+                residual[idx, asset_idx] = pending[asset_idx]
+                participation = abs(fill_size) / bar_volume if bar_volume > 0 else 0.0
+                fills.append(
+                    FillEvent(
+                        bar_index=idx,
+                        asset_index=asset_idx,
+                        requested_size=requested,
+                        filled_size=float(fill_size),
+                        residual_size=float(pending[asset_idx]),
+                        participation_rate=float(participation),
+                        available_volume=float(bar_volume),
+                        order_type=str(order_type),
+                        latency_bars=latency,
+                        latency_ms=max(int(latency_ms), 0),
+                        queue_rank_proxy=queue,
+                    )
+                )
+
+        return executed, residual, fills
+
+
+def calibrate_impact_coefficient_bps(buckets: list[dict[str, float]]) -> float:
+    """Estimate linear impact coefficient from participation/slippage buckets."""
+
+    numerator = 0.0
+    denominator = 0.0
+    for bucket in buckets:
+        participation = float(bucket.get("participation", bucket.get("participation_rate", 0.0)))
+        slippage_bps = float(bucket.get("slippage_bps", bucket.get("impact_bps", 0.0)))
+        weight = float(bucket.get("count", bucket.get("trades", 1.0)))
+        if participation <= 0.0 or weight <= 0.0:
+            continue
+        numerator += weight * participation * slippage_bps
+        denominator += weight * participation * participation
+    if denominator <= 0.0:
+        return 0.0
+    return float(max(numerator / denominator, 0.0))
+
+
+def load_impact_calibration_buckets(path: str | Path) -> list[dict[str, float]]:
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, list):
+        raise ValueError("Impact calibration payload must be a JSON array of bucket objects.")
+    normalized: list[dict[str, float]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        normalized.append({str(key): float(value) for key, value in item.items()})
+    return normalized
 
 
 class ShortBorrowCost:
