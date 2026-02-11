@@ -963,8 +963,9 @@ class BacktestingPage(ttk.Frame):
         if timeframe in TIMEFRAME_MIN_LOOKBACK and lookback is not None:
             min_lookback = TIMEFRAME_MIN_LOOKBACK[timeframe]
             if int(lookback) < min_lookback:
-                messages.append(f"{timeframe} usually needs lookback >= {min_lookback} bars for stable signals.")
-                disable_run = True
+                messages.append(
+                    f"{timeframe} guidance: lookback >= {min_lookback} bars is often more stable, but lower values are allowed."
+                )
 
         if timeframe in TIMEFRAME_HISTORY_DAYS and start_date is not None and end_date is not None and start_date < end_date:
             requested_days = (end_date - start_date).days
@@ -1352,8 +1353,9 @@ class BacktestingPage(ttk.Frame):
             return None
         min_lookback = TIMEFRAME_MIN_LOOKBACK.get(timeframe)
         if min_lookback is not None and int(lookback) < min_lookback:
-            messagebox.showinfo("Invalid input", f"{timeframe} requires lookback >= {min_lookback} bars.")
-            return None
+            self._append_log(
+                f"Note: {timeframe} lookback {int(lookback)} is below guidance ({min_lookback}); continuing as requested."
+            )
 
         return (
             strategy,
