@@ -72,8 +72,19 @@ class BacktestingPage(ttk.Frame):
 
         run_setup_tab = ttk.Frame(self.section_notebook)
         run_setup_tab.columnconfigure(0, weight=1)
-        run_setup_tab.rowconfigure(2, weight=1)
+        run_setup_tab.rowconfigure(3, weight=1)
         self.section_notebook.add(run_setup_tab, text="Run Setup")
+
+        ttk.Label(
+            run_setup_tab,
+            text="Workflow Mode & Presets",
+            font=("Arial", 12, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+        ttk.Label(
+            run_setup_tab,
+            text="Choose Basic/Advanced mode and optionally apply a preset before tuning strategy fields.",
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 6))
 
         self.ui_mode_var = tk.StringVar(value="basic")
         self.preset_var = tk.StringVar(value="Custom")
@@ -84,7 +95,7 @@ class BacktestingPage(ttk.Frame):
         self._preset_key_to_display = {value: key for key, value in self._preset_display_to_key.items()}
 
         workflow_frame = ttk.LabelFrame(run_setup_tab, text="Workflow Mode & Presets")
-        workflow_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+        workflow_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 8))
         workflow_frame.columnconfigure(1, weight=1)
         ttk.Label(workflow_frame, text="Mode").grid(row=0, column=0, sticky="w", padx=8, pady=6)
         mode_row = ttk.Frame(workflow_frame)
@@ -104,7 +115,7 @@ class BacktestingPage(ttk.Frame):
         self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
 
         strategy_frame = ttk.LabelFrame(run_setup_tab, text="Strategy")
-        strategy_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        strategy_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=10)
         strategy_frame.columnconfigure(1, weight=1)
 
         row = 0
@@ -347,13 +358,13 @@ class BacktestingPage(ttk.Frame):
         ttk.Button(template_row, text="Save as Experiment Template", command=self.save_template).grid(row=0, column=3)
 
         notes_frame = ttk.LabelFrame(run_setup_tab, text="Run Notes")
-        notes_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
+        notes_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=10)
         notes_frame.columnconfigure(0, weight=1)
         self.notes_text = tk.Text(notes_frame, height=14)
         self.notes_text.grid(row=0, column=0, sticky="nsew", padx=8, pady=6)
 
         button_row = ttk.Frame(run_setup_tab)
-        button_row.grid(row=3, column=0, sticky="ew", padx=10, pady=(4, 10))
+        button_row.grid(row=5, column=0, sticky="ew", padx=10, pady=(4, 10))
         button_row.columnconfigure(0, weight=1)
         button_row.columnconfigure(1, weight=1)
         button_row.columnconfigure(2, weight=1)
