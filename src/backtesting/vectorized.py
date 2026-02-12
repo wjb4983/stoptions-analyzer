@@ -13,13 +13,13 @@ from typing import Any, Literal, Protocol
 
 import numpy as np
 
+from .event_driven import VectorizedExecutionAdapter, replay_lifecycle
 from .execution import (
     BpsSlippage,
     CarryContext,
     ExecutionContext,
     FeeModel,
     LiquidityContext,
-    PartialFillModel,
     SlippageModel,
     ZeroFee,
     ZeroSlippage,
@@ -92,6 +92,7 @@ class BacktestResult:
     cost_breakdown: dict[str, Any]
     metrics: dict[str, float]
     fills: list[dict[str, float | int | str]]
+    execution_events: list[dict[str, Any]]
 
 
 def backtest_vectorized(
@@ -125,6 +126,8 @@ def backtest_vectorized(
     borrow_available_flags: Any | None = None,
     symbols: list[str] | tuple[str, ...] | None = None,
     dates: Any | None = None,
+    time_in_force: str = "gtc",
+    urgency: str = "normal",
 ) -> BacktestResult:
     """Run a pure vectorized backtest with next-open execution.
 
@@ -194,14 +197,21 @@ def backtest_vectorized(
         max_participation_per_bar=max_participation_per_bar,
     )
 
-    fill_model = PartialFillModel(max_participation_per_bar=liquidity["max_participation_per_bar"][0, 0])
-    trades, residual_orders, fill_events = fill_model.run(
-        requested_trades,
-        liquidity["available_bar_volume"],
+    adapter = VectorizedExecutionAdapter(max_participation_per_bar=liquidity["max_participation_per_bar"][0, 0])
+    resolved_symbols = [str(symbol) for symbol in (symbols or [f"asset_{idx}" for idx in range(n_assets)])]
+    resolved_timestamps = [None if index is None else str(index[idx]) for idx in range(n_periods)]
+    trades, residual_orders, fill_events, lifecycle_events = adapter.execute(
+        requested_trades=requested_trades,
+        prices=price_values,
+        available_volume=liquidity["available_bar_volume"],
+        queue_rank_proxy=liquidity["queue_rank_proxy"],
         order_type=order_type,
         latency_bars=latency_bars,
         latency_ms=latency_ms,
-        queue_rank_proxy=float(liquidity["queue_rank_proxy"][0, 0]),
+        symbols=resolved_symbols,
+        timestamps=resolved_timestamps,
+        time_in_force=time_in_force,
+        urgency=urgency,
     )
 
     slippage_cost = _estimate_slippage(
@@ -292,6 +302,7 @@ def backtest_vectorized(
             }
             for evt in fill_events
         ],
+        execution_events=replay_lifecycle([event.__dict__ for event in lifecycle_events]),
     )
 
 
@@ -731,3 +742,9 @@ def _fixed_commission_kernel(
                 total += weights[asset_idx]
         fees[idx] = commission * total
     return fees
+
+
+def replay_from_event_logs(event_logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a deterministic normalized lifecycle stream for exact run reconstruction."""
+
+    return replay_lifecycle(event_logs)

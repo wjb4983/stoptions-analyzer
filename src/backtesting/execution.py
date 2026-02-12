@@ -143,6 +143,12 @@ class ExecutionContext:
     available_bar_volume: float = 0.0
     max_participation_per_bar: float = 1.0
     realized_participation: float = 0.0
+    submit_timestamp: str | None = None
+    time_in_force: str = "gtc"
+    urgency: str = "normal"
+    child_order_id: str | None = None
+    event_type: str | None = None
+    event_timestamp: str | None = None
 
 
 def _context_value(liquidity_context: Any | None, key: str, default: float) -> float:
