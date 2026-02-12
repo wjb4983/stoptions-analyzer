@@ -21,3 +21,16 @@ pytest tests/test_vectorized_no_lookahead.py tests/test_backtest_invariants_and_
 ## Backtest sweep artifacts
 
 When using `PYTHONPATH=src python -m backtesting.cache_runner sweep ...`, additional sweep reports are generated under `src/data/backtest_outputs/tsmom_sweep_*` with leaderboard and top-N combo summaries.
+
+## Slippage calibration artifacts
+
+Calibrate dated participation slippage snapshots from historical fills:
+
+```bash
+python reports/calibrate_slippage_snapshots.py --fills reports/historical_fills.json
+```
+
+Artifacts written in `reports/`:
+
+- `slippage_calibration_snapshots.json`: dated parameter snapshots with `stable` flags.
+- `calibration_report.json`: fit error and stability diagnostics for calibration quality.

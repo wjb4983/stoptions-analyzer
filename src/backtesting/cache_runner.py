@@ -32,8 +32,11 @@ from backtesting.execution import (
     BpsSlippage,
     ParticipationImpactSlippage,
     ShortBorrowCost,
+    SlippageCalibrationSelection,
     SpreadSlippage,
     VolatilityScaledSlippage,
+    load_slippage_calibration_snapshots,
+    select_slippage_calibration_snapshot,
 )
 from backtesting.vectorized import backtest_vectorized
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR
@@ -331,10 +334,11 @@ def run_time_series_momentum_backtest(
             bet_fraction=bet_fraction,
         )
 
-    slippage = _build_slippage_model(
+    slippage, calibration_selection = _build_slippage_model(
         model_name=execution_model,
         costs_bps=costs_bps,
         params=execution_model_params,
+        as_of_date=end_date.isoformat(),
     )
     slippage = RegimeScaledSlippageModel(slippage, regime_labels, regime_cost_multipliers)
     borrow = _build_carry_model(
@@ -441,6 +445,12 @@ def run_time_series_momentum_backtest(
         "costs_bps": costs_bps,
         "execution_model": execution_model,
         "execution_model_params": execution_model_params or {},
+        "execution_model_calibration": {
+            "source": calibration_selection.source,
+            "effective_date": calibration_selection.effective_date,
+            "warning_flags": calibration_selection.warning_flags,
+            "resolved_params": calibration_selection.params,
+        },
         "carry_model": carry_model,
         "carry_model_params": carry_model_params or {},
         "entry_signal": entry_signal,
@@ -1892,7 +1902,10 @@ def _resample_engine_bundle_from_1m(arrays: EngineArrayBundle, *, timeframe: str
         audit_summary_by_symbol=dict(arrays.metadata.audit_summary_by_symbol),
         asset_class_by_symbol=dict(arrays.metadata.asset_class_by_symbol),
         expiry_by_symbol=dict(arrays.metadata.expiry_by_symbol),
+        strike_by_symbol=dict(arrays.metadata.strike_by_symbol),
+        option_type_by_symbol=dict(arrays.metadata.option_type_by_symbol),
         multiplier_by_symbol=dict(arrays.metadata.multiplier_by_symbol),
+        settlement_style_by_symbol=dict(arrays.metadata.settlement_style_by_symbol),
         borrow_availability_tier_by_symbol=dict(arrays.metadata.borrow_availability_tier_by_symbol),
         financing_benchmark_by_symbol=dict(arrays.metadata.financing_benchmark_by_symbol),
         pit_membership_violations_by_symbol=dict(arrays.metadata.pit_membership_violations_by_symbol),
@@ -2705,38 +2718,74 @@ def _write_regime_pnl_attribution(*, run_dir: Path, rows: list[dict[str, float |
     (run_dir / "regime_pnl_attribution.json").write_text(json.dumps(rows, indent=2))
 
 
-def _build_slippage_model(*, model_name: str, costs_bps: float, params: dict[str, object] | None) -> object:
+def _build_slippage_model(
+    *,
+    model_name: str,
+    costs_bps: float,
+    params: dict[str, object] | None,
+    as_of_date: str | None = None,
+) -> tuple[object, SlippageCalibrationSelection]:
     cfg = dict(params or {})
     name = str(model_name).strip().lower()
+    default_selection = SlippageCalibrationSelection(
+        params=dict(cfg),
+        source="config",
+        effective_date=None,
+        warning_flags=[],
+    )
     if name == "bps":
-        return BpsSlippage(float(cfg.get("bps", costs_bps)))
+        return BpsSlippage(float(cfg.get("bps", costs_bps))), default_selection
     if name == "spread":
-        return SpreadSlippage(float(cfg.get("spread_bps", costs_bps)))
+        return SpreadSlippage(float(cfg.get("spread_bps", costs_bps))), default_selection
     if name == "participation":
+        snapshots_path = cfg.get("snapshot_path")
+        if snapshots_path is not None:
+            payload = load_slippage_calibration_snapshots(str(snapshots_path))
+            selected = select_slippage_calibration_snapshot(
+                payload,
+                as_of_date=as_of_date,
+                default_params={
+                    "base_bps": float(cfg.get("base_bps", 0.0)),
+                    "impact_coefficient_bps": float(cfg.get("impact_coefficient_bps", cfg.get("impact_bps", 20.0))),
+                    "participation_exponent": float(cfg.get("participation_exponent", 1.0)),
+                    "max_participation": float(cfg.get("max_participation", 1.0)),
+                },
+            )
+            resolved = selected.params
+            model = ParticipationImpactSlippage(
+                base_bps=float(resolved.get("base_bps", 0.0)),
+                impact_coefficient_bps=float(resolved.get("impact_coefficient_bps", resolved.get("impact_bps", 20.0))),
+                participation_exponent=float(resolved.get("participation_exponent", 1.0)),
+                max_participation=float(resolved.get("max_participation", 1.0)),
+            )
+            return model, selected
         calibration_path = cfg.get("calibration_path")
         if calibration_path is not None:
             from backtesting.execution import load_impact_calibration_buckets
 
             buckets = load_impact_calibration_buckets(str(calibration_path))
-            return ParticipationImpactSlippage.from_calibration_buckets(
+            model = ParticipationImpactSlippage.from_calibration_buckets(
                 buckets,
                 base_bps=float(cfg.get("base_bps", 0.0)),
                 participation_exponent=float(cfg.get("participation_exponent", 1.0)),
                 max_participation=float(cfg.get("max_participation", 1.0)),
             )
-        return ParticipationImpactSlippage(
+            return model, default_selection
+        model = ParticipationImpactSlippage(
             base_bps=float(cfg.get("base_bps", 0.0)),
             impact_coefficient_bps=float(cfg.get("impact_coefficient_bps", cfg.get("impact_bps", 20.0))),
             participation_exponent=float(cfg.get("participation_exponent", 1.0)),
             max_participation=float(cfg.get("max_participation", 1.0)),
         )
+        return model, default_selection
     if name == "volatility_scaled":
-        return VolatilityScaledSlippage(
+        model = VolatilityScaledSlippage(
             base_bps=float(cfg.get("base_bps", costs_bps)),
             target_volatility=float(cfg.get("target_volatility", 0.01)),
             volatility_exponent=float(cfg.get("volatility_exponent", 1.0)),
             min_volatility=float(cfg.get("min_volatility", 1e-6)),
         )
+        return model, default_selection
     raise ValueError(f"Unknown execution model: {model_name}")
 
 

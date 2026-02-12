@@ -1,0 +1,10 @@
+{
+  "generated_at": null,
+  "default_params": {
+    "base_bps": 0.0,
+    "impact_coefficient_bps": 20.0,
+    "participation_exponent": 1.0,
+    "max_participation": 1.0
+  },
+  "snapshots": []
+}

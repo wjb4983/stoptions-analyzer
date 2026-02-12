@@ -151,6 +151,86 @@ class ExecutionContext:
     event_timestamp: str | None = None
 
 
+@dataclass(frozen=True)
+class SlippageCalibrationSelection:
+    """Resolved slippage parameters selected from dated snapshots."""
+
+    params: dict[str, Any]
+    source: str
+    effective_date: str | None
+    warning_flags: list[str]
+
+
+def load_slippage_calibration_snapshots(path: str | Path) -> dict[str, Any]:
+    """Load snapshot payload emitted by reports calibration jobs."""
+
+    payload = json.loads(Path(path).read_text())
+    if not isinstance(payload, dict):
+        raise ValueError("Slippage calibration snapshot payload must be a JSON object.")
+    snapshots = payload.get("snapshots", [])
+    if not isinstance(snapshots, list):
+        raise ValueError("slippage calibration snapshots must be a list.")
+    payload["snapshots"] = [item for item in snapshots if isinstance(item, dict)]
+    if not isinstance(payload.get("default_params", {}), dict):
+        payload["default_params"] = {}
+    return payload
+
+
+def select_slippage_calibration_snapshot(
+    payload: dict[str, Any],
+    *,
+    as_of_date: str | None,
+    default_params: dict[str, Any] | None = None,
+) -> SlippageCalibrationSelection:
+    """Resolve the latest stable calibration snapshot not newer than ``as_of_date``."""
+
+    snapshots = payload.get("snapshots", []) if isinstance(payload, dict) else []
+    resolved_defaults = {
+        **(default_params or {}),
+        **(payload.get("default_params", {}) if isinstance(payload.get("default_params", {}), dict) else {}),
+    }
+    warnings: list[str] = []
+
+    cutoff = np.datetime64(as_of_date or "2262-04-11")
+    candidates: list[tuple[np.datetime64, dict[str, Any]]] = []
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        if not bool(snapshot.get("stable", False)):
+            continue
+        eff = str(snapshot.get("effective_date", "")).strip()
+        if not eff:
+            continue
+        try:
+            eff_date = np.datetime64(eff)
+        except Exception:
+            continue
+        if eff_date <= cutoff:
+            candidates.append((eff_date, snapshot))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        selected = candidates[-1][1]
+        params = selected.get("params", {}) if isinstance(selected.get("params", {}), dict) else {}
+        return SlippageCalibrationSelection(
+            params={**resolved_defaults, **params},
+            source="snapshot",
+            effective_date=str(selected.get("effective_date")),
+            warning_flags=warnings,
+        )
+
+    if snapshots:
+        warnings.append("slippage_calibration_snapshot_unavailable_for_date")
+    else:
+        warnings.append("slippage_calibration_snapshot_missing")
+    return SlippageCalibrationSelection(
+        params=resolved_defaults,
+        source="default_params",
+        effective_date=None,
+        warning_flags=warnings,
+    )
+
+
 def _context_value(liquidity_context: Any | None, key: str, default: float) -> float:
     if liquidity_context is None:
         return float(default)

@@ -12,7 +12,10 @@ from src.backtesting.execution import (
     VolatilityScaledSlippage,
     calibrate_impact_coefficient_bps,
     load_impact_calibration_buckets,
+    load_slippage_calibration_snapshots,
+    select_slippage_calibration_snapshot,
 )
+from src.backtesting.cache_runner import _build_slippage_model
 from src.backtesting.vectorized import backtest_vectorized
 
 
@@ -163,3 +166,71 @@ def test_backtest_vectorized_exports_carry_attribution_by_asset() -> None:
     attribution = np.asarray(result.cost_breakdown["carry_attribution_by_asset"])
     assert attribution.shape == prices.shape
     assert np.any(attribution > 0.0)
+
+
+def test_load_slippage_calibration_snapshots_and_date_selection(tmp_path) -> None:
+    payload = {
+        "default_params": {"impact_coefficient_bps": 15.0},
+        "snapshots": [
+            {"effective_date": "2024-01-01", "stable": True, "params": {"impact_coefficient_bps": 18.0}},
+            {"effective_date": "2024-03-01", "stable": True, "params": {"impact_coefficient_bps": 24.0}},
+        ],
+    }
+    path = tmp_path / "snapshots.json"
+    path.write_text(json.dumps(payload))
+    loaded = load_slippage_calibration_snapshots(path)
+    selected = select_slippage_calibration_snapshot(loaded, as_of_date="2024-02-15")
+    assert selected.source == "snapshot"
+    assert selected.effective_date == "2024-01-01"
+    assert selected.params["impact_coefficient_bps"] == 18.0
+
+
+def test_slippage_snapshot_fallback_to_defaults_with_warning(tmp_path) -> None:
+    payload = {
+        "default_params": {
+            "base_bps": 1.0,
+            "impact_coefficient_bps": 12.0,
+            "participation_exponent": 1.0,
+            "max_participation": 1.0,
+        },
+        "snapshots": [
+            {"effective_date": "2025-01-01", "stable": True, "params": {"impact_coefficient_bps": 30.0}},
+        ],
+    }
+    path = tmp_path / "snapshots.json"
+    path.write_text(json.dumps(payload))
+
+    model, selection = _build_slippage_model(
+        model_name="participation",
+        costs_bps=5.0,
+        params={"snapshot_path": str(path)},
+        as_of_date="2024-06-01",
+    )
+    assert model.__class__.__name__ == "ParticipationImpactSlippage"
+    assert selection.source == "default_params"
+    assert "slippage_calibration_snapshot_unavailable_for_date" in selection.warning_flags
+    assert model.impact_coefficient_bps == 12.0
+
+
+def test_slippage_snapshot_uses_latest_stable_snapshot(tmp_path) -> None:
+    payload = {
+        "default_params": {"impact_coefficient_bps": 10.0},
+        "snapshots": [
+            {"effective_date": "2024-01-01", "stable": False, "params": {"impact_coefficient_bps": 100.0}},
+            {"effective_date": "2024-02-01", "stable": True, "params": {"impact_coefficient_bps": 25.0}},
+            {"effective_date": "2024-04-01", "stable": True, "params": {"impact_coefficient_bps": 35.0}},
+        ],
+    }
+    path = tmp_path / "snapshots.json"
+    path.write_text(json.dumps(payload))
+
+    model, selection = _build_slippage_model(
+        model_name="participation",
+        costs_bps=5.0,
+        params={"snapshot_path": str(path), "base_bps": 2.0},
+        as_of_date="2024-03-15",
+    )
+    assert model.__class__.__name__ == "ParticipationImpactSlippage"
+    assert selection.source == "snapshot"
+    assert selection.effective_date == "2024-02-01"
+    assert model.impact_coefficient_bps == 25.0
