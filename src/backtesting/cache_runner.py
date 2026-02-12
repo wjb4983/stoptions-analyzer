@@ -19,7 +19,12 @@ from typing import Any, Callable
 
 import numpy as np
 
-from analysis.reporting import build_drawdown_rows, format_backtest_report
+from analysis.reporting import (
+    build_backtest_robustness_report,
+    build_drawdown_rows,
+    build_sweep_robustness_report,
+    format_backtest_report,
+)
 from backtesting.execution import (
     AssetClassCarryCost,
     BpsSlippage,
@@ -383,6 +388,15 @@ def run_time_series_momentum_backtest(
         "cache_root": str(cache_root),
     }
 
+    fill_rows = list(result.fills)
+    robustness_report = build_backtest_robustness_report(
+        returns=returns,
+        metrics=metrics,
+        turnover_stats=turnover_stats,
+        cost_totals=cost_totals,
+        fills=fill_rows,
+    )
+
     run_dir = _persist_backtest_outputs(
         timestamps=timestamps,
         symbol_order=symbol_order,
@@ -395,9 +409,8 @@ def run_time_series_momentum_backtest(
         parameters=parameter_payload,
         data_snapshot=_build_data_snapshot_identifiers(arrays=arrays, cache_root=cache_root, timeframe=timeframe),
         random_seed=None,
+        robustness_report=robustness_report,
     )
-
-    fill_rows = list(result.fills)
 
     trade_log_rows = _build_trade_log_rows(
         timestamps=timestamps,
@@ -419,6 +432,7 @@ def run_time_series_momentum_backtest(
         drawdown_rows=drawdown_rows,
         turnover_stats=turnover_stats,
         cost_totals=cost_totals,
+        robustness_report=robustness_report,
     )
     (run_dir / "trade_log.csv").write_text(_trade_log_csv(trade_log_rows))
     (run_dir / "trade_log.json").write_text(json.dumps(trade_log_rows, indent=2))
@@ -1049,6 +1063,9 @@ def _persist_sweep_outputs(
     (run_dir / "errors.json").write_text(json.dumps(errors, indent=2))
 
     top_rows = ranked_rows[: max(0, top_n)]
+    robustness_report = build_sweep_robustness_report(ranked_rows=ranked_rows)
+    _write_robustness_report(run_dir=run_dir, robustness_report=robustness_report)
+
     report_lines = ["Top sweep combinations", "======================", ""]
     for idx, row in enumerate(top_rows, start=1):
         report_lines.append(
@@ -1056,6 +1073,15 @@ def _persist_sweep_outputs(
             f"entry={row['entry_signal']} exit={row['exit_signal']} "
             f"core=(lookback_days={row['lookback_days']}, skip_days={row['skip_days']}, costs_bps={row['costs_bps']})"
         )
+    pbo_style = robustness_report.get("pbo_style", {})
+    report_lines.extend([
+        "",
+        "Robustness Diagnostics",
+        "----------------------",
+        f"deflated_sharpe_ratio={float(robustness_report.get('deflated_sharpe_ratio', 0.0)):.6f}",
+        f"pbo_probability={float(pbo_style.get('probability_of_overfitting', 0.0)):.6f}",
+        f"pbo_median_logit={float(pbo_style.get('median_logit', 0.0)):.6f}",
+    ])
     (run_dir / "top_n_report.txt").write_text("\n".join(report_lines))
 
     manifest = {
@@ -1627,6 +1653,7 @@ def _persist_backtest_outputs(
     parameters: dict[str, Any] | None = None,
     data_snapshot: dict[str, Any] | None = None,
     random_seed: int | None = None,
+    robustness_report: dict[str, Any] | None = None,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
@@ -1672,6 +1699,10 @@ def _persist_backtest_outputs(
         writer.writerows(metrics_rows)
     (run_dir / "metrics.json").write_text(json.dumps(metrics_rows, indent=2))
     (run_dir / "metric_schema_version.txt").write_text(f"{CANONICAL_METRIC_SCHEMA_VERSION}\n")
+
+
+    if robustness_report is not None:
+        _write_robustness_report(run_dir=run_dir, robustness_report=robustness_report)
 
     if dataset_contracts is not None:
         audit_payload = {
@@ -1719,6 +1750,30 @@ def _persist_backtest_outputs(
     )
 
     return run_dir
+
+
+
+def _write_robustness_report(*, run_dir: Path, robustness_report: dict[str, Any]) -> None:
+    (run_dir / "robustness_report.json").write_text(json.dumps(robustness_report, indent=2))
+
+    rows: list[dict[str, object]] = []
+
+    def _flatten(prefix: str, value: object) -> None:
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                _flatten(f"{prefix}.{key}" if prefix else str(key), inner)
+            return
+        if isinstance(value, list):
+            for idx, inner in enumerate(value):
+                _flatten(f"{prefix}[{idx}]", inner)
+            return
+        rows.append({"key": prefix, "value": value})
+
+    _flatten("", robustness_report)
+    with (run_dir / "robustness_report.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["key", "value"])
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _resolve_git_commit() -> str:

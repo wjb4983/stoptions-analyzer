@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from statistics import NormalDist
 from typing import Iterable
 
 import numpy as np
@@ -157,6 +158,7 @@ def format_backtest_report(
     drawdown_rows: list[dict[str, object]],
     turnover_stats: dict[str, float],
     cost_totals: dict[str, float],
+    robustness_report: dict[str, object] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append(title)
@@ -230,6 +232,47 @@ def format_backtest_report(
         )
     )
 
+    if robustness_report:
+        ci = robustness_report.get("bootstrap_confidence_intervals", {})
+        if isinstance(ci, dict) and ci:
+            lines.append("Bootstrap Confidence Intervals (95%):")
+            for metric_name in ("sharpe", "cagr", "max_drawdown"):
+                bucket = ci.get(metric_name, {}) if isinstance(ci, dict) else {}
+                if isinstance(bucket, dict):
+                    lines.append(
+                        "  - {metric}: lower={lower:.6f}, median={median:.6f}, upper={upper:.6f}".format(
+                            metric=metric_name,
+                            lower=float(bucket.get("lower", 0.0)),
+                            median=float(bucket.get("median", 0.0)),
+                            upper=float(bucket.get("upper", 0.0)),
+                        )
+                    )
+            lines.append("")
+
+        dsr = float(robustness_report.get("deflated_sharpe_ratio", 0.0))
+        lines.append(f"Deflated Sharpe Ratio: {dsr:.6f}")
+
+        capacity = robustness_report.get("capacity_diagnostics", {})
+        if isinstance(capacity, dict) and capacity:
+            lines.append("Capacity Diagnostics:")
+            lines.append(
+                "  - average_participation={part:.6f}, realized_slippage_bps={slip:.6f}".format(
+                    part=float(capacity.get("average_participation_rate", 0.0)),
+                    slip=float(capacity.get("realized_slippage_bps", 0.0)),
+                )
+            )
+            curve = capacity.get("expected_slippage_curve", [])
+            if isinstance(curve, list):
+                for row in curve[:4]:
+                    if isinstance(row, dict):
+                        lines.append(
+                            "  - expected_slippage @ participation={p:.2%}: {bps:.3f} bps".format(
+                                p=float(row.get("participation_rate", 0.0)),
+                                bps=float(row.get("expected_slippage_bps", 0.0)),
+                            )
+                        )
+            lines.append("")
+
     return "\n".join(lines)
 
 
@@ -258,6 +301,260 @@ def build_drawdown_rows(
             }
         )
     return rows
+
+
+def compute_bootstrap_confidence_intervals(
+    *,
+    returns: np.ndarray,
+    periods_per_year: float,
+    n_bootstrap: int = 500,
+    confidence: float = 0.95,
+    seed: int = 42,
+) -> dict[str, dict[str, float]]:
+    samples = _to_1d_float(returns)
+    if samples.size == 0 or n_bootstrap <= 1:
+        return {
+            "sharpe": {"lower": 0.0, "median": 0.0, "upper": 0.0},
+            "cagr": {"lower": 0.0, "median": 0.0, "upper": 0.0},
+            "max_drawdown": {"lower": 0.0, "median": 0.0, "upper": 0.0},
+        }
+
+    ann_factor = max(float(periods_per_year), 1.0)
+    rng = np.random.default_rng(seed)
+    sharpe_samples: list[float] = []
+    cagr_samples: list[float] = []
+    drawdown_samples: list[float] = []
+
+    for _ in range(int(n_bootstrap)):
+        boot = samples[rng.integers(0, samples.size, size=samples.size)]
+        mean = float(np.mean(boot))
+        vol = float(np.std(boot, ddof=1)) if boot.size > 1 else 0.0
+        sharpe_samples.append(mean / vol * np.sqrt(ann_factor) if vol else 0.0)
+
+        equity = np.cumprod(1.0 + boot)
+        start = float(equity[0]) if equity.size else 1.0
+        end = float(equity[-1]) if equity.size else 1.0
+        cagr_samples.append((end / start) ** (ann_factor / max(1, boot.size)) - 1.0 if start else 0.0)
+
+        peak = np.maximum.accumulate(equity)
+        safe_peak = np.where(peak == 0.0, 1.0, peak)
+        drawdown = equity / safe_peak - 1.0
+        drawdown_samples.append(float(np.min(drawdown)) if drawdown.size else 0.0)
+
+    alpha = (1.0 - float(confidence)) / 2.0
+    lo_q = 100.0 * max(0.0, alpha)
+    hi_q = 100.0 * min(1.0, 1.0 - alpha)
+
+    return {
+        "sharpe": _summarize_distribution(sharpe_samples, lo_q, hi_q),
+        "cagr": _summarize_distribution(cagr_samples, lo_q, hi_q),
+        "max_drawdown": _summarize_distribution(drawdown_samples, lo_q, hi_q),
+    }
+
+
+def compute_deflated_sharpe_ratio(
+    *,
+    observed_sharpe: float,
+    n_returns: int,
+    skew: float,
+    kurtosis: float,
+    n_trials: int,
+) -> float:
+    if n_returns <= 2:
+        return 0.0
+
+    sr = float(observed_sharpe)
+    variance_term = 1.0 - skew * sr + ((kurtosis - 1.0) / 4.0) * (sr**2)
+    sr_std = np.sqrt(max(variance_term, 1e-12) / max(1, n_returns - 1))
+
+    effective_trials = max(1, int(n_trials))
+    if effective_trials == 1:
+        sr_star = 0.0
+    else:
+        norm = NormalDist()
+        q1 = norm.inv_cdf(1.0 - 1.0 / effective_trials)
+        q2 = norm.inv_cdf(1.0 - 1.0 / (effective_trials * np.e))
+        euler_gamma = 0.5772156649
+        sr_star = (1.0 - euler_gamma) * q1 + euler_gamma * q2
+    return float(NormalDist().cdf((sr - sr_star) / max(sr_std, 1e-12)))
+
+
+def build_backtest_robustness_report(
+    *,
+    returns: np.ndarray,
+    metrics: dict[str, float],
+    turnover_stats: dict[str, float],
+    cost_totals: dict[str, float],
+    fills: list[dict[str, object]],
+    n_bootstrap: int = 500,
+    seed: int = 42,
+) -> dict[str, object]:
+    periods_per_year = float(metrics.get("periods_per_year", 252.0))
+    ci = compute_bootstrap_confidence_intervals(
+        returns=_to_1d_float(returns),
+        periods_per_year=periods_per_year,
+        n_bootstrap=n_bootstrap,
+        confidence=0.95,
+        seed=seed,
+    )
+
+    dsr = compute_deflated_sharpe_ratio(
+        observed_sharpe=float(metrics.get("sharpe", 0.0)),
+        n_returns=int(_to_1d_float(returns).size),
+        skew=float(metrics.get("skew", 0.0)),
+        kurtosis=float(metrics.get("kurtosis", 0.0) + 3.0),
+        n_trials=1,
+    )
+
+    capacity = _build_capacity_diagnostics(
+        metrics=metrics,
+        turnover_stats=turnover_stats,
+        cost_totals=cost_totals,
+        fills=fills,
+    )
+    return {
+        "bootstrap_confidence_intervals": ci,
+        "deflated_sharpe_ratio": dsr,
+        "capacity_diagnostics": capacity,
+    }
+
+
+def build_sweep_robustness_report(
+    *,
+    ranked_rows: list[dict[str, object]],
+    score_key: str = "sharpe",
+    n_monte_carlo: int = 200,
+    seed: int = 42,
+) -> dict[str, object]:
+    scores = np.array([float(row.get(score_key, 0.0)) for row in ranked_rows], dtype=float)
+    if scores.size == 0:
+        return {
+            "deflated_sharpe_ratio": 0.0,
+            "pbo_style": {
+                "n_combinations": 0,
+                "n_monte_carlo": int(n_monte_carlo),
+                "probability_of_overfitting": 0.0,
+                "median_logit": 0.0,
+            },
+        }
+
+    centered = scores - float(np.mean(scores))
+    m2 = float(np.mean(centered**2)) if scores.size > 1 else 0.0
+    skew = float(np.mean(centered**3) / (m2 ** 1.5)) if scores.size > 2 and m2 > 0 else 0.0
+    kurt = float(np.mean(centered**4) / (m2**2)) if scores.size > 3 and m2 > 0 else 3.0
+
+    dsr = compute_deflated_sharpe_ratio(
+        observed_sharpe=float(scores[0]),
+        n_returns=max(3, int(scores.size)),
+        skew=skew,
+        kurtosis=kurt,
+        n_trials=int(scores.size),
+    )
+
+    pbo = _compute_pbo_style(ranked_rows=ranked_rows, score_key=score_key, n_monte_carlo=n_monte_carlo, seed=seed)
+    return {
+        "deflated_sharpe_ratio": dsr,
+        "pbo_style": pbo,
+    }
+
+
+def _compute_pbo_style(
+    *,
+    ranked_rows: list[dict[str, object]],
+    score_key: str,
+    n_monte_carlo: int,
+    seed: int,
+) -> dict[str, object]:
+    n = len(ranked_rows)
+    if n < 4:
+        return {
+            "n_combinations": n,
+            "n_monte_carlo": int(n_monte_carlo),
+            "probability_of_overfitting": 0.0,
+            "median_logit": 0.0,
+        }
+    rng = np.random.default_rng(seed)
+    logits: list[float] = []
+    overfit_count = 0
+    for _ in range(int(n_monte_carlo)):
+        perm = rng.permutation(n)
+        split = n // 2
+        in_idx = perm[:split]
+        out_idx = perm[split:]
+        if in_idx.size == 0 or out_idx.size == 0:
+            continue
+        in_scores = [float(ranked_rows[i].get(score_key, 0.0)) for i in in_idx]
+        best_local = int(np.argmax(in_scores))
+        chosen_score = in_scores[best_local]
+        out_scores = np.array([float(ranked_rows[i].get(score_key, 0.0)) for i in out_idx], dtype=float)
+        percentile = float(np.mean(out_scores <= chosen_score))
+        percentile = min(max(percentile, 1e-6), 1.0 - 1e-6)
+        logits.append(float(np.log(percentile / (1.0 - percentile))))
+        if percentile < 0.5:
+            overfit_count += 1
+    median_logit = float(np.median(logits)) if logits else 0.0
+    pbo = float(overfit_count / len(logits)) if logits else 0.0
+    return {
+        "n_combinations": n,
+        "n_monte_carlo": int(n_monte_carlo),
+        "probability_of_overfitting": pbo,
+        "median_logit": median_logit,
+    }
+
+
+def _build_capacity_diagnostics(
+    *,
+    metrics: dict[str, float],
+    turnover_stats: dict[str, float],
+    cost_totals: dict[str, float],
+    fills: list[dict[str, object]],
+) -> dict[str, object]:
+    realized_parts = np.array([float(row.get("participation_rate", 0.0)) for row in fills], dtype=float)
+    avg_participation = float(np.mean(realized_parts)) if realized_parts.size else 0.0
+    base_participation = max(avg_participation, 0.01)
+
+    turnover_total = max(float(turnover_stats.get("total", 0.0)), 1e-12)
+    realized_slippage_bps = float(cost_totals.get("slippage", 0.0)) / turnover_total * 10_000.0
+    cagr = float(metrics.get("cagr", 0.0))
+
+    levels = np.array([0.01, 0.02, 0.05, 0.10, 0.20, 0.40], dtype=float)
+    slippage_curve: list[dict[str, float]] = []
+    degradation_curve: list[dict[str, float]] = []
+    for level in levels:
+        scale = np.sqrt(level / base_participation) if base_participation > 0 else 1.0
+        expected_bps = realized_slippage_bps * scale
+        slippage_curve.append({"participation_rate": float(level), "expected_slippage_bps": float(expected_bps)})
+        turnover_penalty = (expected_bps / 10_000.0) * float(turnover_stats.get("total", 0.0))
+        degradation_curve.append(
+            {
+                "participation_rate": float(level),
+                "projected_cagr": float(cagr - turnover_penalty),
+                "projected_net_return": float(metrics.get("total_return", 0.0) - turnover_penalty),
+            }
+        )
+
+    return {
+        "average_participation_rate": avg_participation,
+        "realized_slippage_bps": realized_slippage_bps,
+        "expected_slippage_curve": slippage_curve,
+        "performance_degradation_curve": degradation_curve,
+    }
+
+
+def _to_1d_float(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    return arr.reshape(-1)
+
+
+def _summarize_distribution(values: list[float], lo_q: float, hi_q: float) -> dict[str, float]:
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return {"lower": 0.0, "median": 0.0, "upper": 0.0}
+    return {
+        "lower": float(np.percentile(arr, lo_q)),
+        "median": float(np.percentile(arr, 50.0)),
+        "upper": float(np.percentile(arr, hi_q)),
+    }
 
 
 def _format_ticker_line(
