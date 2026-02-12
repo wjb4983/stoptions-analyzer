@@ -198,6 +198,38 @@ def test_loader_rejects_dividend_larger_than_close_for_tradable_bar(tmp_path) ->
             cache_root=tmp_path,
         )
 
+
+
+def test_loader_reads_option_contract_specs_into_metadata(tmp_path) -> None:
+    ts = np.array([_ms(2024, 1, 2, 14, 30)], dtype=np.int64)
+    _write_npz(
+        tmp_path,
+        "OPT1",
+        2024,
+        t=ts,
+        o=np.array([2.0]),
+        c=np.array([2.5]),
+        asset_class=np.array(["option"]),
+        expiry=np.array(["2024-02-16"]),
+        strike=np.array([100.0]),
+        option_type=np.array(["call"]),
+        multiplier=np.array([100.0]),
+        settlement_style=np.array(["cash"]),
+    )
+
+    bundle = load_canonical_price_arrays(
+        symbols=["OPT1"],
+        start="2024-01-02T14:30:00+00:00",
+        end="2024-01-02T14:30:00+00:00",
+        cache_root=tmp_path,
+    )
+
+    assert bundle.metadata.expiry_by_symbol["OPT1"] == "2024-02-16"
+    assert bundle.metadata.strike_by_symbol["OPT1"] == pytest.approx(100.0)
+    assert bundle.metadata.option_type_by_symbol["OPT1"] == "call"
+    assert bundle.metadata.multiplier_by_symbol["OPT1"] == pytest.approx(100.0)
+    assert bundle.metadata.settlement_style_by_symbol["OPT1"] == "cash"
+
 class _FakeActionProvider:
     def list_symbols(self) -> list[str]:
         return ["AAPL"]

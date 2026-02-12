@@ -27,7 +27,10 @@ class EngineArrayMetadata:
     audit_summary_by_symbol: dict[str, dict[str, float | int]]
     asset_class_by_symbol: dict[str, str]
     expiry_by_symbol: dict[str, str | None]
+    strike_by_symbol: dict[str, float | None]
+    option_type_by_symbol: dict[str, str | None]
     multiplier_by_symbol: dict[str, float]
+    settlement_style_by_symbol: dict[str, str]
     borrow_availability_tier_by_symbol: dict[str, str]
     financing_benchmark_by_symbol: dict[str, str]
     pit_membership_violations_by_symbol: dict[str, int]
@@ -88,7 +91,10 @@ class _LoadedSymbolDataset:
     original_total: int
     asset_class: str
     expiry: str | None
+    strike: float | None
+    option_type: str | None
     multiplier: float
+    settlement_style: str
     borrow_availability_tier: str
     financing_benchmark: str
     pit_membership_violations: int
@@ -278,7 +284,10 @@ def load_canonical_price_arrays(
         },
         asset_class_by_symbol={symbol: symbol_series[symbol].asset_class for symbol in accepted_symbols},
         expiry_by_symbol={symbol: symbol_series[symbol].expiry for symbol in accepted_symbols},
+        strike_by_symbol={symbol: symbol_series[symbol].strike for symbol in accepted_symbols},
+        option_type_by_symbol={symbol: symbol_series[symbol].option_type for symbol in accepted_symbols},
         multiplier_by_symbol={symbol: symbol_series[symbol].multiplier for symbol in accepted_symbols},
+        settlement_style_by_symbol={symbol: symbol_series[symbol].settlement_style for symbol in accepted_symbols},
         borrow_availability_tier_by_symbol={
             symbol: symbol_series[symbol].borrow_availability_tier for symbol in accepted_symbols
         },
@@ -340,7 +349,10 @@ def _load_symbol_npz_range(
     symbol_metadata: dict[str, str | float | None] = {
         "asset_class": "equity",
         "expiry": None,
+        "strike": None,
+        "option_type": None,
         "multiplier": 1.0,
+        "settlement_style": "physical",
         "borrow_availability_tier": "normal",
         "financing_benchmark": "overnight",
     }
@@ -400,7 +412,10 @@ def _load_symbol_npz_range(
             original_total=original_total,
             asset_class=str(symbol_metadata["asset_class"]),
             expiry=str(symbol_metadata["expiry"]) if symbol_metadata["expiry"] is not None else None,
+            strike=float(symbol_metadata["strike"]) if symbol_metadata["strike"] is not None else None,
+            option_type=str(symbol_metadata["option_type"]) if symbol_metadata["option_type"] is not None else None,
             multiplier=float(symbol_metadata["multiplier"]),
+            settlement_style=str(symbol_metadata["settlement_style"]),
             borrow_availability_tier=str(symbol_metadata["borrow_availability_tier"]),
             financing_benchmark=str(symbol_metadata["financing_benchmark"]),
             pit_membership_violations=0,
@@ -441,7 +456,10 @@ def _load_symbol_npz_range(
         original_total=original_total,
         asset_class=str(symbol_metadata["asset_class"]),
         expiry=str(symbol_metadata["expiry"]) if symbol_metadata["expiry"] is not None else None,
+        strike=float(symbol_metadata["strike"]) if symbol_metadata["strike"] is not None else None,
+        option_type=str(symbol_metadata["option_type"]) if symbol_metadata["option_type"] is not None else None,
         multiplier=float(symbol_metadata["multiplier"]),
+        settlement_style=str(symbol_metadata["settlement_style"]),
         borrow_availability_tier=str(symbol_metadata["borrow_availability_tier"]),
         financing_benchmark=str(symbol_metadata["financing_benchmark"]),
         pit_membership_violations=pit_violations_total,
@@ -466,14 +484,20 @@ def _extract_instrument_metadata(payload: np.lib.npyio.NpzFile) -> dict[str, str
 
     asset_class = _first_scalar("asset_class")
     expiry = _first_scalar("expiry")
+    strike = _first_scalar("strike")
+    option_type = _first_scalar("option_type") or _first_scalar("right")
     multiplier = _first_scalar("multiplier")
+    settlement_style = _first_scalar("settlement_style")
     borrow_tier = _first_scalar("borrow_availability_tier")
     financing_benchmark = _first_scalar("financing_benchmark")
 
     return {
         "asset_class": str(asset_class).strip().lower() if asset_class is not None else "equity",
         "expiry": str(expiry).strip() if expiry not in (None, "", "none") else None,
+        "strike": float(strike) if strike is not None else None,
+        "option_type": str(option_type).strip().lower() if option_type not in (None, "", "none") else None,
         "multiplier": float(multiplier) if multiplier is not None else 1.0,
+        "settlement_style": str(settlement_style).strip().lower() if settlement_style not in (None, "", "none") else "physical",
         "borrow_availability_tier": str(borrow_tier).strip().lower() if borrow_tier is not None else "normal",
         "financing_benchmark": str(financing_benchmark).strip().lower()
         if financing_benchmark is not None

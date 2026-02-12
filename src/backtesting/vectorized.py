@@ -8,6 +8,7 @@ positions forward by one bar.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import importlib.util
 from typing import Any, Literal, Protocol
 
@@ -65,6 +66,24 @@ class VectorizedBacktestRunner(Protocol):
     ) -> "BacktestResult":
         """Execute a backtest and return a result object."""
 
+
+@dataclass(frozen=True)
+class DerivativesLifecycleConfig:
+    expiry_by_asset: tuple[str | None, ...] = ()
+    strike_by_asset: tuple[float | None, ...] = ()
+    option_type_by_asset: tuple[str | None, ...] = ()
+    multipliers_by_asset: tuple[float, ...] = ()
+    settlement_style_by_asset: tuple[str, ...] = ()
+    enable_auto_roll: bool = False
+    roll_days_before_expiry: int = 0
+
+
+@dataclass(frozen=True)
+class GreekLimitConfig:
+    max_abs_delta: float | None = None
+    max_abs_gamma: float | None = None
+    max_abs_vega: float | None = None
+    max_abs_theta: float | None = None
 
 @dataclass(frozen=True)
 class BacktestResult:
@@ -130,6 +149,15 @@ def backtest_vectorized(
     corporate_action_dividends: Any | None = None,
     time_in_force: str = "gtc",
     urgency: str = "normal",
+    contract_expiry_by_asset: list[str | None] | tuple[str | None, ...] | None = None,
+    contract_strike_by_asset: list[float | None] | tuple[float | None, ...] | None = None,
+    contract_option_type_by_asset: list[str | None] | tuple[str | None, ...] | None = None,
+    contract_multipliers_by_asset: list[float] | tuple[float, ...] | None = None,
+    contract_settlement_style_by_asset: list[str] | tuple[str, ...] | None = None,
+    enable_contract_roll: bool = False,
+    roll_days_before_expiry: int = 0,
+    greek_sensitivities: dict[str, Any] | None = None,
+    greek_limit_config: GreekLimitConfig | None = None,
 ) -> BacktestResult:
     """Run a pure vectorized backtest with next-open execution.
 
@@ -256,7 +284,33 @@ def backtest_vectorized(
         portfolio_weights=portfolio_weights,
     )
 
-    net_returns = gross_returns + dividend_returns - slippage_cost - fee_cost - borrow_cost
+    lifecycle_config = DerivativesLifecycleConfig(
+        expiry_by_asset=tuple(contract_expiry_by_asset or [None] * n_assets),
+        strike_by_asset=tuple(contract_strike_by_asset or [None] * n_assets),
+        option_type_by_asset=tuple(contract_option_type_by_asset or [None] * n_assets),
+        multipliers_by_asset=tuple(contract_multipliers_by_asset or [1.0] * n_assets),
+        settlement_style_by_asset=tuple(contract_settlement_style_by_asset or ["physical"] * n_assets),
+        enable_auto_roll=bool(enable_contract_roll),
+        roll_days_before_expiry=max(0, int(roll_days_before_expiry)),
+    )
+    lifecycle = _apply_derivatives_lifecycle(
+        positions=positions,
+        prices=price_values,
+        returns=gross_asset_returns,
+        portfolio_weights=portfolio_weights,
+        dates=np.asarray(dates) if dates is not None else None,
+        config=lifecycle_config,
+    )
+    positions = lifecycle["positions"]
+
+    greek_diagnostics = _build_greek_diagnostics(
+        positions=positions,
+        portfolio_weights=portfolio_weights,
+        greek_sensitivities=greek_sensitivities,
+        limit_config=greek_limit_config,
+    )
+
+    net_returns = gross_returns + dividend_returns - slippage_cost - fee_cost - borrow_cost + lifecycle["portfolio_return"]
 
     equity_curve = initial_equity * np.cumprod(1.0 + net_returns)
     pnl = np.zeros_like(equity_curve)
@@ -271,6 +325,8 @@ def backtest_vectorized(
         timeframe=timeframe,
         periods_per_year=periods_per_year,
     )
+    metrics.update(_greek_metrics(greek_diagnostics))
+
     cost_breakdown = {
         "slippage": _to_series(slippage_cost, index),
         "fees": _to_series(fee_cost, index),
@@ -278,12 +334,16 @@ def backtest_vectorized(
         "borrow_by_asset": _to_aligned_output(carry_result["weighted_by_asset"], index),
         "carry_attribution_by_asset": _to_aligned_output(carry_result["raw_by_asset"], index),
         "dividend_return": _to_series(dividend_returns, index),
-        "total": _to_series(slippage_cost + fee_cost + borrow_cost, index),
+        "lifecycle": _to_series(lifecycle["portfolio_return"], index),
+        "total": _to_series(slippage_cost + fee_cost + borrow_cost - lifecycle["portfolio_return"], index),
+        "derivatives_events": lifecycle["events"],
+        "greek_diagnostics": greek_diagnostics,
         "totals": {
             "slippage": float(np.sum(slippage_cost)),
             "fees": float(np.sum(fee_cost)),
             "borrow": float(np.sum(borrow_cost)),
-            "total": float(np.sum(slippage_cost + fee_cost + borrow_cost)),
+            "lifecycle": float(np.sum(lifecycle["portfolio_return"])),
+            "total": float(np.sum(slippage_cost + fee_cost + borrow_cost - lifecycle["portfolio_return"])),
         },
     }
 
@@ -791,3 +851,153 @@ def replay_from_event_logs(event_logs: list[dict[str, Any]]) -> list[dict[str, A
     """Return a deterministic normalized lifecycle stream for exact run reconstruction."""
 
     return replay_lifecycle(event_logs)
+
+
+def _parse_date_like(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _apply_derivatives_lifecycle(
+    *,
+    positions: np.ndarray,
+    prices: np.ndarray,
+    returns: np.ndarray,
+    portfolio_weights: np.ndarray,
+    dates: np.ndarray | None,
+    config: DerivativesLifecycleConfig,
+) -> dict[str, Any]:
+    adjusted = np.asarray(positions, dtype=float).copy()
+    lifecycle_return = np.zeros(adjusted.shape[0], dtype=float)
+    events: list[dict[str, Any]] = []
+
+    for asset_idx in range(adjusted.shape[1]):
+        expiry_raw = config.expiry_by_asset[asset_idx] if asset_idx < len(config.expiry_by_asset) else None
+        expiry_dt = _parse_date_like(expiry_raw)
+        if expiry_dt is None:
+            continue
+        expiry_idx = None
+        if dates is not None:
+            for row, value in enumerate(dates):
+                current = _parse_date_like(value)
+                if current is not None and current.date() >= expiry_dt.date():
+                    expiry_idx = row
+                    break
+        if expiry_idx is None:
+            continue
+
+        strike = config.strike_by_asset[asset_idx] if asset_idx < len(config.strike_by_asset) else None
+        option_type = (config.option_type_by_asset[asset_idx] or "").lower() if asset_idx < len(config.option_type_by_asset) else ""
+        multiplier = float(config.multipliers_by_asset[asset_idx]) if asset_idx < len(config.multipliers_by_asset) else 1.0
+        settlement_style = (
+            str(config.settlement_style_by_asset[asset_idx]).lower()
+            if asset_idx < len(config.settlement_style_by_asset)
+            else "physical"
+        )
+
+        if strike is not None and expiry_idx < prices.shape[0]:
+            intrinsic = 0.0
+            px = float(prices[expiry_idx, asset_idx])
+            if option_type == "call":
+                intrinsic = max(0.0, px - float(strike))
+            elif option_type == "put":
+                intrinsic = max(0.0, float(strike) - px)
+            qty = float(adjusted[expiry_idx, asset_idx])
+            cash_component = qty * intrinsic * multiplier
+            if settlement_style == "cash":
+                denom = max(1.0, px)
+                lifecycle_return[expiry_idx] += (cash_component / denom) * portfolio_weights[asset_idx]
+                event_type = "expiry_cash_settlement"
+            else:
+                post_idx = min(expiry_idx + 1, adjusted.shape[0] - 1)
+                direction = 1.0 if option_type == "call" else -1.0
+                adjusted[post_idx:, asset_idx] += qty * direction * multiplier
+                event_type = "assignment_exercise"
+            events.append(
+                {
+                    "event": event_type,
+                    "bar_index": int(expiry_idx),
+                    "asset_index": int(asset_idx),
+                    "strike": None if strike is None else float(strike),
+                    "spot": px,
+                    "quantity": qty,
+                }
+            )
+
+        if expiry_idx < adjusted.shape[0]:
+            adjusted[expiry_idx:, asset_idx] = 0.0
+
+        if config.enable_auto_roll and config.roll_days_before_expiry >= 0:
+            roll_idx = max(0, expiry_idx - int(config.roll_days_before_expiry))
+            events.append({"event": "contract_roll", "bar_index": int(roll_idx), "asset_index": int(asset_idx)})
+
+    return {"positions": adjusted, "portfolio_return": lifecycle_return, "events": events}
+
+
+def _build_greek_diagnostics(
+    *,
+    positions: np.ndarray,
+    portfolio_weights: np.ndarray,
+    greek_sensitivities: dict[str, Any] | None,
+    limit_config: GreekLimitConfig | None,
+) -> dict[str, Any]:
+    rows, assets = positions.shape
+    sensitivities = greek_sensitivities or {}
+
+    def _arr(name: str) -> np.ndarray:
+        values = sensitivities.get(name)
+        if values is None:
+            return np.zeros((rows, assets), dtype=float)
+        arr = _ensure_2d(np.asarray(values, dtype=float))
+        if arr.shape != (rows, assets):
+            return np.zeros((rows, assets), dtype=float)
+        return arr
+
+    delta = np.sum(positions * _arr("delta") * portfolio_weights, axis=1)
+    gamma = np.sum(positions * _arr("gamma") * portfolio_weights, axis=1)
+    vega = np.sum(positions * _arr("vega") * portfolio_weights, axis=1)
+    theta = np.sum(positions * _arr("theta") * portfolio_weights, axis=1)
+
+    limits = limit_config or GreekLimitConfig()
+
+    def _breach(series: np.ndarray, max_abs: float | None) -> int:
+        if max_abs is None:
+            return 0
+        return int(np.sum(np.abs(series) > float(max_abs)))
+
+    return {
+        "snapshots": {
+            "delta": delta.tolist(),
+            "gamma": gamma.tolist(),
+            "vega": vega.tolist(),
+            "theta": theta.tolist(),
+        },
+        "aggregate_limits": {
+            "delta": limits.max_abs_delta,
+            "gamma": limits.max_abs_gamma,
+            "vega": limits.max_abs_vega,
+            "theta": limits.max_abs_theta,
+        },
+        "breaches": {
+            "delta": _breach(delta, limits.max_abs_delta),
+            "gamma": _breach(gamma, limits.max_abs_gamma),
+            "vega": _breach(vega, limits.max_abs_vega),
+            "theta": _breach(theta, limits.max_abs_theta),
+        },
+    }
+
+
+def _greek_metrics(diagnostics: dict[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for greek in ("delta", "gamma", "vega", "theta"):
+        series = np.asarray(diagnostics.get("snapshots", {}).get(greek, []), dtype=float)
+        out[f"max_abs_{greek}_exposure"] = float(np.max(np.abs(series))) if series.size else 0.0
+        out[f"{greek}_limit_breaches"] = float(diagnostics.get("breaches", {}).get(greek, 0))
+    return out
