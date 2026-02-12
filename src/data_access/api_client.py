@@ -44,6 +44,10 @@ class MassiveApiClient:
         data = self._request("/v3/reference/dividends", {"ticker": ticker, "limit": "100"})
         return data.get("results", [])
 
+    def fetch_splits(self, ticker: str) -> list[dict]:
+        data = self._request("/v3/reference/splits", {"ticker": ticker, "limit": "100"})
+        return data.get("results", [])
+
     def fetch_earnings(self, ticker: str) -> list[dict]:
         data = self._request("/v3/reference/earnings", {"ticker": ticker, "limit": "8"})
         return data.get("results", [])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -13,6 +14,7 @@ import numpy as np
 from config import BACKTEST_CACHE_DIR
 from data_access.actions_schema import OPTIONAL_ACTION_FIELDS, REQUIRED_ACTION_FIELDS
 from data_access.bars_schema import coerce_vendor_bar, validate_bars_frame
+from data_access.api_client import MassiveApiClient
 from data_access.cache import _safe_ticker_name
 from data_access.normalization import validate_asof_membership
 from data_access.provider_base import DataProvider, FORWARD_KNOWN_FIELD_NAMES
@@ -75,15 +77,132 @@ class MassiveCacheProvider(DataProvider):
         start: datetime | str,
         end: datetime | str,
     ):
-        """Return an empty canonical actions frame.
+        start_dt = _normalize_datetime(start)
+        end_dt = _normalize_datetime(end)
+        selected = list(symbols) if symbols else list(self._symbols)
+        records: list[dict[str, object]] = []
+        records.extend(_load_cached_corporate_actions(selected, start_dt, end_dt, self.cache_root))
 
-        TODO: Extend MassiveApiClient with dividends/splits endpoints and hydrate
-        canonical corporate actions when those feeds are available.
-        """
-        _ = (symbols, start, end)
+        api_key = os.getenv("MASSIVE_API_KEY")
+        if api_key:
+            client = MassiveApiClient(api_key)
+            for symbol in selected:
+                try:
+                    records.extend(_fetch_api_corporate_actions(client, symbol, start_dt, end_dt))
+                except Exception:
+                    continue
+
         if pd is None:
-            return []
-        return pd.DataFrame(columns=[*REQUIRED_ACTION_FIELDS, *OPTIONAL_ACTION_FIELDS])
+            return records
+        if not records:
+            return pd.DataFrame(columns=[*REQUIRED_ACTION_FIELDS, *OPTIONAL_ACTION_FIELDS])
+        frame = pd.DataFrame.from_records(records)
+        frame["action_date"] = pd.to_datetime(frame["action_date"], utc=True)
+        frame = frame.sort_values(["symbol", "action_date", "action_type"]).reset_index(drop=True)
+        return frame
+
+
+def _load_cached_corporate_actions(
+    symbols: Sequence[str],
+    start_dt: datetime,
+    end_dt: datetime,
+    cache_root: Path,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for symbol in symbols:
+        safe = _safe_ticker_name(symbol)
+        path = cache_root / safe / "1m" / "corporate_actions.json"
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            continue
+        entries = payload if isinstance(payload, list) else payload.get("actions", [])
+        for entry in entries:
+            normalized = _normalize_action_record(symbol, entry)
+            if normalized is None:
+                continue
+            action_dt = normalized["action_date"]
+            if start_dt <= action_dt <= end_dt:
+                rows.append(normalized)
+    return rows
+
+
+def _fetch_api_corporate_actions(
+    client: MassiveApiClient,
+    symbol: str,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for entry in client.fetch_dividends(symbol):
+        row = _normalize_dividend_from_api(symbol, entry)
+        if row is not None and start_dt <= row["action_date"] <= end_dt:
+            rows.append(row)
+    for entry in client.fetch_splits(symbol):
+        row = _normalize_split_from_api(symbol, entry)
+        if row is not None and start_dt <= row["action_date"] <= end_dt:
+            rows.append(row)
+    return rows
+
+
+def _normalize_action_record(symbol: str, row: dict) -> dict[str, object] | None:
+    action_type = str(row.get("action_type", "")).strip().lower()
+    if action_type not in {"split", "dividend"}:
+        return None
+    raw_date = row.get("action_date") or row.get("ex_dividend_date") or row.get("execution_date")
+    if raw_date is None:
+        return None
+    dt = _normalize_datetime(str(raw_date))
+    value = float(row.get("value", 0.0) or 0.0)
+    ratio = row.get("ratio")
+    ratio_value = float(ratio) if ratio not in (None, "") else None
+    return {
+        "symbol": symbol,
+        "action_type": action_type,
+        "action_date": dt,
+        "value": value,
+        "currency": row.get("currency", "USD"),
+        "ratio": ratio_value,
+        "description": row.get("description", ""),
+    }
+
+
+def _normalize_dividend_from_api(symbol: str, row: dict) -> dict[str, object] | None:
+    raw_date = row.get("ex_dividend_date") or row.get("pay_date")
+    if raw_date is None:
+        return None
+    return {
+        "symbol": symbol,
+        "action_type": "dividend",
+        "action_date": _normalize_datetime(str(raw_date)),
+        "value": float(row.get("cash_amount", row.get("value", 0.0)) or 0.0),
+        "currency": row.get("currency", "USD"),
+        "ratio": None,
+        "description": "massive_dividend",
+    }
+
+
+def _normalize_split_from_api(symbol: str, row: dict) -> dict[str, object] | None:
+    raw_date = row.get("execution_date") or row.get("date")
+    if raw_date is None:
+        return None
+    split_to = row.get("split_to")
+    split_from = row.get("split_from")
+    if split_to is not None and split_from not in (None, 0, "0"):
+        factor = float(split_to) / float(split_from)
+    else:
+        factor = float(row.get("ratio", 1.0) or 1.0)
+    return {
+        "symbol": symbol,
+        "action_type": "split",
+        "action_date": _normalize_datetime(str(raw_date)),
+        "value": float(factor),
+        "currency": row.get("currency", "USD"),
+        "ratio": float(factor),
+        "description": "massive_split",
+    }
 
 
 def _normalize_datetime(value: datetime | str) -> datetime:

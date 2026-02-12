@@ -197,3 +197,56 @@ def test_loader_rejects_dividend_larger_than_close_for_tradable_bar(tmp_path) ->
             end="2024-01-02T14:31:00+00:00",
             cache_root=tmp_path,
         )
+
+class _FakeActionProvider:
+    def list_symbols(self) -> list[str]:
+        return ["AAPL"]
+
+    def get_bars(self, symbols, start, end, timeframe="1m"):
+        return []
+
+    def get_corporate_actions(self, symbols, start, end):
+        return [
+            {
+                "symbol": "AAPL",
+                "action_type": "split",
+                "action_date": datetime(2024, 1, 2, 14, 31, tzinfo=timezone.utc),
+                "value": 2.0,
+                "ratio": 2.0,
+            },
+            {
+                "symbol": "AAPL",
+                "action_type": "dividend",
+                "action_date": datetime(2024, 1, 2, 14, 32, tzinfo=timezone.utc),
+                "value": 1.0,
+            },
+        ]
+
+
+def test_loader_applies_provider_corporate_actions_and_preserves_raw_prices(tmp_path) -> None:
+    ts = np.array([
+        _ms(2024, 1, 2, 14, 30),
+        _ms(2024, 1, 2, 14, 31),
+        _ms(2024, 1, 2, 14, 32),
+    ], dtype=np.int64)
+    _write_npz(
+        tmp_path,
+        "AAPL",
+        2024,
+        t=ts,
+        o=np.array([100.0, 101.0, 102.0]),
+        c=np.array([100.0, 101.0, 102.0]),
+    )
+
+    bundle = load_canonical_price_arrays(
+        symbols=["AAPL"],
+        start="2024-01-02T14:30:00+00:00",
+        end="2024-01-02T14:32:00+00:00",
+        cache_root=tmp_path,
+        provider=_FakeActionProvider(),
+    )
+
+    assert np.allclose(bundle.raw_close_prices[:, 0], [100.0, 101.0, 102.0])
+    assert bundle.split_factors[:, 0].tolist() == [1.0, 2.0, 1.0]
+    assert bundle.dividends[:, 0].tolist() == [0.0, 0.0, 1.0]
+    assert not np.isclose(bundle.close_prices[0, 0], bundle.raw_close_prices[0, 0])

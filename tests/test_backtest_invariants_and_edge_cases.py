@@ -161,3 +161,44 @@ def test_compute_metrics_include_rich_period_aware_fields() -> None:
     assert 0.0 <= float(result_daily.metrics["hit_rate"]) <= 1.0
     assert 0.0 <= float(result_daily.metrics["exposure_time"]) <= 1.0
     assert np.isfinite(float(result_daily.metrics["turnover_adjusted_return"]))
+
+
+def test_split_transform_and_dividend_cashflow_keep_value_continuity() -> None:
+    prices = np.array([100.0, 50.0, 51.0, 52.0], dtype=float)
+    signals = np.array([1.0, 1.0, 1.0, 1.0], dtype=float)
+    splits = np.array([1.0, 2.0, 1.0, 1.0], dtype=float)
+    dividends = np.array([0.0, 0.0, 1.0, 0.0], dtype=float)
+
+    result = backtest_vectorized(
+        prices=prices,
+        signals=signals,
+        initial_equity=1000.0,
+        corporate_action_splits=splits,
+        corporate_action_dividends=dividends,
+    )
+
+    # 2-for-1 split should scale position units going forward.
+    assert np.isclose(result.positions[1], 2.0)
+    # Dividend cashflow should contribute positive return on dividend bar.
+    assert float(result.cost_breakdown["dividend_return"][2]) > 0.0
+
+
+def test_split_pnl_is_neutral_without_dividends() -> None:
+    prices = np.array([100.0, 100.0, 100.0, 100.0], dtype=float)
+    signals = np.array([1.0, 1.0, 1.0, 1.0], dtype=float)
+    splits = np.array([1.0, 2.0, 1.0, 1.0], dtype=float)
+
+    split_result = backtest_vectorized(
+        prices=prices,
+        signals=signals,
+        initial_equity=1000.0,
+        corporate_action_splits=splits,
+    )
+    baseline_result = backtest_vectorized(
+        prices=prices,
+        signals=signals,
+        initial_equity=1000.0,
+    )
+
+    assert np.isclose(float(split_result.equity_curve[-1]), float(baseline_result.equity_curve[-1]))
+    assert np.isclose(float(split_result.positions[1]), 2.0)
