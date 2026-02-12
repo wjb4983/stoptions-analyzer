@@ -8,9 +8,9 @@ that open.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Protocol
+from typing import Any, Dict, Iterable, List, Literal, Optional, Protocol
 
-from .execution import FeeModel, SlippageModel, ZeroFee, ZeroSlippage
+from .execution import ExecutionContext, FeeModel, PartialFillModel, SlippageModel, ZeroFee, ZeroSlippage
 
 
 @dataclass(frozen=True)
@@ -190,3 +190,343 @@ class EventDrivenBacktester:
             fee = self.fee_model.calculate(exec_price, signed_size, bar)
             fills.append(Fill(order=order, price=exec_price, fee=fee, timestamp=timestamp))
         return fills
+
+
+OrderState = Literal["new", "working", "partial", "filled", "canceled", "expired"]
+OrderEventType = Literal["submit", "amend", "cancel", "fill", "expire"]
+
+
+@dataclass(frozen=True)
+class OrderLifecycleEvent:
+    """Deterministic order lifecycle event emitted by the execution adapter."""
+
+    event_type: OrderEventType
+    order_id: str
+    state: OrderState
+    side: str
+    quantity: float
+    filled_quantity: float
+    remaining_quantity: float
+    bar_index: int
+    symbol: str
+    timestamp: str | None = None
+    parent_order_id: str | None = None
+    price: float | None = None
+    fee: float | None = None
+    submit_timestamp: str | None = None
+    time_in_force: str = "gtc"
+    urgency: str = "normal"
+    child_order_id: str | None = None
+
+
+@dataclass
+class ManagedOrder:
+    order_id: str
+    symbol: str
+    side: str
+    quantity: float
+    filled_quantity: float = 0.0
+    state: OrderState = "new"
+    submit_timestamp: str | None = None
+    time_in_force: str = "gtc"
+    urgency: str = "normal"
+    child_order_id: str | None = None
+
+    @property
+    def remaining_quantity(self) -> float:
+        return max(self.quantity - self.filled_quantity, 0.0)
+
+
+class OrderLifecycleBook:
+    """Tracks explicit order states and emits reproducible lifecycle events."""
+
+    def __init__(self) -> None:
+        self.orders: dict[str, ManagedOrder] = {}
+        self.events: list[OrderLifecycleEvent] = []
+
+    def _emit(self, event: OrderLifecycleEvent) -> None:
+        self.events.append(event)
+
+    def submit(
+        self,
+        *,
+        order_id: str,
+        symbol: str,
+        side: str,
+        quantity: float,
+        bar_index: int,
+        context: ExecutionContext,
+        parent_order_id: str | None = None,
+    ) -> None:
+        order = ManagedOrder(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            quantity=float(quantity),
+            state="working",
+            submit_timestamp=context.submit_timestamp,
+            time_in_force=context.time_in_force,
+            urgency=context.urgency,
+            child_order_id=context.child_order_id,
+        )
+        self.orders[order_id] = order
+        self._emit(
+            OrderLifecycleEvent(
+                event_type="submit",
+                order_id=order_id,
+                state=order.state,
+                side=side,
+                quantity=order.quantity,
+                filled_quantity=order.filled_quantity,
+                remaining_quantity=order.remaining_quantity,
+                bar_index=int(bar_index),
+                symbol=symbol,
+                timestamp=context.event_timestamp,
+                parent_order_id=parent_order_id,
+                submit_timestamp=context.submit_timestamp,
+                time_in_force=context.time_in_force,
+                urgency=context.urgency,
+                child_order_id=context.child_order_id,
+            )
+        )
+
+    def amend(self, *, order_id: str, new_quantity: float, bar_index: int, context: ExecutionContext) -> None:
+        order = self.orders[order_id]
+        order.quantity = max(float(new_quantity), order.filled_quantity)
+        order.child_order_id = context.child_order_id
+        order.state = "working" if order.filled_quantity == 0 else "partial"
+        self._emit(
+            OrderLifecycleEvent(
+                event_type="amend",
+                order_id=order_id,
+                state=order.state,
+                side=order.side,
+                quantity=order.quantity,
+                filled_quantity=order.filled_quantity,
+                remaining_quantity=order.remaining_quantity,
+                bar_index=int(bar_index),
+                symbol=order.symbol,
+                timestamp=context.event_timestamp,
+                submit_timestamp=order.submit_timestamp,
+                time_in_force=context.time_in_force,
+                urgency=context.urgency,
+                child_order_id=context.child_order_id,
+            )
+        )
+
+    def cancel(self, *, order_id: str, bar_index: int, context: ExecutionContext) -> None:
+        order = self.orders[order_id]
+        order.state = "canceled"
+        self._emit(
+            OrderLifecycleEvent(
+                event_type="cancel",
+                order_id=order_id,
+                state=order.state,
+                side=order.side,
+                quantity=order.quantity,
+                filled_quantity=order.filled_quantity,
+                remaining_quantity=order.remaining_quantity,
+                bar_index=int(bar_index),
+                symbol=order.symbol,
+                timestamp=context.event_timestamp,
+                submit_timestamp=order.submit_timestamp,
+                time_in_force=context.time_in_force,
+                urgency=context.urgency,
+                child_order_id=context.child_order_id,
+            )
+        )
+
+    def expire(self, *, order_id: str, bar_index: int, context: ExecutionContext) -> None:
+        order = self.orders[order_id]
+        order.state = "expired"
+        self._emit(
+            OrderLifecycleEvent(
+                event_type="expire",
+                order_id=order_id,
+                state=order.state,
+                side=order.side,
+                quantity=order.quantity,
+                filled_quantity=order.filled_quantity,
+                remaining_quantity=order.remaining_quantity,
+                bar_index=int(bar_index),
+                symbol=order.symbol,
+                timestamp=context.event_timestamp,
+                submit_timestamp=order.submit_timestamp,
+                time_in_force=context.time_in_force,
+                urgency=context.urgency,
+                child_order_id=context.child_order_id,
+            )
+        )
+
+    def fill(
+        self,
+        *,
+        order_id: str,
+        fill_quantity: float,
+        bar_index: int,
+        context: ExecutionContext,
+        price: float,
+        fee: float = 0.0,
+    ) -> None:
+        order = self.orders[order_id]
+        if fill_quantity <= 0:
+            return
+        order.filled_quantity = min(order.quantity, order.filled_quantity + float(fill_quantity))
+        order.state = "filled" if order.remaining_quantity <= 1e-12 else "partial"
+        self._emit(
+            OrderLifecycleEvent(
+                event_type="fill",
+                order_id=order_id,
+                state=order.state,
+                side=order.side,
+                quantity=order.quantity,
+                filled_quantity=order.filled_quantity,
+                remaining_quantity=order.remaining_quantity,
+                bar_index=int(bar_index),
+                symbol=order.symbol,
+                timestamp=context.event_timestamp,
+                price=float(price),
+                fee=float(fee),
+                submit_timestamp=order.submit_timestamp,
+                time_in_force=context.time_in_force,
+                urgency=context.urgency,
+                child_order_id=context.child_order_id,
+            )
+        )
+
+
+class VectorizedExecutionAdapter:
+    """Bridges vectorized requested trades into explicit order lifecycle events."""
+
+    def __init__(self, max_participation_per_bar: float) -> None:
+        self.fill_model = PartialFillModel(max_participation_per_bar=max_participation_per_bar)
+
+    def execute(
+        self,
+        *,
+        requested_trades: Any,
+        prices: Any,
+        available_volume: Any,
+        queue_rank_proxy: Any,
+        order_type: str,
+        latency_bars: int,
+        latency_ms: int,
+        symbols: list[str],
+        timestamps: list[str | None],
+        time_in_force: str = "gtc",
+        urgency: str = "normal",
+    ) -> tuple[Any, Any, list[Any], list[OrderLifecycleEvent]]:
+        trades, residual, fill_events = self.fill_model.run(
+            requested_trades,
+            available_volume,
+            order_type=order_type,
+            latency_bars=latency_bars,
+            latency_ms=latency_ms,
+            queue_rank_proxy=float(queue_rank_proxy[0, 0]),
+        )
+
+        lifecycle = OrderLifecycleBook()
+        next_order_id = 0
+        active: dict[int, str] = {}
+
+        def _ctx(bar_index: int, asset_index: int, *, event_type: str, child: str | None = None) -> ExecutionContext:
+            return ExecutionContext(
+                bar_index=bar_index,
+                asset_index=asset_index,
+                volume=float(available_volume[bar_index, asset_index]),
+                adv=float(available_volume[bar_index, asset_index]),
+                volatility=0.0,
+                spread_bps=0.0,
+                order_type=order_type,
+                latency_bars=latency_bars,
+                latency_ms=latency_ms,
+                queue_rank_proxy=float(queue_rank_proxy[bar_index, asset_index]),
+                available_bar_volume=float(available_volume[bar_index, asset_index]),
+                max_participation_per_bar=self.fill_model.max_participation_per_bar,
+                realized_participation=0.0,
+                submit_timestamp=timestamps[bar_index],
+                time_in_force=time_in_force,
+                urgency=urgency,
+                child_order_id=child,
+                event_type=event_type,
+                event_timestamp=timestamps[bar_index],
+            )
+
+        for bar_idx in range(trades.shape[0]):
+            for asset_idx in range(trades.shape[1]):
+                req = float(requested_trades[bar_idx, asset_idx])
+                oid = active.get(asset_idx)
+                if req != 0.0:
+                    side = "buy" if req > 0 else "sell"
+                    if oid is None:
+                        oid = f"ord-{next_order_id}"
+                        next_order_id += 1
+                        lifecycle.submit(
+                            order_id=oid,
+                            symbol=symbols[asset_idx],
+                            side=side,
+                            quantity=abs(req),
+                            bar_index=bar_idx,
+                            context=_ctx(bar_idx, asset_idx, event_type="submit"),
+                        )
+                        active[asset_idx] = oid
+                    else:
+                        existing = lifecycle.orders[oid]
+                        if (existing.side == "buy" and req < 0) or (existing.side == "sell" and req > 0):
+                            lifecycle.cancel(order_id=oid, bar_index=bar_idx, context=_ctx(bar_idx, asset_idx, event_type="cancel"))
+                            replacement = f"ord-{next_order_id}"
+                            next_order_id += 1
+                            lifecycle.submit(
+                                order_id=replacement,
+                                symbol=symbols[asset_idx],
+                                side=side,
+                                quantity=abs(req),
+                                bar_index=bar_idx,
+                                context=_ctx(bar_idx, asset_idx, event_type="submit", child=replacement),
+                                parent_order_id=oid,
+                            )
+                            oid = replacement
+                            active[asset_idx] = oid
+                        else:
+                            lifecycle.amend(
+                                order_id=oid,
+                                new_quantity=lifecycle.orders[oid].quantity + abs(req),
+                                bar_index=bar_idx,
+                                context=_ctx(bar_idx, asset_idx, event_type="amend", child=oid),
+                            )
+
+                filled = float(trades[bar_idx, asset_idx])
+                if filled != 0.0:
+                    oid = active.get(asset_idx)
+                    if oid is None:
+                        side = "buy" if filled > 0 else "sell"
+                        oid = f"ord-{next_order_id}"
+                        next_order_id += 1
+                        lifecycle.submit(
+                            order_id=oid,
+                            symbol=symbols[asset_idx],
+                            side=side,
+                            quantity=abs(filled),
+                            bar_index=bar_idx,
+                            context=_ctx(bar_idx, asset_idx, event_type="submit"),
+                        )
+                        active[asset_idx] = oid
+                    lifecycle.fill(
+                        order_id=oid,
+                        fill_quantity=abs(filled),
+                        bar_index=bar_idx,
+                        context=_ctx(bar_idx, asset_idx, event_type="fill", child=oid),
+                        price=float(prices[bar_idx, asset_idx]),
+                    )
+                    if lifecycle.orders[oid].state == "filled":
+                        active.pop(asset_idx, None)
+
+        return trades, residual, fill_events, lifecycle.events
+
+
+def replay_lifecycle(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deterministically replay lifecycle event logs and return normalized records."""
+
+    normalized = [OrderLifecycleEvent(**event) for event in events]
+    normalized.sort(key=lambda evt: (evt.bar_index, evt.order_id, evt.event_type))
+    return [evt.__dict__ for evt in normalized]

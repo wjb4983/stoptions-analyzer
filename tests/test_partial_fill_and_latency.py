@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.backtesting.execution import PartialFillModel
-from src.backtesting.vectorized import backtest_vectorized
+from src.backtesting.vectorized import backtest_vectorized, replay_from_event_logs
 
 
 def test_partial_fill_model_carries_residual_orders_forward() -> None:
@@ -45,3 +45,40 @@ def test_vectorized_backtest_exposes_fill_artifacts() -> None:
     total_filled = sum(float(row["filled_size"]) for row in result.fills)
     assert total_filled > 0
     assert any(float(row["residual_size"]) > 0 for row in result.fills)
+
+
+def test_order_lifecycle_persists_across_bars_until_filled() -> None:
+    prices = np.array([100.0, 100.0, 100.0, 100.0], dtype=float)
+    signals = np.array([0.0, 1.0, 1.0, 1.0], dtype=float)
+    result = backtest_vectorized(
+        prices,
+        signals,
+        available_bar_volume=np.array([1.0, 1.0, 1.0, 1.0]),
+        max_participation_per_bar=0.25,
+        time_in_force="gtc",
+        urgency="high",
+    )
+
+    fills = [row for row in result.execution_events if row["event_type"] == "fill"]
+    assert len(fills) >= 2
+    assert any(row["state"] == "partial" for row in fills)
+    assert fills[-1]["state"] in {"partial", "filled"}
+    assert all(row["time_in_force"] == "gtc" for row in result.execution_events)
+    assert all(row["urgency"] == "high" for row in result.execution_events)
+
+
+def test_order_lifecycle_cancel_replace_and_replay_determinism() -> None:
+    prices = np.array([100.0, 100.0, 100.0, 100.0, 100.0], dtype=float)
+    signals = np.array([0.0, 1.0, -1.0, -1.0, -1.0], dtype=float)
+    result = backtest_vectorized(
+        prices,
+        signals,
+        available_bar_volume=np.array([1.0, 1.0, 1.0, 1.0, 1.0]),
+        max_participation_per_bar=0.25,
+    )
+
+    event_types = [row["event_type"] for row in result.execution_events]
+    assert "cancel" in event_types
+    assert "submit" in event_types
+    replayed = replay_from_event_logs(result.execution_events)
+    assert replayed == replay_from_event_logs(list(reversed(result.execution_events)))
