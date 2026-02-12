@@ -274,15 +274,17 @@ def run_time_series_momentum_backtest(
         sector_map=dict(portfolio_sector_map or {}),
     )
 
+    symbol_order = [
+        symbol
+        for symbol, _idx in sorted(
+            arrays.metadata.symbol_to_column.items(), key=lambda item: item[1]
+        )
+    ]
+
     portfolio_result = construct_target_weights(
         raw_signals=sized_signals,
         prices=prices,
-        symbol_order=[
-            symbol
-            for symbol, _idx in sorted(
-                arrays.metadata.symbol_to_column.items(), key=lambda item: item[1]
-            )
-        ],
+        symbol_order=symbol_order,
         config=portfolio_cfg,
     )
 
@@ -315,12 +317,6 @@ def run_time_series_momentum_backtest(
     )
 
     timestamps = arrays.date_index
-    symbol_order = [
-        symbol
-        for symbol, _idx in sorted(
-            arrays.metadata.symbol_to_column.items(), key=lambda item: item[1]
-        )
-    ]
 
     equity = _to_numpy_1d(result.equity_curve)
     returns = _to_numpy_1d(result.returns)
