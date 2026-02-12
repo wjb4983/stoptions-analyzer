@@ -306,3 +306,175 @@ def test_run_parameter_sweep_persists_manifest_and_reproducible_fingerprint(tmp_
 
     index_rows = (tmp_path / "outputs" / "experiment_index.jsonl").read_text().strip().splitlines()
     assert len(index_rows) == 2
+
+
+def test_run_parameter_sweep_resume_reuses_checkpointed_queue(tmp_path) -> None:
+    entry_grid = {"ts_momentum": [{"lookback_days": 20, "skip_days": 5}]}
+    exit_grid = {"none": [{}]}
+    core_grid = {"lookback_days": [20, 30], "skip_days": [5], "costs_bps": [1.0, 2.0]}
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+
+    state_path = tmp_path / "outputs" / "resume_state.json"
+    job_id = cache_runner._stable_fingerprint(
+        {
+            "tickers": ["AAA"],
+            "start_date": date(2024, 1, 1).isoformat(),
+            "end_date": date(2024, 1, 2).isoformat(),
+            "entry_grid": entry_grid,
+            "exit_grid": exit_grid,
+            "core_grid": core_grid,
+            "seed": 11,
+        }
+    )
+    cache_runner._persist_resume_state(
+        state_path=state_path,
+        job_id=job_id,
+        seed=11,
+        queued_indices=[1, 3],
+        completed_rows=[
+            {
+                "entry_signal": "ts_momentum",
+                "entry_signal_params": "{}",
+                "exit_signal": "none",
+                "exit_signal_params": "{}",
+                "lookback_days": 20,
+                "skip_days": 5,
+                "costs_bps": 1.0,
+                "total_return": 0.1,
+                "sharpe": 1.0,
+                "cagr": 0.01,
+                "max_drawdown": -0.1,
+                "calmar": 0.1,
+                "volatility": 0.2,
+                "sortino": 0.5,
+                "downside_deviation": 0.1,
+                "hit_rate": 0.6,
+                "profit_factor": 1.2,
+                "exposure_time": 0.8,
+                "turnover_adjusted_return": 0.03,
+                "rolling_sharpe_mean": 0.8,
+                "rolling_drawdown_worst": -0.05,
+                "turnover_total": 1.0,
+                "trade_count": 5.0,
+                "cost_total": 0.01,
+            }
+        ],
+        invalid_rows=[],
+        errors=[],
+        retry_counts={},
+    )
+
+    seen_indices: list[int] = []
+
+    def fake_eval(payload: dict[str, object]) -> dict[str, object]:
+        idx = int(payload["combo_index"])
+        seen_indices.append(idx)
+        return {
+            "entry_signal": payload["entry_signal"],
+            "entry_signal_params": "{}",
+            "exit_signal": payload["exit_signal"],
+            "exit_signal_params": "{}",
+            "lookback_days": int(payload["lookback_days"]),
+            "skip_days": int(payload["skip_days"]),
+            "costs_bps": float(payload["costs_bps"]),
+            "total_return": 0.2,
+            "sharpe": 2.0 + idx,
+            "cagr": 0.02,
+            "max_drawdown": -0.1,
+            "calmar": 0.2,
+            "volatility": 0.2,
+            "sortino": 0.6,
+            "downside_deviation": 0.1,
+            "hit_rate": 0.6,
+            "profit_factor": 1.3,
+            "exposure_time": 0.8,
+            "turnover_adjusted_return": 0.03,
+            "rolling_sharpe_mean": 1.1,
+            "rolling_drawdown_worst": -0.05,
+            "turnover_total": 1.0,
+            "trade_count": 5.0,
+            "cost_total": 0.01,
+        }
+
+    cache_runner.run_parameter_sweep(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        entry_grid=entry_grid,
+        exit_grid=exit_grid,
+        core_grid=core_grid,
+        seed=11,
+        evaluator=fake_eval,
+        resume_state_path=state_path,
+    )
+
+    assert sorted(seen_indices) == [1, 3]
+    run_dirs = sorted((tmp_path / "outputs").glob("tsmom_sweep_*"))
+    manifest = __import__("json").loads((run_dirs[-1] / "manifest.json").read_text())
+    assert manifest["lineage"]["resumed_from"] == str(state_path)
+
+
+def test_run_parameter_sweep_retries_failures_deterministically(tmp_path) -> None:
+    entry_grid = {"ts_momentum": [{"lookback_days": 20, "skip_days": 5}]}
+    exit_grid = {"none": [{}]}
+    core_grid = {"lookback_days": [20], "skip_days": [5], "costs_bps": [1.0, 2.0, 3.0]}
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+
+    attempt_count: dict[int, int] = {}
+
+    def flaky_eval(payload: dict[str, object]) -> dict[str, object]:
+        idx = int(payload["combo_index"])
+        attempt_count[idx] = attempt_count.get(idx, 0) + 1
+        if idx == 1 and attempt_count[idx] == 1:
+            raise RuntimeError("transient worker failure")
+        worker_seed = int(payload["worker_seed"])
+        return {
+            "entry_signal": payload["entry_signal"],
+            "entry_signal_params": "{}",
+            "exit_signal": payload["exit_signal"],
+            "exit_signal_params": "{}",
+            "lookback_days": int(payload["lookback_days"]),
+            "skip_days": int(payload["skip_days"]),
+            "costs_bps": float(payload["costs_bps"]),
+            "total_return": worker_seed / 10_000.0,
+            "sharpe": float(worker_seed),
+            "cagr": 0.01,
+            "max_drawdown": -0.1,
+            "calmar": 0.2,
+            "volatility": 0.2,
+            "sortino": 0.6,
+            "downside_deviation": 0.1,
+            "hit_rate": 0.6,
+            "profit_factor": 1.3,
+            "exposure_time": 0.8,
+            "turnover_adjusted_return": 0.03,
+            "rolling_sharpe_mean": 1.1,
+            "rolling_drawdown_worst": -0.05,
+            "turnover_total": 1.0,
+            "trade_count": 5.0,
+            "cost_total": 0.01,
+        }
+
+    common = dict(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        entry_grid=entry_grid,
+        exit_grid=exit_grid,
+        core_grid=core_grid,
+        seed=5,
+        evaluator=flaky_eval,
+        retry_policy=cache_runner.SweepRetryPolicy(max_attempts=3, stale_worker_timeout_seconds=5.0),
+    )
+    cache_runner.run_parameter_sweep(**common)
+    leaderboard_one = sorted((tmp_path / "outputs").glob("tsmom_sweep_*"))[-1] / "leaderboard.csv"
+    first_text = leaderboard_one.read_text()
+
+    attempt_count.clear()
+    cache_runner.run_parameter_sweep(**common)
+    leaderboard_two = sorted((tmp_path / "outputs").glob("tsmom_sweep_*"))[-1] / "leaderboard.csv"
+    second_text = leaderboard_two.read_text()
+
+    assert first_text == second_text

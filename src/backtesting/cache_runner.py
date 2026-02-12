@@ -6,12 +6,14 @@ import random
 import argparse
 import logging
 import hashlib
+import time
 import os
 import platform
 import socket
 import subprocess
 import sys
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
+from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import product
 from pathlib import Path
@@ -569,6 +571,108 @@ def generate_sweep_combinations(
     return valid, invalid
 
 
+@dataclass(frozen=True)
+class SweepRetryPolicy:
+    max_attempts: int = 2
+    stale_worker_timeout_seconds: float = 120.0
+
+
+@dataclass(frozen=True)
+class SweepWorkerConfig:
+    mode: str = "local"
+    max_workers: int = 1
+    remote_endpoints: tuple[str, ...] = ()
+
+
+class _SweepExecutorAdapter:
+    def submit(self, fn: Callable[[dict[str, Any]], dict[str, Any]], payload: dict[str, Any]) -> Future[dict[str, Any]]:
+        raise NotImplementedError
+
+    def shutdown(self) -> None:
+        raise NotImplementedError
+
+
+class _LocalSweepExecutorAdapter(_SweepExecutorAdapter):
+    def __init__(self, *, max_workers: int, use_process_pool: bool) -> None:
+        cls = ProcessPoolExecutor if use_process_pool else ThreadPoolExecutor
+        self._executor = cls(max_workers=max_workers)
+
+    def submit(self, fn: Callable[[dict[str, Any]], dict[str, Any]], payload: dict[str, Any]) -> Future[dict[str, Any]]:
+        return self._executor.submit(fn, payload)
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=True)
+
+
+class _RemoteSweepExecutorAdapter(_SweepExecutorAdapter):
+    """Threaded adapter that simulates endpoint-aware dispatch for remote workers."""
+
+    def __init__(self, *, max_workers: int, endpoints: tuple[str, ...]) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._endpoints = endpoints or ("remote-default",)
+
+    def submit(self, fn: Callable[[dict[str, Any]], dict[str, Any]], payload: dict[str, Any]) -> Future[dict[str, Any]]:
+        endpoint = self._endpoints[int(payload["combo_index"]) % len(self._endpoints)]
+        remote_payload = dict(payload)
+        remote_payload["worker_endpoint"] = endpoint
+        return self._executor.submit(fn, remote_payload)
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=True)
+
+
+def _load_resume_state(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
+def _persist_resume_state(
+    *,
+    state_path: Path,
+    job_id: str,
+    seed: int,
+    queued_indices: list[int],
+    completed_rows: list[dict[str, Any]],
+    invalid_rows: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+    retry_counts: dict[int, int],
+) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "job_id": job_id,
+        "seed": int(seed),
+        "updated_at": datetime.now().isoformat(),
+        "queued_indices": list(queued_indices),
+        "completed_rows": list(completed_rows),
+        "invalid_rows": list(invalid_rows),
+        "errors": list(errors),
+        "retry_counts": {str(k): int(v) for k, v in retry_counts.items()},
+    }
+    state_path.write_text(json.dumps(payload, indent=2))
+
+
+def _persist_partial_leaderboard(path: Path, rows: list[dict[str, Any]]) -> None:
+    ranked = sorted(rows, key=lambda row: float(row.get("sharpe", 0.0)), reverse=True)
+    path.write_text(json.dumps(ranked, indent=2))
+
+
+def _resolve_executor_adapter(
+    *,
+    worker_config: SweepWorkerConfig,
+    use_process_pool: bool,
+) -> _SweepExecutorAdapter:
+    if worker_config.mode == "remote":
+        return _RemoteSweepExecutorAdapter(
+            max_workers=max(1, int(worker_config.max_workers)),
+            endpoints=worker_config.remote_endpoints,
+        )
+    return _LocalSweepExecutorAdapter(
+        max_workers=max(1, int(worker_config.max_workers)),
+        use_process_pool=use_process_pool,
+    )
+
+
 def run_parameter_sweep(
     *,
     tickers: list[str],
@@ -584,6 +688,10 @@ def run_parameter_sweep(
     continue_on_error: bool = True,
     top_n: int = 10,
     evaluator: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    resume_state_path: Path | None = None,
+    worker_config: SweepWorkerConfig | None = None,
+    retry_policy: SweepRetryPolicy | None = None,
+    lineage_parent_manifest: str | None = None,
 ) -> str:
     """Run a parallel sweep over signal/core-parameter combinations."""
 
@@ -603,43 +711,113 @@ def run_parameter_sweep(
     default_workers = min(8, max(1, len(combos)))
     n_workers = max_workers or default_workers
     use_process_pool = evaluator is None
-    executor_cls = ProcessPoolExecutor if use_process_pool else ThreadPoolExecutor
+    worker_cfg = worker_config or SweepWorkerConfig(mode="local", max_workers=n_workers)
+    retry_cfg = retry_policy or SweepRetryPolicy()
 
+    base_payload = {
+        "seed": int(seed),
+        "tickers": tickers,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "cache_root": str(cache_root),
+    }
+    queued_indices = list(range(len(combos)))
     rows: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
-    LOGGER.info("Starting sweep for %s combinations with %s workers", len(combos), n_workers)
+    retry_counts: dict[int, int] = {}
+    job_id = _stable_fingerprint({
+        "tickers": tickers,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "entry_grid": entry_grid,
+        "exit_grid": exit_grid,
+        "core_grid": core_grid,
+        "seed": seed,
+    })
+    state_path = resume_state_path or (BACKTEST_OUTPUT_DIR / f"sweep_job_state_{job_id}.json")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_results_path = state_path.with_suffix(".partial.json")
 
-    with executor_cls(max_workers=n_workers) as executor:
-        futures = {
-            executor.submit(
-                worker,
-                {
+    prior_state = _load_resume_state(state_path)
+    resumed_from_manifest: str | None = None
+    if prior_state and str(prior_state.get("job_id")) == job_id:
+        queued_indices = [int(i) for i in prior_state.get("queued_indices", [])]
+        rows = list(prior_state.get("completed_rows", []))
+        invalid_rows = list(prior_state.get("invalid_rows", invalid_rows))
+        errors = list(prior_state.get("errors", []))
+        retry_counts = {int(k): int(v) for k, v in dict(prior_state.get("retry_counts", {})).items()}
+        resumed_from_manifest = str(state_path)
+
+    LOGGER.info(
+        "Starting sweep job=%s with %s queued combinations (%s workers, mode=%s)",
+        job_id,
+        len(queued_indices),
+        worker_cfg.max_workers,
+        worker_cfg.mode,
+    )
+
+    adapter = _resolve_executor_adapter(worker_config=worker_cfg, use_process_pool=use_process_pool)
+    in_flight: dict[Future[dict[str, Any]], tuple[int, float]] = {}
+    completed = len(rows)
+    try:
+        while queued_indices or in_flight:
+            while queued_indices and len(in_flight) < max(1, int(worker_cfg.max_workers)):
+                idx = queued_indices.pop(0)
+                payload = {
                     "combo_index": idx,
-                    "seed": seed,
-                    "tickers": tickers,
-                    "start_date": start_date.isoformat(),
-                    "end_date": end_date.isoformat(),
-                    "cache_root": str(cache_root),
-                    **combo,
-                },
-            ): combo
-            for idx, combo in enumerate(combos)
-        }
-        completed = 0
-        for future in as_completed(futures):
-            combo = futures[future]
-            completed += 1
-            try:
-                rows.append(future.result())
-            except Exception as exc:
-                error_row = {"error": str(exc), "combo": combo}
-                errors.append(error_row)
-                LOGGER.exception("Sweep combo failed (%s/%s)", completed, len(combos))
-                if fail_fast:
-                    raise
-                if not continue_on_error:
-                    raise
-            LOGGER.info("Sweep progress: %s/%s", completed, len(combos))
+                    "worker_seed": int(seed) + int(idx),
+                    "job_id": job_id,
+                    **base_payload,
+                    **combos[idx],
+                }
+                fut = adapter.submit(worker, payload)
+                in_flight[fut] = (idx, time.monotonic())
+
+            if not in_flight:
+                continue
+
+            done, _ = wait(list(in_flight.keys()), timeout=0.25, return_when=FIRST_COMPLETED)
+            now = time.monotonic()
+            stale = [f for f, (_, started) in in_flight.items() if (now - started) > retry_cfg.stale_worker_timeout_seconds]
+            for future in stale:
+                idx, _ = in_flight.pop(future)
+                attempts = retry_counts.get(idx, 0) + 1
+                retry_counts[idx] = attempts
+                errors.append({"error": "stale_worker_timeout", "combo": combos[idx], "attempt": attempts})
+                if attempts < retry_cfg.max_attempts:
+                    queued_indices.append(idx)
+
+            for future in done:
+                idx, _ = in_flight.pop(future)
+                completed += 1
+                try:
+                    rows.append(future.result())
+                except Exception as exc:
+                    attempts = retry_counts.get(idx, 0) + 1
+                    retry_counts[idx] = attempts
+                    errors.append({"error": str(exc), "combo": combos[idx], "attempt": attempts})
+                    LOGGER.exception("Sweep combo failed (%s/%s)", completed, len(combos))
+                    if attempts < retry_cfg.max_attempts:
+                        queued_indices.append(idx)
+                    elif fail_fast:
+                        raise
+                    elif not continue_on_error:
+                        raise
+                LOGGER.info("Sweep progress: %s/%s", completed, len(combos))
+
+            _persist_partial_leaderboard(partial_results_path, rows)
+            _persist_resume_state(
+                state_path=state_path,
+                job_id=job_id,
+                seed=seed,
+                queued_indices=queued_indices,
+                completed_rows=rows,
+                invalid_rows=invalid_rows,
+                errors=errors,
+                retry_counts=retry_counts,
+            )
+    finally:
+        adapter.shutdown()
 
     ranked_rows = sorted(rows, key=lambda row: float(row["sharpe"]), reverse=True)
     run_dir = _persist_sweep_outputs(
@@ -656,13 +834,29 @@ def run_parameter_sweep(
             "exit_grid": exit_grid,
             "core_grid": core_grid,
             "max_workers": n_workers,
+            "worker_mode": worker_cfg.mode,
+            "remote_endpoints": list(worker_cfg.remote_endpoints),
+            "retry_policy": {
+                "max_attempts": retry_cfg.max_attempts,
+                "stale_worker_timeout_seconds": retry_cfg.stale_worker_timeout_seconds,
+            },
             "fail_fast": fail_fast,
             "continue_on_error": continue_on_error,
             "top_n": top_n,
         },
         random_seed=seed,
         governance=None,
+        lineage={
+            "job_id": job_id,
+            "resume_state_path": str(state_path),
+            "resumed_from": resumed_from_manifest,
+            "lineage_parent_manifest": lineage_parent_manifest,
+            "partial_results_path": str(partial_results_path),
+            "retry_counts": retry_counts,
+        },
     )
+    if state_path.exists():
+        state_path.unlink()
     return (
         f"Sweep complete: {len(ranked_rows)} successful combos, "
         f"{len(invalid_rows)} skipped, {len(errors)} failed. "
@@ -694,6 +888,7 @@ def run_walk_forward_backtest(
     nested_optimization: bool = False,
     inner_train_fraction: float = 0.7,
     governance_metadata: dict[str, Any] | None = None,
+    lineage_parent_manifest: str | None = None,
 ) -> str:
     combos, invalid_rows = generate_sweep_combinations(
         entry_grid=entry_grid,
@@ -918,6 +1113,10 @@ def run_walk_forward_backtest(
         "random_seed": None,
         "environment": _collect_environment_metadata(),
         "governance": governance_payload,
+        "lineage": {
+            "lineage_parent_manifest": lineage_parent_manifest,
+            "merged_leaderboard_sources": [str(run_dir / "fold_scores.csv"), str(run_dir / "fold_details.json")],
+        },
         "reproducibility_fingerprint": _stable_fingerprint(
             {
                 "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
@@ -928,6 +1127,7 @@ def run_walk_forward_backtest(
                     "score_metric": score_metric,
                 },
                 "governance": governance_payload,
+                "lineage_parent_manifest": lineage_parent_manifest,
             }
         ),
     }
@@ -1196,7 +1396,7 @@ def _format_walk_forward_report(
 
 
 def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
-    combo_seed = int(payload["seed"]) + int(payload["combo_index"])
+    combo_seed = int(payload.get("worker_seed", int(payload["seed"]) + int(payload["combo_index"])))
     random.seed(combo_seed)
     np.random.seed(combo_seed)
 
@@ -1294,6 +1494,7 @@ def _persist_sweep_outputs(
     parameters: dict[str, Any],
     random_seed: int,
     governance: dict[str, Any] | None = None,
+    lineage: dict[str, Any] | None = None,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_sweep_{timestamp}"
@@ -1370,13 +1571,23 @@ def _persist_sweep_outputs(
             "failed_combos": len(errors),
             "best_sharpe": float(ranked_rows[0]["sharpe"]) if ranked_rows else 0.0,
         },
+        "lineage": lineage or {},
         "reproducibility_fingerprint": _stable_fingerprint(
             {
                 "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
                 "parameters": parameters,
                 "random_seed": int(random_seed),
                 "top_row": ranked_rows[0] if ranked_rows else {},
-                "governance": governance_payload,
+                "governance": {
+                    "promotion_state": governance_payload.get("promotion_state"),
+                    "gate_checks": governance_payload.get("gate_checks", {}),
+                    "missing_required_checks": governance_payload.get("missing_required_checks", []),
+                    "is_promotion_ready": governance_payload.get("is_promotion_ready", False),
+                },
+                "lineage": {
+                    "job_id": (lineage or {}).get("job_id"),
+                    "lineage_parent_manifest": (lineage or {}).get("lineage_parent_manifest"),
+                },
             }
         ),
     }

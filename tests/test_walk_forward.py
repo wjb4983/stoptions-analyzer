@@ -315,3 +315,48 @@ def test_run_walk_forward_backtest_handles_integer_timestamps(monkeypatch, tmp_p
     )
 
     assert "Walk-forward complete" in output
+
+
+def test_run_walk_forward_backtest_manifest_includes_lineage_parent(monkeypatch, tmp_path) -> None:
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+
+    class _Arrays:
+        def __init__(self) -> None:
+            import numpy as np
+            from datetime import datetime, timedelta
+
+            self.close_prices = np.ones((40, 1), dtype=float)
+            self.missing_mask = np.zeros((40, 1), dtype=bool)
+            t0 = datetime(2024, 1, 1)
+            self.date_index = [t0 + timedelta(minutes=i) for i in range(40)]
+
+    monkeypatch.setattr(cache_runner, "load_backtest_engine_arrays", lambda **kwargs: _Arrays())
+
+    class _Result:
+        def __init__(self, n: int) -> None:
+            import numpy as np
+
+            self.metrics = {"sharpe": 1.0, "total_return": 0.01 * n}
+            self.equity_curve = np.linspace(1.0, 1.0 + (0.01 * n), num=n)
+
+    monkeypatch.setattr(cache_runner, "build_targets", lambda **kwargs: kwargs["close_prices"] * 0.0)
+    monkeypatch.setattr(cache_runner, "backtest_vectorized", lambda **kwargs: _Result(kwargs["prices"].shape[0]))
+
+    cache_runner.run_walk_forward_backtest(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        entry_grid={"ts_momentum": [{"lookback_days": 5, "skip_days": 1}]},
+        exit_grid={"none": [{}]},
+        core_grid={"lookback_days": [5], "skip_days": [1], "costs_bps": [1.0]},
+        train_bars=8,
+        validation_bars=4,
+        test_bars=4,
+        step_bars=4,
+        lineage_parent_manifest="/tmp/ancestor-manifest.json",
+    )
+
+    run_dir = sorted((tmp_path / "outputs").glob("tsmom_walk_forward_*"))[-1]
+    manifest = __import__("json").loads((run_dir / "manifest.json").read_text())
+    assert manifest["lineage"]["lineage_parent_manifest"] == "/tmp/ancestor-manifest.json"
