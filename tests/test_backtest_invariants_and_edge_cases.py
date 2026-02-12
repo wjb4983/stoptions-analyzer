@@ -202,3 +202,60 @@ def test_split_pnl_is_neutral_without_dividends() -> None:
 
     assert np.isclose(float(split_result.equity_curve[-1]), float(baseline_result.equity_curve[-1]))
     assert np.isclose(float(split_result.positions[1]), 2.0)
+
+
+def test_margin_constraints_force_deleveraging_and_keep_utilization_bounded() -> None:
+    prices = np.array(
+        [
+            [100.0, 100.0],
+            [100.0, 100.0],
+            [100.0, 100.0],
+            [100.0, 100.0],
+        ],
+        dtype=float,
+    )
+    # Deliberately over-sized to trigger forced deleveraging under tight schedules.
+    signals = np.array(
+        [
+            [0.0, 0.0],
+            [4.0, -4.0],
+            [4.0, -4.0],
+            [2.0, -2.0],
+        ],
+        dtype=float,
+    )
+
+    result = backtest_vectorized(
+        prices=prices,
+        signals=signals,
+        margin_schedule_by_asset=np.array([0.9, 0.9], dtype=float),
+        stress_addon_by_asset=np.array([0.3, 0.3], dtype=float),
+        concentration_addon=0.2,
+        hard_to_borrow_flags=np.array([0.0, 1.0], dtype=float),
+        hard_to_borrow_addon=0.2,
+    )
+
+    account_state = result.cost_breakdown["account_state"]
+    margin_util = np.asarray(account_state["margin_utilization"], dtype=float)
+    forced = np.asarray(account_state["forced_liquidation"], dtype=float)
+    scale = np.asarray(account_state["deleveraging_scale"], dtype=float)
+
+    assert np.all(margin_util <= 1.0 + 1e-9)
+    assert np.any(forced > 0.0)
+    assert np.any(scale < 1.0)
+
+
+def test_hard_to_borrow_short_block_prevents_impossible_short_states() -> None:
+    prices = np.array([[100.0, 100.0], [100.0, 100.0], [100.0, 100.0]], dtype=float)
+    signals = np.array([[0.0, 0.0], [1.0, -1.0], [1.0, -1.0]], dtype=float)
+
+    result = backtest_vectorized(
+        prices=prices,
+        signals=signals,
+        hard_to_borrow_flags=np.array([0.0, 1.0], dtype=float),
+        hard_to_borrow_short_block=True,
+    )
+
+    positions = np.asarray(result.positions, dtype=float)
+    # Asset 1 is flagged HTB, so no short position should survive post-constraints.
+    assert np.all(positions[:, 1] >= -1e-12)

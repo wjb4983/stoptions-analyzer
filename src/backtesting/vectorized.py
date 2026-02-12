@@ -158,6 +158,12 @@ def backtest_vectorized(
     roll_days_before_expiry: int = 0,
     greek_sensitivities: dict[str, Any] | None = None,
     greek_limit_config: GreekLimitConfig | None = None,
+    margin_schedule_by_asset: Any | None = None,
+    stress_addon_by_asset: Any | None = None,
+    concentration_addon: float = 0.0,
+    hard_to_borrow_flags: Any | None = None,
+    hard_to_borrow_addon: float = 0.0,
+    hard_to_borrow_short_block: bool = False,
 ) -> BacktestResult:
     """Run a pure vectorized backtest with next-open execution.
 
@@ -198,7 +204,6 @@ def backtest_vectorized(
 
     gross_asset_returns = np.zeros_like(price_values, dtype=float)
     gross_asset_returns[1:] = price_values[1:] / price_values[:-1] - 1.0
-    gross_returns = np.sum(positions * gross_asset_returns * portfolio_weights, axis=1)
 
     execution_model = slippage_model or ZeroSlippage()
     fees = fee_model or ZeroFee()
@@ -303,6 +308,20 @@ def backtest_vectorized(
     )
     positions = lifecycle["positions"]
 
+    margin_result = _apply_margin_constraints(
+        positions=positions,
+        portfolio_weights=portfolio_weights,
+        margin_schedule_by_asset=margin_schedule_by_asset,
+        stress_addon_by_asset=stress_addon_by_asset,
+        concentration_addon=concentration_addon,
+        hard_to_borrow_flags=hard_to_borrow_flags,
+        hard_to_borrow_addon=hard_to_borrow_addon,
+        hard_to_borrow_short_block=hard_to_borrow_short_block,
+    )
+    positions = margin_result["positions"]
+    gross_returns = np.sum(positions * gross_asset_returns * portfolio_weights, axis=1)
+    trades = positions - _shift(positions, 1)
+
     greek_diagnostics = _build_greek_diagnostics(
         positions=positions,
         portfolio_weights=portfolio_weights,
@@ -316,6 +335,12 @@ def backtest_vectorized(
     pnl = np.zeros_like(equity_curve)
     pnl[1:] = equity_curve[:-1] * net_returns[1:]
     turnover = np.sum(np.abs(trades) * portfolio_weights, axis=1)
+    account_state = _build_account_state(
+        equity_curve=equity_curve,
+        positions=positions,
+        portfolio_weights=portfolio_weights,
+        margin_req_ratio=margin_result["margin_requirement_ratio"],
+    )
 
     metrics = _compute_metrics(
         returns=net_returns,
@@ -338,6 +363,15 @@ def backtest_vectorized(
         "total": _to_series(slippage_cost + fee_cost + borrow_cost - lifecycle["portfolio_return"], index),
         "derivatives_events": lifecycle["events"],
         "greek_diagnostics": greek_diagnostics,
+        "account_state": {
+            "cash": _to_series(account_state["cash"], index),
+            "margin_requirement": _to_series(account_state["margin_requirement"], index),
+            "excess_liquidity": _to_series(account_state["excess_liquidity"], index),
+            "buying_power": _to_series(account_state["buying_power"], index),
+            "margin_utilization": _to_series(account_state["margin_utilization"], index),
+            "forced_liquidation": _to_series(margin_result["forced_liquidation"], index),
+            "deleveraging_scale": _to_series(margin_result["deleveraging_scale"], index),
+        },
         "totals": {
             "slippage": float(np.sum(slippage_cost)),
             "fees": float(np.sum(fee_cost)),
@@ -654,6 +688,115 @@ def _estimate_borrow_cost(
         "raw_by_asset": borrow_by_asset,
         "weighted_by_asset": weighted_by_asset,
         "portfolio": np.sum(weighted_by_asset, axis=1),
+    }
+
+
+def _resolve_asset_schedule(values: Any | None, shape: tuple[int, int], *, default: float) -> np.ndarray:
+    if values is None:
+        return np.full(shape, default, dtype=float)
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 0:
+        return np.full(shape, float(arr), dtype=float)
+    if arr.ndim == 1:
+        if arr.shape[0] == shape[1]:
+            return np.repeat(arr.reshape(1, -1), shape[0], axis=0)
+        if arr.shape[0] == shape[0]:
+            return np.repeat(arr.reshape(-1, 1), shape[1], axis=1)
+        raise ValueError("Schedule vectors must match either n_assets or n_periods.")
+    if arr.shape != shape:
+        raise ValueError("Schedule arrays must match price/position shape.")
+    return arr
+
+
+def _apply_margin_constraints(
+    *,
+    positions: np.ndarray,
+    portfolio_weights: np.ndarray,
+    margin_schedule_by_asset: Any | None,
+    stress_addon_by_asset: Any | None,
+    concentration_addon: float,
+    hard_to_borrow_flags: Any | None,
+    hard_to_borrow_addon: float,
+    hard_to_borrow_short_block: bool,
+) -> dict[str, np.ndarray]:
+    n_periods, n_assets = positions.shape
+    adjusted = np.asarray(positions, dtype=float).copy()
+    margin_schedule = _resolve_asset_schedule(margin_schedule_by_asset, adjusted.shape, default=0.5)
+    stress_schedule = _resolve_asset_schedule(stress_addon_by_asset, adjusted.shape, default=0.0)
+    hard_flags = _resolve_asset_schedule(hard_to_borrow_flags, adjusted.shape, default=0.0) > 0.0
+
+    margin_req_ratio = np.zeros(n_periods, dtype=float)
+    deleveraging_scale = np.ones(n_periods, dtype=float)
+    forced_liquidation = np.zeros(n_periods, dtype=float)
+
+    for idx in range(n_periods):
+        row = adjusted[idx]
+        if hard_to_borrow_short_block:
+            blocked = np.logical_and(hard_flags[idx], row < 0.0)
+            if np.any(blocked):
+                row = row.copy()
+                row[blocked] = 0.0
+                adjusted[idx] = row
+                forced_liquidation[idx] = 1.0
+
+        gross_by_asset = np.abs(row * portfolio_weights)
+        gross = float(np.sum(gross_by_asset))
+        concentration = float(np.max(gross_by_asset) / gross) if gross > 0.0 else 0.0
+        effective_margin = (
+            margin_schedule[idx]
+            + stress_schedule[idx]
+            + concentration_addon * concentration
+            + hard_to_borrow_addon * np.logical_and(hard_flags[idx], row < 0.0)
+        )
+        required = float(np.sum(gross_by_asset * effective_margin))
+
+        if required > 1.0 and gross > 0.0:
+            scale = max(0.0, min(1.0, 1.0 / required))
+            adjusted[idx] = row * scale
+            deleveraging_scale[idx] = scale
+            forced_liquidation[idx] = 1.0
+
+            gross_by_asset = np.abs(adjusted[idx] * portfolio_weights)
+            gross = float(np.sum(gross_by_asset))
+            concentration = float(np.max(gross_by_asset) / gross) if gross > 0.0 else 0.0
+            effective_margin = (
+                margin_schedule[idx]
+                + stress_schedule[idx]
+                + concentration_addon * concentration
+                + hard_to_borrow_addon * np.logical_and(hard_flags[idx], adjusted[idx] < 0.0)
+            )
+            required = float(np.sum(gross_by_asset * effective_margin))
+
+        margin_req_ratio[idx] = required
+
+    return {
+        "positions": adjusted,
+        "margin_requirement_ratio": margin_req_ratio,
+        "forced_liquidation": forced_liquidation,
+        "deleveraging_scale": deleveraging_scale,
+    }
+
+
+def _build_account_state(
+    *,
+    equity_curve: np.ndarray,
+    positions: np.ndarray,
+    portfolio_weights: np.ndarray,
+    margin_req_ratio: np.ndarray,
+) -> dict[str, np.ndarray]:
+    gross_exposure = np.sum(np.abs(positions) * portfolio_weights.reshape(1, -1), axis=1)
+    margin_requirement = equity_curve * margin_req_ratio
+    excess_liquidity = equity_curve - margin_requirement
+    cash = equity_curve * (1.0 - gross_exposure)
+    buying_power = np.maximum(excess_liquidity, 0.0) * 2.0
+    safe_equity = np.where(np.abs(equity_curve) < 1e-12, 1e-12, equity_curve)
+    margin_utilization = margin_requirement / safe_equity
+    return {
+        "cash": cash,
+        "margin_requirement": margin_requirement,
+        "excess_liquidity": excess_liquidity,
+        "buying_power": buying_power,
+        "margin_utilization": margin_utilization,
     }
 
 
