@@ -495,13 +495,27 @@ def run_time_series_momentum_backtest(
         fills=fill_rows,
     )
 
+    account_state = result.cost_breakdown.get("account_state", {})
+    merged_risk_diagnostics = dict(portfolio_result.diagnostics)
+    for key in (
+        "cash",
+        "margin_requirement",
+        "excess_liquidity",
+        "buying_power",
+        "margin_utilization",
+        "forced_liquidation",
+        "deleveraging_scale",
+    ):
+        if key in account_state:
+            merged_risk_diagnostics[key] = _to_numpy_1d(account_state[key])
+
     run_dir = _persist_backtest_outputs(
         timestamps=timestamps,
         symbol_order=symbol_order,
         equity=equity,
         returns=returns,
         trades=trades,
-        risk_diagnostics=portfolio_result.diagnostics,
+        risk_diagnostics=merged_risk_diagnostics,
         metrics=metrics,
         dataset_contracts=dataset_contracts,
         parameters=parameter_payload,
@@ -2638,6 +2652,13 @@ def _write_risk_diagnostics_csv_json(
     concentration = np.asarray(diagnostics.get("concentration", np.zeros(len(timestamps))), dtype=float)
     leverage = np.asarray(diagnostics.get("leverage_usage", np.zeros(len(timestamps))), dtype=float)
     turnover = np.asarray(diagnostics.get("turnover", np.zeros(len(timestamps))), dtype=float)
+    margin_utilization = np.asarray(diagnostics.get("margin_utilization", np.zeros(len(timestamps))), dtype=float)
+    cash = np.asarray(diagnostics.get("cash", np.zeros(len(timestamps))), dtype=float)
+    margin_requirement = np.asarray(diagnostics.get("margin_requirement", np.zeros(len(timestamps))), dtype=float)
+    excess_liquidity = np.asarray(diagnostics.get("excess_liquidity", np.zeros(len(timestamps))), dtype=float)
+    buying_power = np.asarray(diagnostics.get("buying_power", np.zeros(len(timestamps))), dtype=float)
+    forced_liquidation = np.asarray(diagnostics.get("forced_liquidation", np.zeros(len(timestamps))), dtype=float)
+    deleveraging_scale = np.asarray(diagnostics.get("deleveraging_scale", np.ones(len(timestamps))), dtype=float)
     turnover_by_symbol = np.asarray(
         diagnostics.get("turnover_by_symbol", np.zeros((len(timestamps), len(symbol_order)))),
         dtype=float,
@@ -2652,6 +2673,13 @@ def _write_risk_diagnostics_csv_json(
             "concentration": float(concentration[idx]) if idx < concentration.size else 0.0,
             "leverage_usage": float(leverage[idx]) if idx < leverage.size else 0.0,
             "turnover": float(turnover[idx]) if idx < turnover.size else 0.0,
+            "margin_utilization": float(margin_utilization[idx]) if idx < margin_utilization.size else 0.0,
+            "cash": float(cash[idx]) if idx < cash.size else 0.0,
+            "margin_requirement": float(margin_requirement[idx]) if idx < margin_requirement.size else 0.0,
+            "excess_liquidity": float(excess_liquidity[idx]) if idx < excess_liquidity.size else 0.0,
+            "buying_power": float(buying_power[idx]) if idx < buying_power.size else 0.0,
+            "forced_liquidation": float(forced_liquidation[idx]) if idx < forced_liquidation.size else 0.0,
+            "deleveraging_scale": float(deleveraging_scale[idx]) if idx < deleveraging_scale.size else 1.0,
         }
         rows.append(row)
 
@@ -2666,6 +2694,13 @@ def _write_risk_diagnostics_csv_json(
                 "concentration",
                 "leverage_usage",
                 "turnover",
+                "margin_utilization",
+                "cash",
+                "margin_requirement",
+                "excess_liquidity",
+                "buying_power",
+                "forced_liquidation",
+                "deleveraging_scale",
             ],
         )
         writer.writeheader()
