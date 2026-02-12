@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 from datetime import date
 
+import pytest
+
 from src.backtesting import cache_runner
 from src.backtesting.walk_forward import (
     WalkForwardResult,
@@ -21,16 +23,52 @@ def test_build_walk_forward_folds_boundaries_and_no_leakage() -> None:
         step_bars=5,
     )
 
+    assert len(folds) == 2
+    first = folds[0]
+    assert (first.train_start, first.train_end) == (0, 10)
+    assert (first.validation_start, first.validation_end) == (11, 16)
+    assert (first.test_start, first.test_end) == (17, 22)
+
+    for fold in folds:
+        assert fold.train_end < fold.validation_start
+        assert fold.validation_end < fold.test_start
+        assert fold.train_end < fold.test_start
+        assert all(fold.leakage_checks.values())
+
+
+def test_build_walk_forward_folds_purge_and_embargo_boundaries() -> None:
+    folds = build_walk_forward_folds(
+        total_bars=32,
+        train_bars=10,
+        validation_bars=5,
+        test_bars=4,
+        step_bars=4,
+        purge_window_bars=2,
+        embargo_window_bars=3,
+        label_horizon_bars=1,
+    )
+
     assert len(folds) == 3
     first = folds[0]
     assert (first.train_start, first.train_end) == (0, 10)
-    assert (first.validation_start, first.validation_end) == (10, 15)
-    assert (first.test_start, first.test_end) == (15, 20)
+    assert (first.validation_start, first.validation_end) == (12, 17)
+    assert (first.test_start, first.test_end) == (20, 24)
+    assert first.excluded_ranges == {
+        "train_validation": [10, 12],
+        "validation_test": [17, 20],
+    }
+    assert all(first.leakage_checks.values())
 
-    for fold in folds:
-        assert fold.train_end <= fold.validation_start
-        assert fold.validation_end <= fold.test_start
-        assert fold.train_end <= fold.test_start
+
+def test_build_walk_forward_folds_raises_on_overlap_constraints() -> None:
+    with pytest.raises(ValueError, match="label_horizon_bars"):
+        build_walk_forward_folds(
+            total_bars=30,
+            train_bars=10,
+            validation_bars=5,
+            test_bars=5,
+            label_horizon_bars=0,
+        )
 
 
 def test_walk_forward_aggregation_deterministic_tie_break() -> None:
@@ -60,6 +98,50 @@ def test_walk_forward_aggregation_deterministic_tie_break() -> None:
     assert all(fold["selected_params"]["name"] == "a" for fold in result.folds)
     assert result.aggregate_metrics["sharpe_mean"] == 1.0
     assert result.stability["unique_selected_params"] == 1
+    assert "excluded_ranges" in result.folds[0]
+    assert "leakage_checks" in result.folds[0]
+
+
+def test_walk_forward_nested_optimization_uses_inner_scores() -> None:
+    outer_folds = build_walk_forward_folds(
+        total_bars=40,
+        train_bars=10,
+        validation_bars=5,
+        test_bars=5,
+        step_bars=10,
+        purge_window_bars=1,
+        embargo_window_bars=1,
+    )
+
+    inner_folds = {
+        outer_folds[0].fold_id: [
+            build_walk_forward_folds(
+                total_bars=20,
+                train_bars=8,
+                validation_bars=4,
+                test_bars=1,
+                step_bars=4,
+                purge_window_bars=1,
+                embargo_window_bars=0,
+            )[0]
+        ]
+    }
+
+    candidates = [{"name": "a"}, {"name": "b"}]
+
+    def fake_eval(candidate: dict[str, object], start: int, end: int) -> dict[str, object]:
+        score = 2.0 if candidate["name"] == "b" and end <= 13 else 1.0
+        return {"metrics": {"sharpe": score}, "equity": []}
+
+    result = run_walk_forward_optimization(
+        folds=outer_folds[:1],
+        parameter_candidates=candidates,
+        evaluate_segment=fake_eval,
+        nested_inner_folds=inner_folds,
+    )
+
+    assert result.folds[0]["selected_params"]["name"] == "b"
+    assert "inner_diagnostics" in result.folds[0]["diagnostics"][0]
 
 
 def test_persist_walk_forward_outputs(tmp_path) -> None:
@@ -100,10 +182,10 @@ def test_run_walk_forward_backtest_persists_fold_artifacts(monkeypatch, tmp_path
             import numpy as np
             from datetime import datetime, timedelta
 
-            self.close_prices = np.ones((24, 1), dtype=float)
-            self.missing_mask = np.zeros((24, 1), dtype=bool)
+            self.close_prices = np.ones((40, 1), dtype=float)
+            self.missing_mask = np.zeros((40, 1), dtype=bool)
             t0 = datetime(2024, 1, 1)
-            self.date_index = [t0 + timedelta(minutes=i) for i in range(24)]
+            self.date_index = [t0 + timedelta(minutes=i) for i in range(40)]
 
     monkeypatch.setattr(cache_runner, "load_backtest_engine_arrays", lambda **kwargs: _Arrays())
 
@@ -140,6 +222,9 @@ def test_run_walk_forward_backtest_persists_fold_artifacts(monkeypatch, tmp_path
     assert (fold_dirs[0] / "oos_metrics.json").exists()
     assert (fold_dirs[0] / "oos_equity.csv").exists()
     assert (fold_dirs[0] / "diagnostics.json").exists()
+    summary = (run_dirs[0] / "fold_summary.json").read_text()
+    assert "excluded_ranges" in summary
+    assert "leakage_checks" in summary
     report_path = run_dirs[0] / "report.txt"
     assert report_path.exists()
     assert "Walk-Forward Backtest Report" in report_path.read_text()
@@ -154,10 +239,10 @@ def test_run_walk_forward_backtest_supports_fraction_windows(monkeypatch, tmp_pa
             import numpy as np
             from datetime import datetime, timedelta
 
-            self.close_prices = np.ones((40, 1), dtype=float)
-            self.missing_mask = np.zeros((40, 1), dtype=bool)
+            self.close_prices = np.ones((90, 1), dtype=float)
+            self.missing_mask = np.zeros((90, 1), dtype=bool)
             t0 = datetime(2024, 1, 1)
-            self.date_index = [t0 + timedelta(minutes=i) for i in range(40)]
+            self.date_index = [t0 + timedelta(minutes=i) for i in range(90)]
 
     monkeypatch.setattr(cache_runner, "load_backtest_engine_arrays", lambda **kwargs: _Arrays())
 
@@ -183,6 +268,7 @@ def test_run_walk_forward_backtest_supports_fraction_windows(monkeypatch, tmp_pa
         validation_fraction=0.2,
         test_fraction=0.2,
         step_fraction=0.2,
+        nested_optimization=True,
     )
 
     assert "Walk-forward complete" in output
@@ -197,10 +283,10 @@ def test_run_walk_forward_backtest_handles_integer_timestamps(monkeypatch, tmp_p
         def __init__(self) -> None:
             import numpy as np
 
-            self.close_prices = np.ones((20, 1), dtype=float)
-            self.missing_mask = np.zeros((20, 1), dtype=bool)
+            self.close_prices = np.ones((60, 1), dtype=float)
+            self.missing_mask = np.zeros((60, 1), dtype=bool)
             base_ms = 1704067200000
-            self.date_index = np.array([base_ms + (i * 60_000) for i in range(20)], dtype=np.int64)
+            self.date_index = np.array([base_ms + (i * 60_000) for i in range(60)], dtype=np.int64)
 
     monkeypatch.setattr(cache_runner, "load_backtest_engine_arrays", lambda **kwargs: _Arrays())
 
