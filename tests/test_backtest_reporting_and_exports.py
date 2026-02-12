@@ -6,9 +6,51 @@ import json
 
 import numpy as np
 
-from src.analysis.reporting import build_drawdown_rows, format_backtest_report
+from src.analysis.reporting import (
+    build_drawdown_rows,
+    build_sweep_robustness_report,
+    compute_spa_pvalue,
+    compute_white_reality_check,
+    format_backtest_report,
+)
 from src.backtesting import cache_runner
 
+
+
+
+def test_white_and_spa_statistics_schema() -> None:
+    candidate_returns = np.array(
+        [
+            [0.01, 0.005, -0.002],
+            [0.02, 0.001, -0.001],
+            [-0.01, 0.003, 0.0],
+            [0.015, -0.002, 0.002],
+        ],
+        dtype=float,
+    )
+    white = compute_white_reality_check(candidate_returns=candidate_returns, n_bootstrap=50, seed=7)
+    spa = compute_spa_pvalue(candidate_returns=candidate_returns, n_bootstrap=50, seed=7)
+
+    for payload, keys in [
+        (white, {"observed_max_mean", "p_value", "n_candidates", "n_observations"}),
+        (spa, {"observed_stat", "p_value", "n_candidates", "n_observations"}),
+    ]:
+        assert keys.issubset(payload.keys())
+        assert 0.0 <= float(payload["p_value"]) <= 1.0
+
+
+def test_build_sweep_robustness_report_includes_white_and_spa() -> None:
+    rows = [
+        {"sharpe": 1.2, "ret_0": 0.01, "ret_1": 0.005, "ret_2": -0.001},
+        {"sharpe": 0.9, "ret_0": 0.008, "ret_1": 0.002, "ret_2": -0.003},
+        {"sharpe": 0.7, "ret_0": 0.004, "ret_1": 0.001, "ret_2": -0.002},
+        {"sharpe": 0.2, "ret_0": -0.001, "ret_1": 0.0, "ret_2": 0.001},
+    ]
+    report = build_sweep_robustness_report(ranked_rows=rows, n_monte_carlo=30, seed=5)
+    assert "white_reality_check" in report
+    assert "spa" in report
+    assert 0.0 <= float(report["white_reality_check"]["p_value"]) <= 1.0
+    assert 0.0 <= float(report["spa"]["p_value"]) <= 1.0
 
 def test_build_drawdown_rows_returns_sorted_worst_first() -> None:
     base = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -30,10 +72,7 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     output_root = tmp_path / "outputs"
     cache_runner.BACKTEST_OUTPUT_DIR = output_root
 
-    symbol = "AAA"
-    safe = symbol
-    symbol_dir = cache_root / safe / "1m"
-    symbol_dir.mkdir(parents=True)
+    symbols = ["AAA", "BBB"]
 
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     timestamps = np.array(
@@ -42,19 +81,22 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     )
     close = np.array([100, 101, 102, 103, 104, 105, 106, 107], dtype=float)
     open_ = close - 0.1
-    np.savez_compressed(
-        symbol_dir / f"{safe}_1m_2024.npz",
-        t=timestamps,
-        o=open_,
-        c=close,
-        h=close,
-        l=close,
-        v=np.ones_like(close),
-        n=np.ones_like(close),
-    )
+    for symbol in symbols:
+        symbol_dir = cache_root / symbol / "1m"
+        symbol_dir.mkdir(parents=True)
+        np.savez_compressed(
+            symbol_dir / f"{symbol}_1m_2024.npz",
+            t=timestamps,
+            o=open_,
+            c=close + (0.5 if symbol == "BBB" else 0.0),
+            h=close + (0.5 if symbol == "BBB" else 0.0),
+            l=close + (0.5 if symbol == "BBB" else 0.0),
+            v=np.ones_like(close),
+            n=np.ones_like(close),
+        )
 
     output = cache_runner.run_time_series_momentum_backtest(
-        tickers=[symbol],
+        tickers=symbols,
         start_date=date(2024, 1, 1),
         end_date=date(2024, 1, 1),
         cache_root=cache_root,
@@ -309,7 +351,13 @@ def test_persist_sweep_outputs_writes_robustness_report(tmp_path: Path) -> None:
     assert "deflated_sharpe_ratio" in robustness
     assert "pbo_style" in robustness
     assert "probability_of_overfitting" in robustness["pbo_style"]
+    assert "white_reality_check" in robustness
+    assert "spa" in robustness
 
     top_report = (run_dir / "top_n_report.txt").read_text()
     assert "Robustness Diagnostics" in top_report
     assert "pbo_probability" in top_report
+    assert "white_reality_check_pvalue" in top_report
+    assert "spa_pvalue" in top_report
+    assert (run_dir / "audit_inputs.json").exists()
+    assert (run_dir / "audit_outputs.json").exists()

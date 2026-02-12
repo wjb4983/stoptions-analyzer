@@ -84,6 +84,7 @@ def build_guardrails(
     *,
     fold_rows: list[dict[str, Any]] | None = None,
     trade_count: int | None = None,
+    robustness: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     badges: list[dict[str, str]] = []
     sharpe = float(metrics.get("sharpe", 0.0)) if "sharpe" in metrics else None
@@ -103,6 +104,16 @@ def build_guardrails(
         unique = len({json.dumps(row.get("selected_params", {}), sort_keys=True) for row in fold_rows})
         if unique > max(3, int(len(fold_rows) * 0.6)):
             badges.append({"label": "Unstable Params", "severity": "medium", "reason": "Many unique selected parameters across folds."})
+
+    if robustness and isinstance(robustness, dict):
+        white = robustness.get("white_reality_check", {})
+        spa = robustness.get("spa", {})
+        white_p = float(white.get("p_value", 1.0)) if isinstance(white, dict) else 1.0
+        spa_p = float(spa.get("p_value", 1.0)) if isinstance(spa, dict) else 1.0
+        if white_p > 0.1:
+            badges.append({"label": "Weak RC", "severity": "medium", "reason": f"White RC p-value {white_p:.3f}."})
+        if spa_p > 0.1:
+            badges.append({"label": "Weak SPA", "severity": "medium", "reason": f"SPA p-value {spa_p:.3f}."})
 
     if not badges:
         badges.append({"label": "Guardrails OK", "severity": "low", "reason": "No obvious stability alerts."})

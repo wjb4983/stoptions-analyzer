@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import itertools
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,7 @@ class WalkForwardResult:
     folds: list[dict[str, Any]]
     aggregate_metrics: dict[str, float]
     stability: dict[str, Any]
+    audit: dict[str, Any] | None = None
 
 
 def build_walk_forward_folds(
@@ -100,6 +102,55 @@ def build_walk_forward_folds(
         folds.append(fold)
         fold_id += 1
         cursor += step
+    return folds
+
+
+def build_cpcv_walk_forward_folds(
+    *,
+    total_bars: int,
+    n_groups: int,
+    n_test_groups: int,
+    purge_window_bars: int = 0,
+    embargo_window_bars: int = 0,
+    label_horizon_bars: int = 1,
+) -> list[WalkForwardFold]:
+    if total_bars <= 0:
+        raise ValueError("total_bars must be positive")
+    if n_groups < 3:
+        raise ValueError("n_groups must be at least 3 for CPCV")
+    if n_test_groups <= 0 or n_test_groups >= n_groups:
+        raise ValueError("n_test_groups must be in [1, n_groups-1]")
+
+    boundaries = np.linspace(0, total_bars, n_groups + 1, dtype=int)
+    folds: list[WalkForwardFold] = []
+    fold_id = 0
+
+    for held_out in itertools.combinations(range(n_groups), n_test_groups):
+        train_groups = [idx for idx in range(n_groups) if idx not in held_out]
+        if not train_groups:
+            continue
+        for test_group in held_out:
+            train_start = int(boundaries[train_groups[0]])
+            train_end = int(boundaries[train_groups[-1] + 1])
+            validation_start = int(boundaries[test_group])
+            validation_end = int(boundaries[test_group + 1])
+            test_start = validation_start
+            test_end = validation_end
+
+            fold = WalkForwardFold(
+                fold_id=fold_id,
+                train_start=train_start,
+                train_end=train_end,
+                validation_start=validation_start,
+                validation_end=validation_end,
+                test_start=test_start,
+                test_end=test_end,
+                purge_window_bars=int(purge_window_bars),
+                embargo_window_bars=int(embargo_window_bars),
+                label_horizon_bars=int(label_horizon_bars),
+            )
+            folds.append(fold)
+            fold_id += 1
     return folds
 
 
@@ -162,6 +213,18 @@ def run_walk_forward_optimization(
                 "train_metrics": dict(train_eval.get("metrics", {})),
                 "validation_metrics": dict(validation_eval.get("metrics", {})),
                 "validation_score": score,
+                "segments": {
+                    "train": {
+                        "start": fold.train_start,
+                        "end": fold.train_end,
+                        "output": dict(train_eval),
+                    },
+                    "validation": {
+                        "start": fold.validation_start,
+                        "end": fold.validation_end,
+                        "output": dict(validation_eval),
+                    },
+                },
             }
             if inner_details:
                 row["inner_diagnostics"] = inner_details
@@ -199,13 +262,19 @@ def run_walk_forward_optimization(
                 "validation_score": best_score,
                 "oos_metrics": dict(oos_eval.get("metrics", {})),
                 "oos_equity": list(oos_eval.get("equity", [])),
+                "oos_output": dict(oos_eval),
                 "diagnostics": diagnostics,
             }
         )
 
     aggregate_metrics = _aggregate_numeric_metrics([row["oos_metrics"] for row in fold_rows])
     stability = _build_stability_summary(selected_keys, fold_rows)
-    return WalkForwardResult(folds=fold_rows, aggregate_metrics=aggregate_metrics, stability=stability)
+    return WalkForwardResult(
+        folds=fold_rows,
+        aggregate_metrics=aggregate_metrics,
+        stability=stability,
+        audit={"n_candidates": len(parameter_candidates), "n_folds": len(folds), "score_metric": score_metric},
+    )
 
 
 def persist_walk_forward_outputs(*, run_dir: Path, result: WalkForwardResult) -> None:
@@ -220,7 +289,9 @@ def persist_walk_forward_outputs(*, run_dir: Path, result: WalkForwardResult) ->
 
         (fold_dir / "selected_params.json").write_text(json.dumps(fold_row["selected_params"], indent=2))
         (fold_dir / "oos_metrics.json").write_text(json.dumps(fold_row["oos_metrics"], indent=2))
+        (fold_dir / "oos_output.json").write_text(json.dumps(fold_row.get("oos_output", {}), indent=2))
         (fold_dir / "diagnostics.json").write_text(json.dumps(fold_row["diagnostics"], indent=2))
+        (fold_dir / "fold_full_record.json").write_text(json.dumps(fold_row, indent=2))
 
         with (fold_dir / "oos_equity.csv").open("w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=["timestamp", "equity"])
@@ -231,6 +302,7 @@ def persist_walk_forward_outputs(*, run_dir: Path, result: WalkForwardResult) ->
     (run_dir / "fold_summary.json").write_text(json.dumps(result.folds, indent=2))
     (run_dir / "aggregate_metrics.json").write_text(json.dumps(result.aggregate_metrics, indent=2))
     (run_dir / "stability.json").write_text(json.dumps(result.stability, indent=2))
+    (run_dir / "audit.json").write_text(json.dumps(result.audit or {}, indent=2))
 
 
 def _aggregate_numeric_metrics(metrics_rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -258,4 +330,30 @@ def _build_stability_summary(selected_keys: list[str], fold_rows: list[dict[str,
         "unique_selected_params": len(selection_counts),
         "validation_score_mean": float(np.mean(validation_scores)) if validation_scores else 0.0,
         "validation_score_std": float(np.std(validation_scores, ddof=0)) if validation_scores else 0.0,
+        "fold_reuse": _build_fold_reuse_diagnostics(fold_rows),
     }
+
+
+def _build_fold_reuse_diagnostics(fold_rows: list[dict[str, Any]]) -> dict[str, float]:
+    usage: dict[str, list[tuple[int, int]]] = {"train": [], "validation": [], "test": []}
+    for row in fold_rows:
+        idx = row.get("indices", {})
+        for name in usage:
+            bounds = idx.get(name)
+            if isinstance(bounds, list) and len(bounds) == 2:
+                usage[name].append((int(bounds[0]), int(bounds[1])))
+
+    diagnostics: dict[str, float] = {}
+    for name, spans in usage.items():
+        if not spans:
+            diagnostics[f"{name}_avg_reuse"] = 0.0
+            diagnostics[f"{name}_max_reuse"] = 0.0
+            continue
+        max_end = max(end for _, end in spans)
+        counts = np.zeros(max_end, dtype=int)
+        for start, end in spans:
+            counts[max(0, start): max(0, end)] += 1
+        used = counts[counts > 0]
+        diagnostics[f"{name}_avg_reuse"] = float(np.mean(used)) if used.size else 0.0
+        diagnostics[f"{name}_max_reuse"] = float(np.max(used)) if used.size else 0.0
+    return diagnostics

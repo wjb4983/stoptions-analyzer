@@ -8,6 +8,7 @@ import pytest
 from src.backtesting import cache_runner
 from src.backtesting.walk_forward import (
     WalkForwardResult,
+    build_cpcv_walk_forward_folds,
     build_walk_forward_folds,
     persist_walk_forward_outputs,
     run_walk_forward_optimization,
@@ -360,3 +361,26 @@ def test_run_walk_forward_backtest_manifest_includes_lineage_parent(monkeypatch,
     run_dir = sorted((tmp_path / "outputs").glob("tsmom_walk_forward_*"))[-1]
     manifest = __import__("json").loads((run_dir / "manifest.json").read_text())
     assert manifest["lineage"]["lineage_parent_manifest"] == "/tmp/ancestor-manifest.json"
+
+
+def test_build_cpcv_walk_forward_folds_generates_combinatorial_partitions() -> None:
+    folds = build_cpcv_walk_forward_folds(total_bars=60, n_groups=6, n_test_groups=2)
+    assert len(folds) == 30
+    assert all(fold.test_start < fold.test_end for fold in folds)
+
+
+def test_walk_forward_stability_includes_fold_reuse() -> None:
+    folds = build_walk_forward_folds(total_bars=30, train_bars=8, validation_bars=4, test_bars=4, step_bars=4)
+
+    def fake_eval(candidate: dict[str, object], start: int, end: int) -> dict[str, object]:
+        return {"metrics": {"sharpe": float(end - start)}, "equity": []}
+
+    result = run_walk_forward_optimization(
+        folds=folds,
+        parameter_candidates=[{"name": "a"}],
+        evaluate_segment=fake_eval,
+    )
+    reuse = result.stability.get("fold_reuse", {})
+    assert "train_avg_reuse" in reuse
+    assert "validation_avg_reuse" in reuse
+    assert "test_avg_reuse" in reuse

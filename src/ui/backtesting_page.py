@@ -1098,7 +1098,9 @@ class BacktestingPage(ttk.Frame):
         fold_rows = self._read_json(run_dir / "fold_summary.json")
         rows = fold_rows if isinstance(fold_rows, list) else None
         trade_count = int(metrics.get("trade_count", 0.0)) if "trade_count" in metrics else None
-        badges = build_guardrails(metrics, fold_rows=rows, trade_count=trade_count)
+        robustness = self._read_json(run_dir / "robustness_report.json")
+        robustness_payload = robustness if isinstance(robustness, dict) else None
+        badges = build_guardrails(metrics, fold_rows=rows, trade_count=trade_count, robustness=robustness_payload)
         palette = {"high": "#d9534f", "medium": "#f0ad4e", "low": "#5cb85c"}
         for badge in badges:
             label = ttk.Label(
