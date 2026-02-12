@@ -71,6 +71,13 @@ from backtesting.optimization import (
 
 LOGGER = logging.getLogger(__name__)
 CANONICAL_METRIC_SCHEMA_VERSION = "1.0"
+PROMOTION_STATES = ("research", "paper", "shadow", "production")
+PROMOTION_REQUIRED_CHECKS: dict[str, list[str]] = {
+    "research": ["dataset_lock"],
+    "paper": ["dataset_lock", "oos_periods", "stability_threshold"],
+    "shadow": ["dataset_lock", "oos_periods", "stability_threshold", "turnover_capacity"],
+    "production": ["dataset_lock", "oos_periods", "stability_threshold", "turnover_capacity", "approval"],
+}
 
 
 def run_backtest_cache(
@@ -204,6 +211,7 @@ def run_time_series_momentum_backtest(
     regime_parameter_map: dict[str, dict[str, object]] | None = None,
     regime_risk_map: dict[str, dict[str, float]] | None = None,
     regime_cost_multipliers: dict[str, float] | None = None,
+    governance_metadata: dict[str, Any] | None = None,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     entry_cfg = parse_entry_signal_config(
@@ -420,6 +428,8 @@ def run_time_series_momentum_backtest(
 
     regime_pnl_attribution = attribute_pnl_by_regime(pnl=pnl, regime_labels=regime_labels)
 
+    governance_payload = _build_governance_metadata(governance_metadata)
+
     parameter_payload = {
         "tickers": list(tickers),
         "lookback_days": lookback_days,
@@ -459,6 +469,7 @@ def run_time_series_momentum_backtest(
         "regime_risk_map": dict(regime_risk_map or {}),
         "regime_cost_multipliers": dict(regime_cost_multipliers or {}),
         "cache_root": str(cache_root),
+        "governance": governance_payload,
     }
 
     fill_rows = list(result.fills)
@@ -485,6 +496,7 @@ def run_time_series_momentum_backtest(
         robustness_report=robustness_report,
         regime_labels=regime_labels,
         regime_pnl_attribution=regime_pnl_attribution,
+        governance=governance_payload,
     )
 
     trade_log_rows = _build_trade_log_rows(
@@ -649,6 +661,7 @@ def run_parameter_sweep(
             "top_n": top_n,
         },
         random_seed=seed,
+        governance=None,
     )
     return (
         f"Sweep complete: {len(ranked_rows)} successful combos, "
@@ -680,6 +693,7 @@ def run_walk_forward_backtest(
     label_horizon_bars: int = 1,
     nested_optimization: bool = False,
     inner_train_fraction: float = 0.7,
+    governance_metadata: dict[str, Any] | None = None,
 ) -> str:
     combos, invalid_rows = generate_sweep_combinations(
         entry_grid=entry_grid,
@@ -688,6 +702,8 @@ def run_walk_forward_backtest(
     )
     if not combos:
         raise ValueError("No valid combinations generated for walk-forward")
+
+    governance_payload = _build_governance_metadata(governance_metadata)
 
     max_lookback = 1
     for combo in combos:
@@ -857,6 +873,83 @@ def run_walk_forward_backtest(
     )
     (run_dir / "report.txt").write_text(report_text)
 
+    computed_checks = _evaluate_governance_gate_checks(
+        metrics={k: float(v) for k, v in wf_result.aggregate_metrics.items()},
+        fold_rows=wf_result.folds,
+        governance=governance_payload,
+    )
+    governance_payload["gate_checks"].update(computed_checks)
+    required_checks = governance_payload.get("promotion_required_checks", [])
+    governance_payload["missing_required_checks"] = [
+        name for name in required_checks if not governance_payload["gate_checks"].get(name, False)
+    ]
+    governance_payload["is_promotion_ready"] = not governance_payload["missing_required_checks"]
+    governance_payload["audit_trail"].append({
+        "timestamp": datetime.now().isoformat(),
+        "event": "gate_checks_evaluated",
+        "gate_checks": dict(governance_payload["gate_checks"]),
+        "missing_required_checks": list(governance_payload["missing_required_checks"]),
+    })
+
+    manifest = {
+        "run_type": "walk_forward",
+        "created_at": datetime.now().isoformat(),
+        "code_version": _resolve_git_commit(),
+        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+        "parameters": {
+            "tickers": list(tickers),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "entry_grid": entry_grid,
+            "exit_grid": exit_grid,
+            "core_grid": core_grid,
+            "score_metric": score_metric,
+            "nested_optimization": nested_optimization,
+        },
+        "data_snapshot_identifiers": _build_sweep_snapshot_identifiers(
+            {
+                "tickers": tickers,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "cache_root": str(cache_root),
+                "core_grid": core_grid,
+            }
+        ),
+        "random_seed": None,
+        "environment": _collect_environment_metadata(),
+        "governance": governance_payload,
+        "reproducibility_fingerprint": _stable_fingerprint(
+            {
+                "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+                "parameters": {
+                    "tickers": list(tickers),
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "score_metric": score_metric,
+                },
+                "governance": governance_payload,
+            }
+        ),
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    _append_experiment_index(
+        {
+            "timestamp": manifest["created_at"],
+            "run_type": "walk_forward",
+            "run_dir": str(run_dir),
+            "code_version": manifest["code_version"],
+            "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+            "random_seed": None,
+            "primary_metric": score_metric,
+            "primary_metric_value": float(wf_result.aggregate_metrics.get(score_metric, 0.0)),
+            "manifest_path": str(run_dir / "manifest.json"),
+            "reproducibility_fingerprint": manifest["reproducibility_fingerprint"],
+            "parameters": manifest["parameters"],
+            "data_snapshot_identifiers": manifest["data_snapshot_identifiers"],
+            "governance": governance_payload,
+        }
+    )
+
     return (
         f"Walk-forward complete: {len(wf_result.folds)} folds, "
         f"{len(combos)} candidates, {len(invalid_rows)} skipped invalid combos. "
@@ -882,6 +975,7 @@ def run_strategy_optimization(
     max_drawdown_floor: float | None = None,
     min_trades: float | None = None,
     partial_period_fractions: list[float] | None = None,
+    governance_metadata: dict[str, Any] | None = None,
 ) -> str:
     combos, invalid_rows = generate_sweep_combinations(
         entry_grid=entry_grid,
@@ -890,6 +984,8 @@ def run_strategy_optimization(
     )
     if not combos:
         raise ValueError("No valid combinations generated for optimization")
+
+    governance_payload = _build_governance_metadata(governance_metadata)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_optimize_{timestamp}"
@@ -940,6 +1036,30 @@ def run_strategy_optimization(
         output_dir=run_dir,
     )
 
+    best_metrics: dict[str, float] = {}
+    pareto_trials = result.get("pareto_trials", [])
+    if isinstance(pareto_trials, list) and pareto_trials:
+        first = pareto_trials[0]
+        if isinstance(first, dict) and isinstance(first.get("metrics"), dict):
+            best_metrics = {k: float(v) for k, v in first.get("metrics", {}).items() if isinstance(v, (int, float))}
+    computed_checks = _evaluate_governance_gate_checks(
+        metrics=best_metrics,
+        fold_rows=None,
+        governance=governance_payload,
+    )
+    governance_payload["gate_checks"].update(computed_checks)
+    required_checks = governance_payload.get("promotion_required_checks", [])
+    governance_payload["missing_required_checks"] = [
+        name for name in required_checks if not governance_payload["gate_checks"].get(name, False)
+    ]
+    governance_payload["is_promotion_ready"] = not governance_payload["missing_required_checks"]
+    governance_payload["audit_trail"].append({
+        "timestamp": datetime.now().isoformat(),
+        "event": "gate_checks_evaluated",
+        "gate_checks": dict(governance_payload["gate_checks"]),
+        "missing_required_checks": list(governance_payload["missing_required_checks"]),
+    })
+
     (run_dir / "invalid_combinations.json").write_text(json.dumps(invalid_rows, indent=2), encoding="utf-8")
     (run_dir / "optimizer_manifest.json").write_text(
         json.dumps(
@@ -956,12 +1076,66 @@ def run_strategy_optimization(
                 "objectives": objective_defs,
                 "constraints": [constraint.__dict__ for constraint in constraints],
                 "partial_period_fractions": partial_period_fractions,
+                "governance": governance_payload,
             },
             indent=2,
             sort_keys=True,
         ),
         encoding="utf-8",
     )
+
+    manifest = {
+        "run_type": "optimization",
+        "created_at": datetime.now().isoformat(),
+        "code_version": _resolve_git_commit(),
+        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+        "parameters": {
+            "tickers": tickers,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "entry_grid": entry_grid,
+            "exit_grid": exit_grid,
+            "core_grid": core_grid,
+            "seed": seed,
+            "n_trials": n_trials,
+            "sampler": sampler_name,
+            "objectives": objective_defs,
+            "constraints": [constraint.__dict__ for constraint in constraints],
+            "partial_period_fractions": partial_period_fractions,
+        },
+        "data_snapshot_identifiers": _build_sweep_snapshot_identifiers({
+            "tickers": tickers,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "cache_root": str(cache_root),
+            "core_grid": core_grid,
+        }),
+        "random_seed": int(seed),
+        "environment": _collect_environment_metadata(),
+        "governance": governance_payload,
+        "reproducibility_fingerprint": _stable_fingerprint({
+            "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+            "seed": int(seed),
+            "governance": governance_payload,
+            "best_trials": result.get("pareto_trials", []),
+        }),
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    _append_experiment_index({
+        "timestamp": manifest["created_at"],
+        "run_type": "optimization",
+        "run_dir": str(run_dir),
+        "code_version": manifest["code_version"],
+        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+        "random_seed": int(seed),
+        "primary_metric": "pareto_count",
+        "primary_metric_value": float(result.get("pareto_count", 0.0)),
+        "manifest_path": str(run_dir / "manifest.json"),
+        "reproducibility_fingerprint": manifest["reproducibility_fingerprint"],
+        "parameters": manifest["parameters"],
+        "data_snapshot_identifiers": manifest["data_snapshot_identifiers"],
+        "governance": governance_payload,
+    })
 
     return (
         f"Optimization complete: {result['trial_count']} trials, {result['feasible_count']} feasible, "
@@ -1119,10 +1293,31 @@ def _persist_sweep_outputs(
     top_n: int,
     parameters: dict[str, Any],
     random_seed: int,
+    governance: dict[str, Any] | None = None,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_sweep_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    governance_payload = _build_governance_metadata(governance)
+    top_metrics = ranked_rows[0] if ranked_rows else {}
+    computed_checks = _evaluate_governance_gate_checks(
+        metrics={k: float(v) for k, v in top_metrics.items() if isinstance(v, (int, float))},
+        fold_rows=None,
+        governance=governance_payload,
+    )
+    governance_payload["gate_checks"].update(computed_checks)
+    required_checks = governance_payload.get("promotion_required_checks", [])
+    governance_payload["missing_required_checks"] = [
+        name for name in required_checks if not governance_payload["gate_checks"].get(name, False)
+    ]
+    governance_payload["is_promotion_ready"] = not governance_payload["missing_required_checks"]
+    governance_payload["audit_trail"].append({
+        "timestamp": datetime.now().isoformat(),
+        "event": "gate_checks_evaluated",
+        "gate_checks": dict(governance_payload["gate_checks"]),
+        "missing_required_checks": list(governance_payload["missing_required_checks"]),
+    })
 
     leaderboard_csv = run_dir / "leaderboard.csv"
     fieldnames = list(ranked_rows[0].keys()) if ranked_rows else []
@@ -1168,6 +1363,7 @@ def _persist_sweep_outputs(
         "data_snapshot_identifiers": _build_sweep_snapshot_identifiers(parameters),
         "random_seed": int(random_seed),
         "environment": _collect_environment_metadata(),
+        "governance": governance_payload,
         "result_summary": {
             "successful_combos": len(ranked_rows),
             "invalid_combos": len(invalid_rows),
@@ -1180,6 +1376,7 @@ def _persist_sweep_outputs(
                 "parameters": parameters,
                 "random_seed": int(random_seed),
                 "top_row": ranked_rows[0] if ranked_rows else {},
+                "governance": governance_payload,
             }
         ),
     }
@@ -1199,6 +1396,7 @@ def _persist_sweep_outputs(
             "reproducibility_fingerprint": manifest["reproducibility_fingerprint"],
             "parameters": parameters,
             "data_snapshot_identifiers": manifest["data_snapshot_identifiers"],
+            "governance": governance_payload,
         }
     )
 
@@ -1252,6 +1450,7 @@ def run_multi_signal_backtest(
     portfolio_min_net_exposure: float = -1.0,
     portfolio_max_net_exposure: float = 1.0,
     portfolio_sector_map: dict[str, str] | None = None,
+    governance_metadata: dict[str, Any] | None = None,
 ) -> str:
     """Run all selected entry/exit combinations with shared core parameters."""
 
@@ -1296,6 +1495,7 @@ def run_multi_signal_backtest(
                 portfolio_min_net_exposure=portfolio_min_net_exposure,
                 portfolio_max_net_exposure=portfolio_max_net_exposure,
                 portfolio_sector_map=portfolio_sector_map,
+                governance_metadata=governance_metadata,
             )
             run_dir = _extract_saved_output_dir(report)
             metrics = _load_metrics_from_run_dir(run_dir)
@@ -1736,10 +1936,30 @@ def _persist_backtest_outputs(
     robustness_report: dict[str, Any] | None = None,
     regime_labels: np.ndarray | None = None,
     regime_pnl_attribution: list[dict[str, float | str | int]] | None = None,
+    governance: dict[str, Any] | None = None,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    governance_payload = _build_governance_metadata(governance)
+    computed_checks = _evaluate_governance_gate_checks(
+        metrics=metrics,
+        fold_rows=None,
+        governance=governance_payload,
+    )
+    governance_payload["gate_checks"].update(computed_checks)
+    required_checks = governance_payload.get("promotion_required_checks", [])
+    governance_payload["missing_required_checks"] = [
+        name for name in required_checks if not governance_payload["gate_checks"].get(name, False)
+    ]
+    governance_payload["is_promotion_ready"] = not governance_payload["missing_required_checks"]
+    governance_payload["audit_trail"].append({
+        "timestamp": datetime.now().isoformat(),
+        "event": "gate_checks_evaluated",
+        "gate_checks": dict(governance_payload["gate_checks"]),
+        "missing_required_checks": list(governance_payload["missing_required_checks"]),
+    })
 
     time_strings = [_timestamp_to_iso8601(ts) for ts in timestamps]
 
@@ -1817,12 +2037,14 @@ def _persist_backtest_outputs(
         "data_snapshot_identifiers": data_snapshot or {},
         "random_seed": random_seed,
         "environment": _collect_environment_metadata(),
+        "governance": governance_payload,
         "reproducibility_fingerprint": _stable_fingerprint(
             {
                 "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
                 "parameters": parameters or {},
                 "random_seed": random_seed,
                 "data_snapshot_identifiers": data_snapshot or {},
+                "governance": governance_payload,
             }
         ),
     }
@@ -1841,6 +2063,7 @@ def _persist_backtest_outputs(
             "reproducibility_fingerprint": manifest["reproducibility_fingerprint"],
             "parameters": parameters or {},
             "data_snapshot_identifiers": data_snapshot or {},
+            "governance": governance_payload,
         }
     )
 
@@ -1922,6 +2145,101 @@ def _build_sweep_snapshot_identifiers(parameters: dict[str, Any]) -> dict[str, A
     return payload
 
 
+
+def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict(raw or {})
+    promotion_state = str(source.get("promotion_state", "research")).strip().lower()
+    if promotion_state not in PROMOTION_STATES:
+        promotion_state = "research"
+
+    required_checks = list(PROMOTION_REQUIRED_CHECKS.get(promotion_state, []))
+    checks = source.get("checks") if isinstance(source.get("checks"), dict) else {}
+
+    def _float(name: str, default: float) -> float:
+        value = source.get(name, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _int(name: str, default: int) -> int:
+        value = source.get(name, default)
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return int(default)
+
+    gate_thresholds = {
+        "min_oos_periods": _int("min_oos_periods", 3),
+        "min_stability_score": _float("min_stability_score", 0.55),
+        "max_turnover_total": _float("max_turnover_total", 4.0),
+        "min_capacity_score": _float("min_capacity_score", 0.5),
+    }
+
+    gate_checks = {
+        "dataset_lock": bool(source.get("dataset_snapshot_lock", "").strip()),
+        "oos_periods": bool(checks.get("oos_periods", False)),
+        "stability_threshold": bool(checks.get("stability_threshold", False)),
+        "turnover_capacity": bool(checks.get("turnover_capacity", False)),
+        "approval": bool(checks.get("approval", False)),
+    }
+
+    missing_required = [name for name in required_checks if not gate_checks.get(name, False)]
+
+    governance = {
+        "hypothesis_id": str(source.get("hypothesis_id", "")).strip(),
+        "owner": str(source.get("owner", "")).strip(),
+        "dataset_snapshot_lock": str(source.get("dataset_snapshot_lock", "")).strip(),
+        "acceptance_criteria": str(source.get("acceptance_criteria", "")).strip(),
+        "approval_status": str(source.get("approval_status", "pending")).strip() or "pending",
+        "promotion_state": promotion_state,
+        "promotion_required_checks": required_checks,
+        "gate_thresholds": gate_thresholds,
+        "gate_checks": gate_checks,
+        "missing_required_checks": missing_required,
+        "is_promotion_ready": not missing_required,
+        "audit_trail": [
+            {
+                "timestamp": datetime.now().isoformat(),
+                "event": "governance_metadata_emitted",
+                "promotion_state": promotion_state,
+                "approval_status": str(source.get("approval_status", "pending")).strip() or "pending",
+                "required_checks": required_checks,
+                "missing_required_checks": missing_required,
+            }
+        ],
+    }
+    return governance
+
+
+def _evaluate_governance_gate_checks(
+    *,
+    metrics: dict[str, float],
+    fold_rows: list[dict[str, Any]] | None,
+    governance: dict[str, Any],
+) -> dict[str, bool]:
+    thresholds = governance.get("gate_thresholds", {}) if isinstance(governance.get("gate_thresholds"), dict) else {}
+    min_oos = int(thresholds.get("min_oos_periods", 3))
+    min_stability = float(thresholds.get("min_stability_score", 0.55))
+    max_turnover = float(thresholds.get("max_turnover_total", 4.0))
+    min_capacity = float(thresholds.get("min_capacity_score", 0.5))
+
+    oos_periods = len(fold_rows) if isinstance(fold_rows, list) else 0
+    sharpe = float(metrics.get("sharpe", 0.0))
+    rolling_sharpe_mean = float(metrics.get("rolling_sharpe_mean", sharpe))
+    stability_score = max(0.0, min(1.0, 0.5 + 0.25 * sharpe + 0.25 * rolling_sharpe_mean))
+    turnover_total = float(metrics.get("turnover_total", 0.0))
+    capacity_score = max(0.0, 1.0 - (turnover_total / max(max_turnover, 1e-9)))
+
+    checks = {
+        "dataset_lock": bool(governance.get("dataset_snapshot_lock")),
+        "oos_periods": oos_periods >= max(1, min_oos),
+        "stability_threshold": stability_score >= min_stability,
+        "turnover_capacity": turnover_total <= max_turnover and capacity_score >= min_capacity,
+        "approval": str(governance.get("approval_status", "pending")).lower() in {"approved", "waived"},
+    }
+    return checks
+
 def _append_experiment_index(entry: dict[str, Any]) -> None:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     jsonl_path = BACKTEST_OUTPUT_DIR / "experiment_index.jsonl"
@@ -1942,6 +2260,7 @@ def _append_experiment_index(entry: dict[str, Any]) -> None:
         "reproducibility_fingerprint": entry.get("reproducibility_fingerprint"),
         "parameters_json": json.dumps(entry.get("parameters", {}), sort_keys=True),
         "data_snapshot_json": json.dumps(entry.get("data_snapshot_identifiers", {}), sort_keys=True),
+        "governance_json": json.dumps(entry.get("governance", {}), sort_keys=True),
     }
     fieldnames = list(row.keys())
     write_header = not csv_path.exists()

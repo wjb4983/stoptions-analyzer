@@ -25,6 +25,8 @@ TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization"]
 
 TIMEFRAME_HISTORY_DAYS = {"1m": 14, "5m": 30, "15m": 60, "30m": 120, "1h": 365, "1d": 3650}
+GOVERNANCE_PROMOTION_STATES = ["research", "paper", "shadow", "production"]
+GOVERNANCE_APPROVAL_STATES = ["pending", "in_review", "approved", "rejected", "waived"]
 
 class BacktestingPage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
@@ -368,14 +370,70 @@ class BacktestingPage(ttk.Frame):
         ttk.Button(template_row, text="Load Template", command=self.load_template).grid(row=0, column=2, padx=(0, 6))
         ttk.Button(template_row, text="Save as Experiment Template", command=self.save_template).grid(row=0, column=3)
 
+        governance_frame = ttk.LabelFrame(run_setup_tab, text="Governance & Promotion")
+        governance_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=(4, 8))
+        governance_frame.columnconfigure(1, weight=1)
+
+        g_row = 0
+        ttk.Label(governance_frame, text="Hypothesis ID").grid(row=g_row, column=0, sticky="w", padx=8, pady=4)
+        self.gov_hypothesis_id_var = tk.StringVar(value="")
+        ttk.Entry(governance_frame, textvariable=self.gov_hypothesis_id_var).grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
+
+        g_row += 1
+        ttk.Label(governance_frame, text="Owner").grid(row=g_row, column=0, sticky="w", padx=8, pady=4)
+        self.gov_owner_var = tk.StringVar(value="")
+        ttk.Entry(governance_frame, textvariable=self.gov_owner_var).grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
+
+        g_row += 1
+        ttk.Label(governance_frame, text="Dataset Snapshot Lock").grid(row=g_row, column=0, sticky="w", padx=8, pady=4)
+        self.gov_dataset_lock_var = tk.StringVar(value="")
+        ttk.Entry(governance_frame, textvariable=self.gov_dataset_lock_var).grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
+
+        g_row += 1
+        ttk.Label(governance_frame, text="Acceptance Criteria").grid(row=g_row, column=0, sticky="nw", padx=8, pady=4)
+        self.gov_acceptance_text = tk.Text(governance_frame, height=3)
+        self.gov_acceptance_text.grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
+
+        g_row += 1
+        ttk.Label(governance_frame, text="Promotion State").grid(row=g_row, column=0, sticky="w", padx=8, pady=4)
+        self.gov_promotion_state_var = tk.StringVar(value="research")
+        ttk.Combobox(governance_frame, textvariable=self.gov_promotion_state_var, state="readonly", values=GOVERNANCE_PROMOTION_STATES).grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
+
+        g_row += 1
+        ttk.Label(governance_frame, text="Approval Status").grid(row=g_row, column=0, sticky="w", padx=8, pady=4)
+        self.gov_approval_status_var = tk.StringVar(value="pending")
+        ttk.Combobox(governance_frame, textvariable=self.gov_approval_status_var, state="readonly", values=GOVERNANCE_APPROVAL_STATES).grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
+
+        g_row += 1
+        gate_row = ttk.Frame(governance_frame)
+        gate_row.grid(row=g_row, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
+        for idx, (label, default) in enumerate([
+            ("Min OOS Periods", "3"),
+            ("Min Stability", "0.55"),
+            ("Max Turnover", "4.0"),
+            ("Min Capacity", "0.5"),
+        ]):
+            ttk.Label(gate_row, text=label).grid(row=0, column=idx * 2, sticky="w", padx=(0, 4))
+            var = tk.StringVar(value=default)
+            entry = ttk.Entry(gate_row, textvariable=var, width=8)
+            entry.grid(row=0, column=idx * 2 + 1, sticky="w", padx=(0, 10))
+            if label == "Min OOS Periods":
+                self.gov_min_oos_periods_var = var
+            elif label == "Min Stability":
+                self.gov_min_stability_var = var
+            elif label == "Max Turnover":
+                self.gov_max_turnover_var = var
+            else:
+                self.gov_min_capacity_var = var
+
         notes_frame = ttk.LabelFrame(run_setup_tab, text="Run Notes")
-        notes_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=10)
+        notes_frame.grid(row=5, column=0, sticky="nsew", padx=10, pady=10)
         notes_frame.columnconfigure(0, weight=1)
         self.notes_text = tk.Text(notes_frame, height=14)
         self.notes_text.grid(row=0, column=0, sticky="nsew", padx=8, pady=6)
 
         button_row = ttk.Frame(run_setup_tab)
-        button_row.grid(row=5, column=0, sticky="ew", padx=10, pady=(4, 10))
+        button_row.grid(row=6, column=0, sticky="ew", padx=10, pady=(4, 10))
         button_row.columnconfigure(0, weight=1)
         button_row.columnconfigure(1, weight=1)
         button_row.columnconfigure(2, weight=1)
@@ -471,6 +529,7 @@ class BacktestingPage(ttk.Frame):
         browser_tab.rowconfigure(1, weight=1)
         self.section_notebook.add(browser_tab, text="Experiment Browser")
         ttk.Button(browser_tab, text="Refresh Browser", command=self._refresh_experiment_browser).grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
+        ttk.Button(browser_tab, text="Export Review Packet", command=self._export_selected_review_packet).grid(row=0, column=0, sticky="e", padx=10, pady=(8, 4))
         self.experiment_tree = ttk.Treeview(browser_tab, show="headings", height=10)
         self.experiment_tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 4))
         self.experiment_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_experiment_tree_selected())
@@ -932,6 +991,7 @@ class BacktestingPage(ttk.Frame):
                     "run": run_dir.name,
                     "tags": ", ".join(tags[:4]),
                     "best_sharpe": metrics.get("sharpe", row.get("primary_metric_value", "")),
+                    "approval": str((row.get("governance") or {}).get("approval_status", "")),
                     "fingerprint": str(row.get("reproducibility_fingerprint", ""))[:12],
                 }
             )
@@ -963,6 +1023,31 @@ class BacktestingPage(ttk.Frame):
             f"Fingerprint: {fp[:24] if fp else 'n/a'}",
         ]
         self.experiment_detail_var.set("\n".join(msg))
+
+    def _export_selected_review_packet(self) -> None:
+        selected = self.experiment_tree.selection()
+        if not selected:
+            messagebox.showinfo("Review packet", "Select an experiment run first.")
+            return
+        values = self.experiment_tree.item(selected[0], "values")
+        if len(values) < 3:
+            return
+        run_name = str(values[2])
+        run_dir = next((d for d in self.current_run_dirs if d.name == run_name), None)
+        if run_dir is None:
+            messagebox.showinfo("Review packet", f"Run {run_name} not found on disk.")
+            return
+        manifest = self._read_json(run_dir / "manifest.json")
+        metrics = self._load_metric_map(run_dir)
+        packet = {
+            "run": run_dir.name,
+            "manifest": manifest if isinstance(manifest, dict) else {},
+            "metrics": metrics,
+            "generated_at": date.today().isoformat(),
+        }
+        packet_path = run_dir / "review_packet.json"
+        packet_path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
+        messagebox.showinfo("Review packet", f"Saved review packet to {packet_path}")
 
     def _populate_run_compare_combos(self, selected: list[Path] | None = None) -> None:
         runs = selected or self.current_run_dirs
@@ -1443,6 +1528,17 @@ class BacktestingPage(ttk.Frame):
 
         self.notes_text.delete("1.0", tk.END)
         self.notes_text.insert("1.0", str(settings.get("notes", "")))
+        self.gov_hypothesis_id_var.set(str(settings.get("governance_hypothesis_id", "")))
+        self.gov_owner_var.set(str(settings.get("governance_owner", "")))
+        self.gov_dataset_lock_var.set(str(settings.get("governance_dataset_snapshot_lock", "")))
+        self.gov_acceptance_text.delete("1.0", tk.END)
+        self.gov_acceptance_text.insert("1.0", str(settings.get("governance_acceptance_criteria", "")))
+        self.gov_promotion_state_var.set(str(settings.get("governance_promotion_state", "research")))
+        self.gov_approval_status_var.set(str(settings.get("governance_approval_status", "pending")))
+        self.gov_min_oos_periods_var.set(str(settings.get("governance_min_oos_periods", "3")))
+        self.gov_min_stability_var.set(str(settings.get("governance_min_stability_score", "0.55")))
+        self.gov_max_turnover_var.set(str(settings.get("governance_max_turnover_total", "4.0")))
+        self.gov_min_capacity_var.set(str(settings.get("governance_min_capacity_score", "0.5")))
         self.logs_text.delete("1.0", tk.END)
         self.logs_text.insert("1.0", str(settings.get("notes", "")))
         self._refresh_template_choices()
@@ -1517,6 +1613,16 @@ class BacktestingPage(ttk.Frame):
             "end_date": self.end_date_var.get().strip(),
             "backtest_data_root": self.backtest_root_var.get().strip(),
             "notes": self.notes_text.get("1.0", tk.END).strip(),
+            "governance_hypothesis_id": self.gov_hypothesis_id_var.get().strip(),
+            "governance_owner": self.gov_owner_var.get().strip(),
+            "governance_dataset_snapshot_lock": self.gov_dataset_lock_var.get().strip(),
+            "governance_acceptance_criteria": self.gov_acceptance_text.get("1.0", tk.END).strip(),
+            "governance_promotion_state": self.gov_promotion_state_var.get().strip() or "research",
+            "governance_approval_status": self.gov_approval_status_var.get().strip() or "pending",
+            "governance_min_oos_periods": self.gov_min_oos_periods_var.get().strip() or "3",
+            "governance_min_stability_score": self.gov_min_stability_var.get().strip() or "0.55",
+            "governance_max_turnover_total": self.gov_max_turnover_var.get().strip() or "4.0",
+            "governance_min_capacity_score": self.gov_min_capacity_var.get().strip() or "0.5",
             "ui_mode": self.ui_mode_var.get().strip() or "basic",
             "selected_preset": self._preset_display_to_key.get(self.preset_var.get().strip(), "custom"),
             "selected_template": self.template_var.get().strip(),
@@ -1581,6 +1687,19 @@ class BacktestingPage(ttk.Frame):
             messagebox.showinfo("Invalid input", "Please select a valid portfolio method.")
             return
 
+        governance_payload = {
+            "hypothesis_id": self.gov_hypothesis_id_var.get().strip(),
+            "owner": self.gov_owner_var.get().strip(),
+            "dataset_snapshot_lock": self.gov_dataset_lock_var.get().strip(),
+            "acceptance_criteria": self.gov_acceptance_text.get("1.0", tk.END).strip(),
+            "approval_status": self.gov_approval_status_var.get().strip() or "pending",
+            "promotion_state": self.gov_promotion_state_var.get().strip() or "research",
+            "min_oos_periods": int(parse_float(self.gov_min_oos_periods_var.get()) or 3),
+            "min_stability_score": float(parse_float(self.gov_min_stability_var.get()) or 0.55),
+            "max_turnover_total": float(parse_float(self.gov_max_turnover_var.get()) or 4.0),
+            "min_capacity_score": float(parse_float(self.gov_min_capacity_var.get()) or 0.5),
+        }
+
         worker_args: tuple[object, ...]
         status_line: str
 
@@ -1606,6 +1725,7 @@ class BacktestingPage(ttk.Frame):
                     costs_bps,
                     selected_entries,
                     selected_exits,
+                    governance_payload,
                 )
                 status_line = f"Running optimizer across {len(selected_entries) * len(selected_exits)} candidates...\n"
             elif bool(self.use_walk_forward_var.get()):
@@ -1628,6 +1748,7 @@ class BacktestingPage(ttk.Frame):
                     validation_fraction,
                     test_fraction,
                     step_fraction,
+                    governance_payload,
                 )
                 status_line = f"Running walk-forward with {len(selected_entries) * len(selected_exits)} candidates...\n"
             else:
@@ -1647,6 +1768,7 @@ class BacktestingPage(ttk.Frame):
                     selected_entries,
                     selected_exits,
                     portfolio_cfg,
+                    governance_payload,
                 )
                 status_line = f"Running {len(selected_entries) * len(selected_exits)} momentum entry/exit combinations...\n"
         else:
@@ -1673,6 +1795,7 @@ class BacktestingPage(ttk.Frame):
                 xsmom_long_only,
                 xsmom_vol_lookback_days,
                 portfolio_cfg,
+                governance_payload,
             )
             status_line = "Running cross-sectional momentum backtest...\n"
 
@@ -1772,6 +1895,7 @@ class BacktestingPage(ttk.Frame):
         costs_bps: float,
         entry_signals: list[str],
         exit_signals: list[str],
+        governance_payload: dict[str, object],
     ) -> None:
         try:
             entry_grid = {signal: [{}] for signal in entry_signals}
@@ -1793,6 +1917,7 @@ class BacktestingPage(ttk.Frame):
                 n_trials=max(10, len(entry_signals) * len(exit_signals) * 4),
                 sampler_name="tpe",
                 partial_period_fractions=[0.33, 0.66, 1.0],
+                governance_metadata=dict(governance_payload),
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
@@ -1813,6 +1938,7 @@ class BacktestingPage(ttk.Frame):
         validation_fraction: float,
         test_fraction: float,
         step_fraction: float,
+        governance_payload: dict[str, object],
     ) -> None:
         try:
             entry_grid = {signal: [{}] for signal in entry_signals}
@@ -1834,6 +1960,7 @@ class BacktestingPage(ttk.Frame):
                 validation_fraction=validation_fraction,
                 test_fraction=test_fraction,
                 step_fraction=step_fraction,
+                governance_metadata=dict(governance_payload),
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
@@ -1855,6 +1982,7 @@ class BacktestingPage(ttk.Frame):
         entry_signals: list[str],
         exit_signals: list[str],
         portfolio_cfg: dict[str, object],
+        governance_payload: dict[str, object],
     ) -> None:
         try:
             output_text = run_multi_signal_backtest(
@@ -1872,6 +2000,7 @@ class BacktestingPage(ttk.Frame):
                 entry_signals=entry_signals,
                 exit_signals=exit_signals,
                 **portfolio_cfg,
+                governance_metadata=dict(governance_payload),
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
@@ -1895,6 +2024,7 @@ class BacktestingPage(ttk.Frame):
         long_only: bool,
         vol_lookback_days: int,
         portfolio_cfg: dict[str, object],
+        governance_payload: dict[str, object],
     ) -> None:
         try:
             output_text = run_time_series_momentum_backtest(
@@ -1915,6 +2045,7 @@ class BacktestingPage(ttk.Frame):
                 xsmom_vol_lookback_days=vol_lookback_days,
                 timeframe=timeframe,
                 **portfolio_cfg,
+                governance_metadata=dict(governance_payload),
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
