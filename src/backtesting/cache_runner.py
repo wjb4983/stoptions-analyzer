@@ -47,6 +47,13 @@ from data_access.engine_loader import (
 from utils.parsing import build_npz_payload, chunk_results_by_year
 from backtesting.signals import build_targets, parse_entry_signal_config, parse_exit_signal_config, required_lookback_window
 from backtesting.portfolio import PortfolioConstructionConfig, construct_target_weights
+from backtesting.regimes import (
+    RegimeScaledSlippageModel,
+    apply_regime_risk_overlays,
+    attribute_pnl_by_regime,
+    compute_regime_labels,
+    resolve_regime_parameters,
+)
 from backtesting.strategies import CrossSectionalMomentumConfig, build_cross_sectional_momentum_targets
 from backtesting.walk_forward import (
     build_walk_forward_folds,
@@ -194,6 +201,9 @@ def run_time_series_momentum_backtest(
     portfolio_min_net_exposure: float = -1.0,
     portfolio_max_net_exposure: float = 1.0,
     portfolio_sector_map: dict[str, str] | None = None,
+    regime_parameter_map: dict[str, dict[str, object]] | None = None,
+    regime_risk_map: dict[str, dict[str, float]] | None = None,
+    regime_cost_multipliers: dict[str, float] | None = None,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     entry_cfg = parse_entry_signal_config(
@@ -231,29 +241,78 @@ def run_time_series_momentum_backtest(
         custom_bet_pct=custom_bet_pct,
     )
 
+    regime_state = compute_regime_labels(prices)
+    regime_labels = np.asarray(regime_state["labels"], dtype=object)
+
     if strategy == "xsmom":
-        xs_cfg = CrossSectionalMomentumConfig(
-            lookback_days=lookback_days,
-            skip_days=skip_days,
-            top_quantile=float(xsmom_top_quantile),
-            bottom_quantile=float(xsmom_bottom_quantile),
-            long_only=bool(xsmom_long_only),
-            vol_lookback_days=int(xsmom_vol_lookback_days),
-            rebalance_interval=max(1, int(signal_rebalance_interval)),
-        )
-        signals = build_cross_sectional_momentum_targets(
-            close_prices=prices,
-            missing_mask=arrays.missing_mask,
-            config=xs_cfg,
-        )
+        base_params = {
+            "lookback_days": lookback_days,
+            "skip_days": skip_days,
+            "top_quantile": float(xsmom_top_quantile),
+            "bottom_quantile": float(xsmom_bottom_quantile),
+            "long_only": bool(xsmom_long_only),
+            "vol_lookback_days": int(xsmom_vol_lookback_days),
+            "rebalance_interval": max(1, int(signal_rebalance_interval)),
+        }
+        signals = np.zeros_like(prices, dtype=float)
+        unique_regimes = sorted(set(str(item) for item in regime_labels.tolist()))
+        for regime in unique_regimes:
+            params = resolve_regime_parameters(
+                base_params=base_params,
+                regime_label=regime,
+                parameter_map=regime_parameter_map,
+            )
+            xs_cfg = CrossSectionalMomentumConfig(
+                lookback_days=int(params["lookback_days"]),
+                skip_days=int(params["skip_days"]),
+                top_quantile=float(params["top_quantile"]),
+                bottom_quantile=float(params["bottom_quantile"]),
+                long_only=bool(params["long_only"]),
+                vol_lookback_days=int(params["vol_lookback_days"]),
+                rebalance_interval=int(params["rebalance_interval"]),
+            )
+            candidate = build_cross_sectional_momentum_targets(
+                close_prices=prices,
+                missing_mask=arrays.missing_mask,
+                config=xs_cfg,
+            )
+            mask = regime_labels == regime
+            signals[mask] = candidate[mask]
         sized_signals = signals * float(bet_fraction)
     else:
-        signals = build_targets(
-            close_prices=prices,
-            missing_mask=arrays.missing_mask,
-            entry_config=entry_cfg,
-            exit_config=exit_cfg,
-        )
+        base_entry = dict(entry_signal_params or {})
+        base_exit = dict(exit_signal_params or {})
+        signals = np.zeros_like(prices, dtype=float)
+        unique_regimes = sorted(set(str(item) for item in regime_labels.tolist()))
+        for regime in unique_regimes:
+            resolved = resolve_regime_parameters(
+                base_params={**base_entry, **base_exit},
+                regime_label=regime,
+                parameter_map=regime_parameter_map,
+            )
+            entry_params = {**base_entry, **{k: v for k, v in resolved.items() if k in {"lookback_days", "skip_days", "threshold", "window", "fast_days", "slow_days", "zscore_threshold", "atr_mult"}}}
+            exit_params = {**base_exit, **{k: v for k, v in resolved.items() if k in {"lookback_days", "skip_days", "threshold", "window", "fast_days", "slow_days", "zscore_threshold", "atr_mult", "max_hold_days"}}}
+            regime_entry_cfg = parse_entry_signal_config(
+                entry_signal,
+                entry_params,
+                default_lookback_days=lookback_days,
+                default_skip_days=skip_days,
+            )
+            regime_exit_cfg = parse_exit_signal_config(
+                exit_signal,
+                exit_params,
+                default_lookback_days=lookback_days,
+                default_skip_days=skip_days,
+            )
+            candidate = build_targets(
+                close_prices=prices,
+                missing_mask=arrays.missing_mask,
+                entry_config=regime_entry_cfg,
+                exit_config=regime_exit_cfg,
+            )
+            mask = regime_labels == regime
+            signals[mask] = candidate[mask]
+
         signals = _throttle_signal_changes(signals, interval=max(1, int(signal_rebalance_interval)))
         sized_signals = _apply_discrete_bet_sizing(
             signals=signals,
@@ -267,6 +326,7 @@ def run_time_series_momentum_backtest(
         costs_bps=costs_bps,
         params=execution_model_params,
     )
+    slippage = RegimeScaledSlippageModel(slippage, regime_labels, regime_cost_multipliers)
     borrow = _build_carry_model(
         model_name=carry_model,
         params=carry_model_params,
@@ -308,9 +368,16 @@ def run_time_series_momentum_backtest(
         if "borrow_available_flags" in carry_model_params:
             borrow_available_flags = np.asarray(carry_model_params.get("borrow_available_flags"), dtype=bool)
 
+    adjusted_weights, regime_diag = apply_regime_risk_overlays(
+        weights=portfolio_result.target_weights,
+        regime_labels=regime_labels,
+        risk_map=regime_risk_map,
+    )
+    portfolio_result.diagnostics.update(regime_diag)
+
     result = backtest_vectorized(
         prices=prices,
-        signals=portfolio_result.target_weights,
+        signals=adjusted_weights,
         slippage_model=slippage,
         borrow_cost_model=borrow,
         initial_equity=float(starting_capital),
@@ -332,6 +399,7 @@ def run_time_series_momentum_backtest(
 
     equity = _to_numpy_1d(result.equity_curve)
     returns = _to_numpy_1d(result.returns)
+    pnl = _to_numpy_1d(result.pnl)
     turnover = _to_numpy_1d(result.turnover)
     trades = _to_numpy_2d(result.trades)
 
@@ -349,6 +417,8 @@ def run_time_series_momentum_backtest(
     metrics = dict(result.metrics)
     metrics["turnover_total"] = turnover_stats["total"]
     metrics["cost_total"] = cost_totals.get("total", 0.0)
+
+    regime_pnl_attribution = attribute_pnl_by_regime(pnl=pnl, regime_labels=regime_labels)
 
     parameter_payload = {
         "tickers": list(tickers),
@@ -385,6 +455,9 @@ def run_time_series_momentum_backtest(
         "portfolio_min_net_exposure": portfolio_min_net_exposure,
         "portfolio_max_net_exposure": portfolio_max_net_exposure,
         "portfolio_sector_map": dict(portfolio_sector_map or {}),
+        "regime_parameter_map": dict(regime_parameter_map or {}),
+        "regime_risk_map": dict(regime_risk_map or {}),
+        "regime_cost_multipliers": dict(regime_cost_multipliers or {}),
         "cache_root": str(cache_root),
     }
 
@@ -410,6 +483,8 @@ def run_time_series_momentum_backtest(
         data_snapshot=_build_data_snapshot_identifiers(arrays=arrays, cache_root=cache_root, timeframe=timeframe),
         random_seed=None,
         robustness_report=robustness_report,
+        regime_labels=regime_labels,
+        regime_pnl_attribution=regime_pnl_attribution,
     )
 
     trade_log_rows = _build_trade_log_rows(
@@ -1659,6 +1734,8 @@ def _persist_backtest_outputs(
     data_snapshot: dict[str, Any] | None = None,
     random_seed: int | None = None,
     robustness_report: dict[str, Any] | None = None,
+    regime_labels: np.ndarray | None = None,
+    regime_pnl_attribution: list[dict[str, float | str | int]] | None = None,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
@@ -1695,6 +1772,17 @@ def _persist_backtest_outputs(
         symbol_order=symbol_order,
         diagnostics=risk_diagnostics,
     )
+    if regime_labels is not None:
+        _write_regime_labels_csv_json(
+            run_dir=run_dir,
+            timestamps=time_strings,
+            regime_labels=np.asarray(regime_labels, dtype=object),
+        )
+    if regime_pnl_attribution is not None:
+        _write_regime_pnl_attribution(
+            run_dir=run_dir,
+            rows=regime_pnl_attribution,
+        )
 
     metrics_rows = [{"metric": key, "value": float(value)} for key, value in metrics.items()]
     metrics_csv = run_dir / "metrics.csv"
@@ -2000,6 +2088,36 @@ def _write_risk_diagnostics_csv_json(
         writer.writeheader()
         writer.writerows(symbol_rows)
     (run_dir / "turnover_by_symbol.json").write_text(json.dumps(symbol_rows, indent=2))
+
+
+def _write_regime_labels_csv_json(
+    *,
+    run_dir: Path,
+    timestamps: list[str],
+    regime_labels: np.ndarray,
+) -> None:
+    rows = []
+    for idx, ts in enumerate(timestamps):
+        label = ""
+        if idx < regime_labels.size:
+            label = str(regime_labels[idx])
+        rows.append({"timestamp": ts, "regime": label})
+
+    csv_path = run_dir / "regimes.csv"
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["timestamp", "regime"])
+        writer.writeheader()
+        writer.writerows(rows)
+    (run_dir / "regimes.json").write_text(json.dumps(rows, indent=2))
+
+
+def _write_regime_pnl_attribution(*, run_dir: Path, rows: list[dict[str, float | str | int]]) -> None:
+    csv_path = run_dir / "regime_pnl_attribution.csv"
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["regime", "bars", "pnl_total", "pnl_mean"])
+        writer.writeheader()
+        writer.writerows(rows)
+    (run_dir / "regime_pnl_attribution.json").write_text(json.dumps(rows, indent=2))
 
 
 def _build_slippage_model(*, model_name: str, costs_bps: float, params: dict[str, object] | None) -> object:
