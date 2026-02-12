@@ -583,6 +583,11 @@ def run_walk_forward_backtest(
     test_fraction: float | None = None,
     step_fraction: float | None = None,
     score_metric: str = "sharpe",
+    purge_window_bars: int = 0,
+    embargo_window_bars: int = 0,
+    label_horizon_bars: int = 1,
+    nested_optimization: bool = False,
+    inner_train_fraction: float = 0.7,
 ) -> str:
     combos, invalid_rows = generate_sweep_combinations(
         entry_grid=entry_grid,
@@ -625,10 +630,31 @@ def run_walk_forward_backtest(
         frac_sum = float(train_fraction) + float(validation_fraction) + float(test_fraction)
         if frac_sum <= 0:
             raise ValueError("walk-forward fractions must sum to a positive value")
-        train_bars = max(1, int(round(total_bars * float(train_fraction) / frac_sum)))
-        validation_bars = max(1, int(round(total_bars * float(validation_fraction) / frac_sum)))
-        test_bars = max(1, int(round(total_bars * float(test_fraction) / frac_sum)))
-        step_bars = max(1, int(round(total_bars * float(step_fraction if step_fraction is not None else test_fraction))))
+        required_gap_bars = max(int(purge_window_bars), int(label_horizon_bars)) + max(
+            int(embargo_window_bars),
+            int(label_horizon_bars),
+        )
+        effective_total_bars = max(1, total_bars - required_gap_bars)
+        train_bars = max(1, int(round(effective_total_bars * float(train_fraction) / frac_sum)))
+        validation_bars = max(1, int(round(effective_total_bars * float(validation_fraction) / frac_sum)))
+        remaining_for_test = effective_total_bars - train_bars - validation_bars
+        if remaining_for_test < 1:
+            overflow = 1 - remaining_for_test
+            reducible_train = max(0, train_bars - 1)
+            reduce_train = min(reducible_train, overflow)
+            train_bars -= reduce_train
+            overflow -= reduce_train
+            if overflow > 0:
+                reducible_validation = max(0, validation_bars - 1)
+                reduce_validation = min(reducible_validation, overflow)
+                validation_bars -= reduce_validation
+                overflow -= reduce_validation
+            remaining_for_test = effective_total_bars - train_bars - validation_bars
+        test_bars = max(1, remaining_for_test)
+        step_bars = max(
+            1,
+            int(round(effective_total_bars * float(step_fraction if step_fraction is not None else test_fraction))),
+        )
     elif train_bars is None or validation_bars is None or test_bars is None:
         raise ValueError("Either explicit bar windows or train/validation/test fractions are required")
 
@@ -638,6 +664,9 @@ def run_walk_forward_backtest(
         validation_bars=int(validation_bars),
         test_bars=int(test_bars),
         step_bars=None if step_bars is None else int(step_bars),
+        purge_window_bars=int(purge_window_bars),
+        embargo_window_bars=int(embargo_window_bars),
+        label_horizon_bars=int(label_horizon_bars),
     )
     if not folds:
         raise ValueError("No folds generated; increase date range or reduce window sizes")
@@ -682,11 +711,44 @@ def run_walk_forward_backtest(
         ]
         return {"metrics": metrics, "equity": equity_rows}
 
+    nested_inner_folds: dict[int, list[Any]] | None = None
+    if nested_optimization:
+        nested_inner_folds = {}
+        for outer_fold in folds:
+            outer_train_total = max(0, outer_fold.validation_end - outer_fold.train_start)
+            if outer_train_total < 3:
+                continue
+            inner_train_bars = max(1, int(round(outer_train_total * float(inner_train_fraction))))
+            inner_validation_bars = max(1, outer_train_total - inner_train_bars)
+            if inner_train_bars + inner_validation_bars > outer_train_total:
+                inner_validation_bars = max(1, outer_train_total - inner_train_bars)
+            if inner_train_bars <= 0 or inner_validation_bars <= 0:
+                continue
+            inner_total = outer_fold.validation_end
+            inner_folds = build_walk_forward_folds(
+                total_bars=inner_total,
+                train_bars=inner_train_bars,
+                validation_bars=inner_validation_bars,
+                test_bars=1,
+                step_bars=max(1, inner_validation_bars),
+                purge_window_bars=int(purge_window_bars),
+                embargo_window_bars=0,
+                label_horizon_bars=int(label_horizon_bars),
+            )
+            filtered_inner_folds = [
+                fold
+                for fold in inner_folds
+                if fold.train_start >= outer_fold.train_start and fold.validation_end <= outer_fold.validation_end
+            ]
+            if filtered_inner_folds:
+                nested_inner_folds[outer_fold.fold_id] = filtered_inner_folds
+
     wf_result = run_walk_forward_optimization(
         folds=folds,
         parameter_candidates=combos,
         evaluate_segment=evaluate_segment,
         score_metric=score_metric,
+        nested_inner_folds=nested_inner_folds,
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -1894,6 +1956,11 @@ def _build_parser() -> argparse.ArgumentParser:
     wf_parser.add_argument("--test-fraction", type=float, default=None)
     wf_parser.add_argument("--step-fraction", type=float, default=None)
     wf_parser.add_argument("--score-metric", default="sharpe")
+    wf_parser.add_argument("--purge-window-bars", type=int, default=0)
+    wf_parser.add_argument("--embargo-window-bars", type=int, default=0)
+    wf_parser.add_argument("--label-horizon-bars", type=int, default=1)
+    wf_parser.add_argument("--nested-optimization", action="store_true")
+    wf_parser.add_argument("--inner-train-fraction", type=float, default=0.7)
 
     parser.set_defaults(command="run")
     return parser
@@ -1942,6 +2009,11 @@ def main() -> None:
             test_fraction=args.test_fraction,
             step_fraction=args.step_fraction,
             score_metric=str(args.score_metric),
+            purge_window_bars=int(args.purge_window_bars),
+            embargo_window_bars=int(args.embargo_window_bars),
+            label_horizon_bars=int(args.label_horizon_bars),
+            nested_optimization=bool(args.nested_optimization),
+            inner_train_fraction=float(args.inner_train_fraction),
         )
     else:
         output = run_time_series_momentum_backtest(

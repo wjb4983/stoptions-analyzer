@@ -18,6 +18,27 @@ class WalkForwardFold:
     validation_end: int
     test_start: int
     test_end: int
+    purge_window_bars: int = 0
+    embargo_window_bars: int = 0
+    label_horizon_bars: int = 1
+
+    @property
+    def excluded_ranges(self) -> dict[str, list[int]]:
+        return {
+            "train_validation": [self.train_end, self.validation_start],
+            "validation_test": [self.validation_end, self.test_start],
+        }
+
+    @property
+    def leakage_checks(self) -> dict[str, bool]:
+        label_gap = max(1, int(self.label_horizon_bars))
+        train_label_end = self.train_end + label_gap
+        validation_label_end = self.validation_end + label_gap
+        return {
+            "train_validation_non_overlap": train_label_end <= self.validation_start,
+            "validation_test_non_overlap": validation_label_end <= self.test_start,
+            "train_test_non_overlap": train_label_end <= self.test_start,
+        }
 
 
 @dataclass
@@ -34,35 +55,49 @@ def build_walk_forward_folds(
     validation_bars: int,
     test_bars: int,
     step_bars: int | None = None,
+    purge_window_bars: int = 0,
+    embargo_window_bars: int = 0,
+    label_horizon_bars: int = 1,
 ) -> list[WalkForwardFold]:
     if min(total_bars, train_bars, validation_bars, test_bars) <= 0:
         raise ValueError("window sizes and total_bars must be positive")
+    if purge_window_bars < 0 or embargo_window_bars < 0:
+        raise ValueError("purge_window_bars and embargo_window_bars must be non-negative")
+    if label_horizon_bars <= 0:
+        raise ValueError("label_horizon_bars must be positive")
 
     step = step_bars if step_bars is not None else test_bars
     if step <= 0:
         raise ValueError("step_bars must be positive")
 
+    effective_purge = max(int(purge_window_bars), int(label_horizon_bars))
+    effective_embargo = max(int(embargo_window_bars), int(label_horizon_bars))
+
     folds: list[WalkForwardFold] = []
     cursor = 0
     fold_id = 0
-    while cursor + train_bars + validation_bars + test_bars <= total_bars:
+    while cursor + train_bars + effective_purge + validation_bars + effective_embargo + test_bars <= total_bars:
         train_start = cursor
         train_end = train_start + train_bars
-        validation_start = train_end
+        validation_start = train_end + effective_purge
         validation_end = validation_start + validation_bars
-        test_start = validation_end
+        test_start = validation_end + effective_embargo
         test_end = test_start + test_bars
-        folds.append(
-            WalkForwardFold(
-                fold_id=fold_id,
-                train_start=train_start,
-                train_end=train_end,
-                validation_start=validation_start,
-                validation_end=validation_end,
-                test_start=test_start,
-                test_end=test_end,
-            )
+        fold = WalkForwardFold(
+            fold_id=fold_id,
+            train_start=train_start,
+            train_end=train_end,
+            validation_start=validation_start,
+            validation_end=validation_end,
+            test_start=test_start,
+            test_end=test_end,
+            purge_window_bars=int(purge_window_bars),
+            embargo_window_bars=int(embargo_window_bars),
+            label_horizon_bars=int(label_horizon_bars),
         )
+        if not all(fold.leakage_checks.values()):
+            raise ValueError(f"Fold {fold_id} violates leakage constraints: {fold.leakage_checks}")
+        folds.append(fold)
         fold_id += 1
         cursor += step
     return folds
@@ -74,6 +109,7 @@ def run_walk_forward_optimization(
     parameter_candidates: list[dict[str, Any]],
     evaluate_segment: Callable[[dict[str, Any], int, int], dict[str, Any]],
     score_metric: str = "sharpe",
+    nested_inner_folds: dict[int, list[WalkForwardFold]] | None = None,
 ) -> WalkForwardResult:
     if not folds:
         raise ValueError("At least one fold is required")
@@ -91,13 +127,44 @@ def run_walk_forward_optimization(
         for candidate in parameter_candidates:
             train_eval = evaluate_segment(candidate, fold.train_start, fold.train_end)
             validation_eval = evaluate_segment(candidate, fold.validation_start, fold.validation_end)
-            score = float(validation_eval.get("metrics", {}).get(score_metric, float("-inf")))
+
+            inner_scores: list[float] = []
+            inner_details: list[dict[str, Any]] = []
+            if nested_inner_folds and fold.fold_id in nested_inner_folds:
+                for inner_fold in nested_inner_folds[fold.fold_id]:
+                    evaluate_segment(candidate, inner_fold.train_start, inner_fold.train_end)
+                    inner_validation_eval = evaluate_segment(
+                        candidate,
+                        inner_fold.validation_start,
+                        inner_fold.validation_end,
+                    )
+                    inner_score = float(
+                        inner_validation_eval.get("metrics", {}).get(score_metric, float("-inf"))
+                    )
+                    inner_scores.append(inner_score)
+                    inner_details.append(
+                        {
+                            "indices": {
+                                "train": [inner_fold.train_start, inner_fold.train_end],
+                                "validation": [inner_fold.validation_start, inner_fold.validation_end],
+                            },
+                            "validation_score": inner_score,
+                        }
+                    )
+
+            score = (
+                float(np.mean(np.asarray(inner_scores, dtype=float)))
+                if inner_scores
+                else float(validation_eval.get("metrics", {}).get(score_metric, float("-inf")))
+            )
             row = {
                 "params": dict(candidate),
                 "train_metrics": dict(train_eval.get("metrics", {})),
                 "validation_metrics": dict(validation_eval.get("metrics", {})),
                 "validation_score": score,
             }
+            if inner_details:
+                row["inner_diagnostics"] = inner_details
             diagnostics.append(row)
 
             tie_breaker = json.dumps(candidate, sort_keys=True)
@@ -120,6 +187,13 @@ def run_walk_forward_optimization(
                     "train": [fold.train_start, fold.train_end],
                     "validation": [fold.validation_start, fold.validation_end],
                     "test": [fold.test_start, fold.test_end],
+                },
+                "excluded_ranges": fold.excluded_ranges,
+                "leakage_checks": fold.leakage_checks,
+                "windows": {
+                    "purge_window_bars": fold.purge_window_bars,
+                    "embargo_window_bars": fold.embargo_window_bars,
+                    "label_horizon_bars": fold.label_horizon_bars,
                 },
                 "selected_params": best_candidate,
                 "validation_score": best_score,
