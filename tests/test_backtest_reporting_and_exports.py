@@ -87,6 +87,8 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "dataset_quality_audit.json",
         "manifest.json",
         "metric_schema_version.txt",
+        "robustness_report.json",
+        "robustness_report.csv",
     ]:
         assert (run_dir / name).exists(), name
 
@@ -102,6 +104,28 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     index_entry = json.loads(index_rows[0])
     assert index_entry["run_type"] == "backtest"
     assert index_entry["manifest_path"].endswith("manifest.json")
+
+
+    robustness = json.loads((run_dir / "robustness_report.json").read_text())
+    assert "bootstrap_confidence_intervals" in robustness
+    assert "deflated_sharpe_ratio" in robustness
+    assert "capacity_diagnostics" in robustness
+
+    ci = robustness["bootstrap_confidence_intervals"]
+    for metric_name in ["sharpe", "cagr", "max_drawdown"]:
+        assert metric_name in ci
+        for bound in ["lower", "median", "upper"]:
+            assert bound in ci[metric_name]
+
+    capacity = robustness["capacity_diagnostics"]
+    assert "expected_slippage_curve" in capacity
+    assert "performance_degradation_curve" in capacity
+    assert len(capacity["expected_slippage_curve"]) > 0
+
+    report_txt = (run_dir / "report.txt").read_text()
+    assert "Bootstrap Confidence Intervals" in report_txt
+    assert "Deflated Sharpe Ratio" in report_txt
+    assert "Capacity Diagnostics" in report_txt
 
     metrics_rows = json.loads((run_dir / "metrics.json").read_text())
     metric_names = {row["metric"] for row in metrics_rows}
@@ -138,6 +162,21 @@ def test_format_backtest_report_contains_required_sections() -> None:
         ],
         turnover_stats={"mean": 0.1, "total": 1.0, "max": 0.2},
         cost_totals={"total": 0.01, "slippage": 0.01, "fees": 0.0, "borrow": 0.0},
+        robustness_report={
+            "bootstrap_confidence_intervals": {
+                "sharpe": {"lower": 0.1, "median": 0.2, "upper": 0.3},
+                "cagr": {"lower": 0.01, "median": 0.02, "upper": 0.03},
+                "max_drawdown": {"lower": -0.2, "median": -0.1, "upper": -0.05},
+            },
+            "deflated_sharpe_ratio": 0.75,
+            "capacity_diagnostics": {
+                "average_participation_rate": 0.03,
+                "realized_slippage_bps": 4.2,
+                "expected_slippage_curve": [
+                    {"participation_rate": 0.01, "expected_slippage_bps": 2.5}
+                ],
+            },
+        },
     )
 
     assert "Summary Metrics" in report
@@ -145,3 +184,132 @@ def test_format_backtest_report_contains_required_sections() -> None:
     assert "Rolling Sharpe Summary" in report
     assert "Rolling Drawdown Summary" in report
     assert "Turnover and Cost Attribution" in report
+    assert "Bootstrap Confidence Intervals" in report
+    assert "Deflated Sharpe Ratio" in report
+    assert "Capacity Diagnostics" in report
+
+
+def test_persist_sweep_outputs_writes_robustness_report(tmp_path: Path) -> None:
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path
+    run_dir = cache_runner._persist_sweep_outputs(
+        ranked_rows=[
+            {
+                "entry_signal": "ts_momentum",
+                "entry_signal_params": "{}",
+                "exit_signal": "none",
+                "exit_signal_params": "{}",
+                "lookback_days": 5,
+                "skip_days": 1,
+                "costs_bps": 5.0,
+                "total_return": 0.1,
+                "sharpe": 1.2,
+                "cagr": 0.08,
+                "max_drawdown": -0.12,
+                "calmar": 0.7,
+                "volatility": 0.2,
+                "sortino": 1.1,
+                "downside_deviation": 0.1,
+                "hit_rate": 0.55,
+                "profit_factor": 1.2,
+                "exposure_time": 0.8,
+                "turnover_adjusted_return": 0.07,
+                "rolling_sharpe_mean": 1.0,
+                "rolling_drawdown_worst": -0.15,
+                "turnover_total": 1.0,
+                "trade_count": 10.0,
+                "cost_total": 0.01,
+            },
+            {
+                "entry_signal": "ts_momentum",
+                "entry_signal_params": "{}",
+                "exit_signal": "none",
+                "exit_signal_params": "{}",
+                "lookback_days": 10,
+                "skip_days": 1,
+                "costs_bps": 5.0,
+                "total_return": 0.07,
+                "sharpe": 0.9,
+                "cagr": 0.06,
+                "max_drawdown": -0.1,
+                "calmar": 0.6,
+                "volatility": 0.18,
+                "sortino": 0.9,
+                "downside_deviation": 0.09,
+                "hit_rate": 0.53,
+                "profit_factor": 1.1,
+                "exposure_time": 0.75,
+                "turnover_adjusted_return": 0.05,
+                "rolling_sharpe_mean": 0.8,
+                "rolling_drawdown_worst": -0.12,
+                "turnover_total": 0.8,
+                "trade_count": 8.0,
+                "cost_total": 0.009,
+            },
+            {
+                "entry_signal": "ts_momentum",
+                "entry_signal_params": "{}",
+                "exit_signal": "none",
+                "exit_signal_params": "{}",
+                "lookback_days": 15,
+                "skip_days": 1,
+                "costs_bps": 5.0,
+                "total_return": 0.05,
+                "sharpe": 0.6,
+                "cagr": 0.04,
+                "max_drawdown": -0.09,
+                "calmar": 0.5,
+                "volatility": 0.17,
+                "sortino": 0.7,
+                "downside_deviation": 0.08,
+                "hit_rate": 0.51,
+                "profit_factor": 1.05,
+                "exposure_time": 0.7,
+                "turnover_adjusted_return": 0.04,
+                "rolling_sharpe_mean": 0.6,
+                "rolling_drawdown_worst": -0.11,
+                "turnover_total": 0.7,
+                "trade_count": 7.0,
+                "cost_total": 0.008,
+            },
+            {
+                "entry_signal": "ts_momentum",
+                "entry_signal_params": "{}",
+                "exit_signal": "none",
+                "exit_signal_params": "{}",
+                "lookback_days": 20,
+                "skip_days": 1,
+                "costs_bps": 5.0,
+                "total_return": 0.03,
+                "sharpe": 0.3,
+                "cagr": 0.02,
+                "max_drawdown": -0.08,
+                "calmar": 0.3,
+                "volatility": 0.16,
+                "sortino": 0.4,
+                "downside_deviation": 0.07,
+                "hit_rate": 0.5,
+                "profit_factor": 1.0,
+                "exposure_time": 0.65,
+                "turnover_adjusted_return": 0.03,
+                "rolling_sharpe_mean": 0.4,
+                "rolling_drawdown_worst": -0.1,
+                "turnover_total": 0.6,
+                "trade_count": 6.0,
+                "cost_total": 0.007,
+            },
+        ],
+        invalid_rows=[],
+        errors=[],
+        top_n=2,
+        parameters={"tickers": ["AAA"]},
+        random_seed=42,
+    )
+
+    robustness = json.loads((run_dir / "robustness_report.json").read_text())
+    assert "deflated_sharpe_ratio" in robustness
+    assert "pbo_style" in robustness
+    assert "probability_of_overfitting" in robustness["pbo_style"]
+
+    top_report = (run_dir / "top_n_report.txt").read_text()
+    assert "Robustness Diagnostics" in top_report
+    assert "pbo_probability" in top_report
