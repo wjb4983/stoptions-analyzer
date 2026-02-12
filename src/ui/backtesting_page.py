@@ -22,7 +22,6 @@ STRATEGIES = ["momentum", "xsmom"]
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization"]
 
-TIMEFRAME_MIN_LOOKBACK = {"1m": 120, "5m": 80, "15m": 60, "30m": 40, "1h": 30, "1d": 20}
 TIMEFRAME_HISTORY_DAYS = {"1m": 14, "5m": 30, "15m": 60, "30m": 120, "1h": 365, "1d": 3650}
 
 class BacktestingPage(ttk.Frame):
@@ -956,16 +955,8 @@ class BacktestingPage(ttk.Frame):
         messages: list[str] = []
         disable_run = False
         timeframe = self.timeframe_var.get().strip() or "1m"
-        lookback = parse_float(self.lookback_days_var.get())
         start_date = parse_date(self.start_date_var.get())
         end_date = parse_date(self.end_date_var.get())
-
-        if timeframe in TIMEFRAME_MIN_LOOKBACK and lookback is not None:
-            min_lookback = TIMEFRAME_MIN_LOOKBACK[timeframe]
-            if int(lookback) < min_lookback:
-                messages.append(
-                    f"{timeframe} guidance: lookback >= {min_lookback} bars is often more stable, but lower values are allowed."
-                )
 
         if timeframe in TIMEFRAME_HISTORY_DAYS and start_date is not None and end_date is not None and start_date < end_date:
             requested_days = (end_date - start_date).days
@@ -1351,12 +1342,6 @@ class BacktestingPage(ttk.Frame):
         if timeframe not in TIMEFRAMES:
             messagebox.showinfo("Invalid input", "Please select a valid resolution.")
             return None
-        min_lookback = TIMEFRAME_MIN_LOOKBACK.get(timeframe)
-        if min_lookback is not None and int(lookback) < min_lookback:
-            self._append_log(
-                f"Note: {timeframe} lookback {int(lookback)} is below guidance ({min_lookback}); continuing as requested."
-            )
-
         return (
             strategy,
             int(lookback),
