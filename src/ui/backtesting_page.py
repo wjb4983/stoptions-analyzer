@@ -15,6 +15,7 @@ from backtesting.cache_runner import (
     run_walk_forward_backtest,
 )
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PRESETS, DEFAULT_BACKTEST_SETTINGS
+from ui.backtesting_insights import build_guardrails, metric_deltas, parameter_diffs, parse_tags, read_experiment_index
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
 ENTRY_SIGNALS = ["ts_momentum", "ma_trend", "breakout"]
@@ -428,10 +429,12 @@ class BacktestingPage(ttk.Frame):
         self.current_fold_dirs: list[Path] = []
         self._run_dir_to_label: dict[Path, str] = {}
         self._last_output_text = ""
+        self._run_manifest_cache: dict[Path, dict[str, object]] = {}
+        self._run_metrics_cache: dict[Path, dict[str, float]] = {}
 
         leaderboard_tab = ttk.Frame(self.section_notebook)
         leaderboard_tab.columnconfigure(0, weight=1)
-        leaderboard_tab.rowconfigure(2, weight=1)
+        leaderboard_tab.rowconfigure(3, weight=1)
         self.section_notebook.add(leaderboard_tab, text="Results Leaderboard")
 
         controls = ttk.Frame(leaderboard_tab)
@@ -448,6 +451,8 @@ class BacktestingPage(ttk.Frame):
         compare_row = ttk.Frame(leaderboard_tab)
         compare_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 4))
         ttk.Button(compare_row, text="Compare Selected Runs", command=self._on_compare_selection_changed).pack(side="left")
+        self.guardrail_frame = ttk.Frame(compare_row)
+        self.guardrail_frame.pack(side="right", fill="x", expand=True)
 
         self.leaderboard_tree = ttk.Treeview(leaderboard_tab, show="headings", height=10)
         self.leaderboard_tree.grid(row=3, column=0, sticky="nsew", padx=10, pady=4)
@@ -460,6 +465,58 @@ class BacktestingPage(ttk.Frame):
         ttk.Label(leaderboard_tab, textvariable=self.delta_summary_var, justify="left").grid(
             row=4, column=0, sticky="ew", padx=10, pady=(4, 8)
         )
+
+        browser_tab = ttk.Frame(self.section_notebook)
+        browser_tab.columnconfigure(0, weight=1)
+        browser_tab.rowconfigure(1, weight=1)
+        self.section_notebook.add(browser_tab, text="Experiment Browser")
+        ttk.Button(browser_tab, text="Refresh Browser", command=self._refresh_experiment_browser).grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
+        self.experiment_tree = ttk.Treeview(browser_tab, show="headings", height=10)
+        self.experiment_tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 4))
+        self.experiment_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_experiment_tree_selected())
+        self.experiment_detail_var = tk.StringVar(value="Select an experiment run to inspect tags, metrics, and reproducibility.")
+        ttk.Label(browser_tab, textvariable=self.experiment_detail_var, justify="left").grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 8))
+
+        compare_tab = ttk.Frame(self.section_notebook)
+        compare_tab.columnconfigure(0, weight=1)
+        compare_tab.rowconfigure(2, weight=1)
+        self.section_notebook.add(compare_tab, text="Run Comparison")
+        selectors = ttk.Frame(compare_tab)
+        selectors.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        ttk.Label(selectors, text="Base Run").pack(side="left")
+        self.compare_base_var = tk.StringVar(value="")
+        self.compare_base_combo = ttk.Combobox(selectors, textvariable=self.compare_base_var, state="readonly", values=[])
+        self.compare_base_combo.pack(side="left", padx=(6, 12))
+        ttk.Label(selectors, text="Compare Run").pack(side="left")
+        self.compare_other_var = tk.StringVar(value="")
+        self.compare_other_combo = ttk.Combobox(selectors, textvariable=self.compare_other_var, state="readonly", values=[])
+        self.compare_other_combo.pack(side="left", padx=(6, 12))
+        ttk.Button(selectors, text="Diff", command=self._render_selected_run_comparison).pack(side="left")
+
+        cmp_pane = ttk.Panedwindow(compare_tab, orient="horizontal")
+        cmp_pane.grid(row=1, column=0, rowspan=2, sticky="nsew", padx=10, pady=4)
+        metrics_frame = ttk.Labelframe(cmp_pane, text="Metric Deltas")
+        params_frame = ttk.Labelframe(cmp_pane, text="Parameter Diffs")
+        cmp_pane.add(metrics_frame, weight=1)
+        cmp_pane.add(params_frame, weight=1)
+        metrics_frame.columnconfigure(0, weight=1)
+        metrics_frame.rowconfigure(0, weight=1)
+        params_frame.columnconfigure(0, weight=1)
+        params_frame.rowconfigure(0, weight=1)
+        self.metric_delta_tree = ttk.Treeview(metrics_frame, show="headings", height=12)
+        self.metric_delta_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.param_diff_tree = ttk.Treeview(params_frame, show="headings", height=12)
+        self.param_diff_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+        heatmap_tab = ttk.Frame(self.section_notebook)
+        heatmap_tab.columnconfigure(0, weight=1)
+        heatmap_tab.rowconfigure(1, weight=1)
+        self.section_notebook.add(heatmap_tab, text="Parameter Stability")
+        ttk.Label(heatmap_tab, text="Sharpe vs parameter knobs (interactive scatter heatmap) and fold consistency.").grid(row=0, column=0, sticky="w", padx=10, pady=(8, 2))
+        self.heatmap_canvas = tk.Canvas(heatmap_tab, height=280, bg="#ffffff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.heatmap_canvas.grid(row=1, column=0, sticky="nsew", padx=10, pady=6)
+        self.stability_canvas = tk.Canvas(heatmap_tab, height=180, bg="#ffffff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.stability_canvas.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 8))
 
         equity_tab = ttk.Frame(self.section_notebook)
         equity_tab.columnconfigure(0, weight=1)
@@ -480,10 +537,22 @@ class BacktestingPage(ttk.Frame):
 
         trades_tab = ttk.Frame(self.section_notebook)
         trades_tab.columnconfigure(0, weight=1)
-        trades_tab.rowconfigure(0, weight=1)
+        trades_tab.rowconfigure(1, weight=1)
         self.section_notebook.add(trades_tab, text="Trades/Costs diagnostics")
         self.trades_tree = ttk.Treeview(trades_tab, show="headings", height=14)
-        self.trades_tree.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
+        self.trades_tree.grid(row=0, column=0, sticky="nsew", padx=10, pady=(8, 4))
+        cost_pane = ttk.Panedwindow(trades_tab, orient="horizontal")
+        cost_pane.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        cost_frame = ttk.Labelframe(cost_pane, text="Risk/Cost Attribution")
+        turnover_frame = ttk.Labelframe(cost_pane, text="Turnover by Symbol/Sector")
+        cost_pane.add(cost_frame, weight=1)
+        cost_pane.add(turnover_frame, weight=1)
+        cost_frame.columnconfigure(0, weight=1)
+        turnover_frame.columnconfigure(0, weight=1)
+        self.cost_canvas = tk.Canvas(cost_frame, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.cost_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.turnover_canvas = tk.Canvas(turnover_frame, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.turnover_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
 
         wf_tab = ttk.Frame(self.section_notebook)
         wf_tab.columnconfigure(0, weight=1)
@@ -491,8 +560,36 @@ class BacktestingPage(ttk.Frame):
         self.section_notebook.add(wf_tab, text="Fold/WF diagnostics")
         self.wf_status_var = tk.StringVar(value="No walk-forward diagnostics loaded.")
         ttk.Label(wf_tab, textvariable=self.wf_status_var, justify="left").grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
-        self.wf_tree = ttk.Treeview(wf_tab, show="headings", height=14)
-        self.wf_tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        self.wf_notebook = ttk.Notebook(wf_tab)
+        self.wf_notebook.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        wf_summary = ttk.Frame(self.wf_notebook)
+        wf_summary.columnconfigure(0, weight=1)
+        wf_summary.rowconfigure(0, weight=1)
+        self.wf_notebook.add(wf_summary, text="Fold Summary")
+        self.wf_tree = ttk.Treeview(wf_summary, show="headings", height=12)
+        self.wf_tree.grid(row=0, column=0, sticky="nsew")
+        self.wf_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_fold_selected())
+
+        wf_params = ttk.Frame(self.wf_notebook)
+        wf_params.columnconfigure(0, weight=1)
+        wf_params.rowconfigure(0, weight=1)
+        self.wf_notebook.add(wf_params, text="selected_params")
+        self.wf_params_tree = ttk.Treeview(wf_params, show="headings", height=12)
+        self.wf_params_tree.grid(row=0, column=0, sticky="nsew")
+
+        wf_equity = ttk.Frame(self.wf_notebook)
+        wf_equity.columnconfigure(0, weight=1)
+        self.wf_notebook.add(wf_equity, text="OOS equity")
+        self.wf_equity_canvas = tk.Canvas(wf_equity, height=220, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.wf_equity_canvas.grid(row=0, column=0, sticky="nsew")
+
+        wf_diag = ttk.Frame(self.wf_notebook)
+        wf_diag.columnconfigure(0, weight=1)
+        wf_diag.rowconfigure(0, weight=1)
+        self.wf_notebook.add(wf_diag, text="Diagnostics")
+        self.wf_diag_tree = ttk.Treeview(wf_diag, show="headings", height=12)
+        self.wf_diag_tree.grid(row=0, column=0, sticky="nsew")
+        self._last_fold_rows: list[dict[str, object]] = []
 
         logs_tab = ttk.Frame(self.section_notebook)
         logs_tab.columnconfigure(0, weight=1)
@@ -560,6 +657,7 @@ class BacktestingPage(ttk.Frame):
         if len(selected) == 1:
             self._render_single_run(selected[0])
             self.delta_summary_var.set("Select at least two runs for delta metrics.")
+            self._render_guardrails(selected[0])
             return
         if len(selected) < 2:
             self.delta_summary_var.set("Select at least two runs for delta metrics.")
@@ -579,6 +677,9 @@ class BacktestingPage(ttk.Frame):
             lines.append(f"vs {run_dir.name} -> " + ", ".join(deltas))
         self.delta_summary_var.set("\n".join(lines))
         self._update_equity_overlap(selected)
+        self._populate_run_compare_combos(selected)
+        self._render_selected_run_comparison()
+        self._render_guardrails(selected[0])
 
     def _update_equity_overlap(self, run_dirs: list[Path]) -> None:
         self._last_equity_run_dirs = list(run_dirs)
@@ -754,13 +855,20 @@ class BacktestingPage(ttk.Frame):
         fold_summary = self._read_json(run_dir / "fold_summary.json")
         if isinstance(fold_summary, list):
             wf_rows = [row for row in fold_summary if isinstance(row, dict)]
+            self._last_fold_rows = wf_rows
             self._set_tree_data(self.wf_tree, wf_rows)
             self.wf_status_var.set(f"Loaded {len(wf_rows)} walk-forward folds from {run_dir.name}.")
         else:
+            self._last_fold_rows = []
             self._set_tree_data(self.wf_tree, [])
             self.wf_status_var.set("No walk-forward diagnostics loaded.")
 
         self._update_equity_overlap([run_dir])
+        self._render_parameter_stability(run_dir)
+        self._render_cost_attribution(run_dir)
+        self._render_guardrails(run_dir)
+        self._populate_run_compare_combos()
+        self._refresh_experiment_browser()
 
     def _load_historical_runs(self) -> None:
         run_dirs = self._scan_backtest_output_runs()
@@ -808,6 +916,240 @@ class BacktestingPage(ttk.Frame):
             if isinstance(timeframe, str) and timeframe:
                 parts.append(timeframe)
         return " | ".join(parts)
+
+    def _refresh_experiment_browser(self) -> None:
+        rows = read_experiment_index(BACKTEST_OUTPUT_DIR)
+        rendered: list[dict[str, object]] = []
+        for row in reversed(rows[-500:]):
+            run_dir = Path(str(row.get("run_dir", "")))
+            manifest = self._read_json(run_dir / "manifest.json")
+            metrics = self._load_metric_map(run_dir)
+            tags = parse_tags(manifest if isinstance(manifest, dict) else None)
+            rendered.append(
+                {
+                    "timestamp": row.get("timestamp", ""),
+                    "run_type": row.get("run_type", ""),
+                    "run": run_dir.name,
+                    "tags": ", ".join(tags[:4]),
+                    "best_sharpe": metrics.get("sharpe", row.get("primary_metric_value", "")),
+                    "fingerprint": str(row.get("reproducibility_fingerprint", ""))[:12],
+                }
+            )
+        self._set_tree_data(self.experiment_tree, rendered)
+
+    def _on_experiment_tree_selected(self) -> None:
+        selected = self.experiment_tree.selection()
+        if not selected:
+            return
+        values = self.experiment_tree.item(selected[0], "values")
+        if len(values) < 3:
+            return
+        run_name = str(values[2])
+        run_dir = next((d for d in self.current_run_dirs if d.name == run_name), None)
+        if run_dir is None:
+            self.experiment_detail_var.set(f"Run {run_name} not found on disk.")
+            return
+        manifest = self._read_json(run_dir / "manifest.json")
+        metrics = self._load_metric_map(run_dir)
+        tags = parse_tags(manifest if isinstance(manifest, dict) else None)
+        fp = ""
+        if isinstance(manifest, dict):
+            fp = str(manifest.get("reproducibility_fingerprint", ""))
+        msg = [
+            f"Run: {run_dir.name}",
+            f"Tags: {', '.join(tags) if tags else '-'}",
+            f"Sharpe: {metrics.get('sharpe', 'n/a')}",
+            f"CAGR: {metrics.get('cagr', 'n/a')}",
+            f"Fingerprint: {fp[:24] if fp else 'n/a'}",
+        ]
+        self.experiment_detail_var.set("\n".join(msg))
+
+    def _populate_run_compare_combos(self, selected: list[Path] | None = None) -> None:
+        runs = selected or self.current_run_dirs
+        names = [run.name for run in runs]
+        self.compare_base_combo.configure(values=names)
+        self.compare_other_combo.configure(values=names)
+        if names and not self.compare_base_var.get():
+            self.compare_base_var.set(names[0])
+        if len(names) > 1 and not self.compare_other_var.get():
+            self.compare_other_var.set(names[1])
+
+    def _resolve_run_by_name(self, name: str) -> Path | None:
+        clean = name.strip()
+        if not clean:
+            return None
+        for run_dir in self.current_run_dirs:
+            if run_dir.name == clean:
+                return run_dir
+        return None
+
+    def _load_run_parameters(self, run_dir: Path) -> dict[str, object]:
+        manifest = self._read_json(run_dir / "manifest.json")
+        if isinstance(manifest, dict):
+            params = manifest.get("parameters")
+            if isinstance(params, dict):
+                return dict(params)
+        return {}
+
+    def _render_selected_run_comparison(self) -> None:
+        base_run = self._resolve_run_by_name(self.compare_base_var.get())
+        other_run = self._resolve_run_by_name(self.compare_other_var.get())
+        if base_run is None or other_run is None or base_run == other_run:
+            return
+        base_metrics = self._load_metric_map(base_run)
+        other_metrics = self._load_metric_map(other_run)
+        delta_rows = metric_deltas(base_metrics, other_metrics)
+        self._set_tree_data(self.metric_delta_tree, delta_rows[:80])
+
+        base_params = self._load_run_parameters(base_run)
+        other_params = self._load_run_parameters(other_run)
+        param_rows = parameter_diffs(base_params, other_params)
+        self._set_tree_data(self.param_diff_tree, param_rows[:120])
+
+    def _render_guardrails(self, run_dir: Path) -> None:
+        for child in self.guardrail_frame.winfo_children():
+            child.destroy()
+        metrics = self._load_metric_map(run_dir)
+        fold_rows = self._read_json(run_dir / "fold_summary.json")
+        rows = fold_rows if isinstance(fold_rows, list) else None
+        trade_count = int(metrics.get("trade_count", 0.0)) if "trade_count" in metrics else None
+        badges = build_guardrails(metrics, fold_rows=rows, trade_count=trade_count)
+        palette = {"high": "#d9534f", "medium": "#f0ad4e", "low": "#5cb85c"}
+        for badge in badges:
+            label = ttk.Label(
+                self.guardrail_frame,
+                text=f"{badge['label']}: {badge['reason']}",
+                background=palette.get(str(badge.get("severity", "low")), "#5cb85c"),
+                foreground="#ffffff",
+                padding=(6, 2),
+            )
+            label.pack(side="right", padx=3)
+
+    def _draw_line_canvas(self, canvas: tk.Canvas, values: list[float], color: str = "#1f77b4") -> None:
+        canvas.delete("all")
+        w = max(20, int(canvas.winfo_width()))
+        h = max(20, int(canvas.winfo_height()))
+        if len(values) < 2:
+            canvas.create_text(w // 2, h // 2, text="No data", fill="#777")
+            return
+        min_v = min(values)
+        max_v = max(values)
+        if max_v <= min_v:
+            max_v = min_v + 1.0
+        points: list[float] = []
+        for idx, value in enumerate(values):
+            x = 10 + (w - 20) * (idx / max(1, len(values) - 1))
+            y = 8 + (h - 16) * (1.0 - (value - min_v) / (max_v - min_v))
+            points.extend([x, y])
+        canvas.create_line(*points, fill=color, width=2.0)
+
+    def _draw_bar_canvas(self, canvas: tk.Canvas, rows: list[tuple[str, float]], color: str = "#2ca02c") -> None:
+        canvas.delete("all")
+        w = max(20, int(canvas.winfo_width()))
+        h = max(20, int(canvas.winfo_height()))
+        if not rows:
+            canvas.create_text(w // 2, h // 2, text="No data", fill="#777")
+            return
+        values = [abs(v) for _n, v in rows]
+        max_v = max(values) if values else 1.0
+        if max_v <= 0:
+            max_v = 1.0
+        bar_h = max(12, (h - 16) // max(1, len(rows)))
+        y = 8
+        for name, value in rows[:10]:
+            width = int((w - 120) * (abs(value) / max_v))
+            canvas.create_rectangle(110, y, 110 + width, y + bar_h - 2, fill=color, outline=color)
+            canvas.create_text(6, y + bar_h / 2, anchor="w", text=name[:14], fill="#333")
+            canvas.create_text(114 + width, y + bar_h / 2, anchor="w", text=f"{value:.4f}", fill="#333")
+            y += bar_h
+
+    def _render_parameter_stability(self, run_dir: Path) -> None:
+        leaderboard_rows = self._load_rows(run_dir, "leaderboard")
+        points: list[tuple[float, float]] = []
+        for row in leaderboard_rows:
+            x = self._safe_float(row.get("lookback_days"))
+            y = self._safe_float(row.get("sharpe"))
+            if x is not None and y is not None:
+                points.append((x, y))
+        self.heatmap_canvas.delete("all")
+        w = max(20, int(self.heatmap_canvas.winfo_width()))
+        h = max(20, int(self.heatmap_canvas.winfo_height()))
+        if not points:
+            self.heatmap_canvas.create_text(w // 2, h // 2, text="No parameter sweep data for heatmap")
+        else:
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            xmin, xmax = min(xs), max(xs)
+            ymin, ymax = min(ys), max(ys)
+            if xmax <= xmin:
+                xmax = xmin + 1
+            if ymax <= ymin:
+                ymax = ymin + 1
+            for x, y in points[:300]:
+                px = 14 + (w - 28) * ((x - xmin) / (xmax - xmin))
+                py = 10 + (h - 20) * (1.0 - (y - ymin) / (ymax - ymin))
+                self.heatmap_canvas.create_oval(px - 3, py - 3, px + 3, py + 3, fill="#1f77b4", outline="")
+        fold_rows = self._read_json(run_dir / "fold_summary.json")
+        seq: list[float] = []
+        if isinstance(fold_rows, list):
+            for row in fold_rows:
+                if isinstance(row, dict):
+                    params = row.get("selected_params")
+                    if isinstance(params, dict):
+                        seq.append(float(len(params)))
+        self._draw_line_canvas(self.stability_canvas, seq, color="#9467bd")
+
+    def _on_fold_selected(self) -> None:
+        selection = self.wf_tree.selection()
+        if not selection:
+            return
+        idx = self.wf_tree.index(selection[0])
+        if idx >= len(self._last_fold_rows):
+            return
+        row = self._last_fold_rows[idx]
+        params = row.get("selected_params") if isinstance(row, dict) else None
+        diag = row.get("diagnostics") if isinstance(row, dict) else None
+        equity = row.get("oos_equity") if isinstance(row, dict) else None
+
+        param_rows: list[dict[str, object]] = []
+        if isinstance(params, dict):
+            param_rows = [{"parameter": k, "value": v} for k, v in sorted(params.items())]
+        self._set_tree_data(self.wf_params_tree, param_rows)
+
+        diag_rows: list[dict[str, object]] = []
+        if isinstance(diag, dict):
+            diag_rows = [{"diagnostic": k, "value": v} for k, v in sorted(diag.items())]
+        self._set_tree_data(self.wf_diag_tree, diag_rows)
+
+        series: list[float] = []
+        if isinstance(equity, list):
+            for item in equity:
+                if isinstance(item, dict):
+                    value = self._safe_float(item.get("equity"))
+                    if value is not None:
+                        series.append(value)
+        self._draw_line_canvas(self.wf_equity_canvas, series, color="#d62728")
+
+    def _render_cost_attribution(self, run_dir: Path) -> None:
+        metrics = self._load_metric_map(run_dir)
+        cost_rows = [
+            ("slippage", float(metrics.get("cost_slippage", 0.0))),
+            ("fees", float(metrics.get("cost_fees", 0.0))),
+            ("carry", float(metrics.get("cost_borrow", 0.0))),
+            ("total", float(metrics.get("cost_total", 0.0))),
+        ]
+        self._draw_bar_canvas(self.cost_canvas, cost_rows, color="#ff7f0e")
+
+        turnover_rows = self._load_rows(run_dir, "turnover_by_symbol")
+        aggregate: dict[str, float] = {}
+        for row in turnover_rows:
+            sym = str(row.get("symbol", ""))
+            val = self._safe_float(row.get("turnover"))
+            if not sym or val is None:
+                continue
+            aggregate[sym] = aggregate.get(sym, 0.0) + val
+        ordered = sorted(aggregate.items(), key=lambda kv: kv[1], reverse=True)
+        self._draw_bar_canvas(self.turnover_canvas, ordered[:10], color="#2ca02c")
 
     def _refresh_wf_fraction_labels(self) -> None:
         self.wf_train_fraction_label.config(text=f"{float(self.wf_train_fraction_var.get()):.2f}")
