@@ -176,3 +176,92 @@ def test_transaction_cost_penalty_reduces_turnover() -> None:
     base_turnover = float(np.sum(base_result.diagnostics["turnover"]))
     tc_turnover = float(np.sum(tc_result.diagnostics["turnover"]))
     assert tc_turnover < base_turnover
+
+
+def test_cvar_cap_enforced_in_capped_optimization() -> None:
+    prices = np.array(
+        [
+            [100.0, 100.0, 100.0],
+            [101.0, 99.0, 100.5],
+            [102.0, 98.0, 99.0],
+            [103.0, 97.0, 98.0],
+            [104.0, 96.0, 97.0],
+        ]
+    )
+    raw = np.array(
+        [
+            [1.0, -1.0, 0.5],
+            [1.0, -1.0, 0.5],
+            [1.0, -1.0, 0.5],
+            [1.0, -1.0, 0.5],
+            [1.0, -1.0, 0.5],
+        ]
+    )
+    scenarios = np.array(
+        [
+            [-0.20, -0.20, -0.10],
+            [-0.15, -0.10, -0.08],
+            [0.03, 0.01, 0.02],
+            [0.02, 0.02, 0.01],
+        ]
+    )
+
+    cfg = PortfolioConstructionConfig(
+        method="capped_optimization",
+        vol_lookback_bars=3,
+        max_symbol_weight=0.9,
+        max_gross_exposure=1.0,
+        min_net_exposure=-1.0,
+        max_net_exposure=1.0,
+        max_expected_shortfall=0.02,
+        cvar_confidence=0.75,
+        tail_scenarios=scenarios,
+    )
+    result = construct_target_weights(raw_signals=raw, prices=prices, symbol_order=["A", "B", "C"], config=cfg)
+
+    es = result.diagnostics["tail_expected_shortfall"]
+    assert np.all(es <= 0.02 + 1e-6)
+    assert np.any(result.diagnostics["tail_constraint_active"] > 0)
+
+
+def test_covariance_regime_and_sample_depth_selection() -> None:
+    prices = np.array(
+        [
+            [100.0, 90.0, 80.0],
+            [101.0, 89.0, 79.5],
+            [102.0, 88.0, 79.0],
+            [103.0, 87.0, 78.5],
+            [102.0, 86.5, 78.0],
+            [101.0, 86.0, 77.5],
+        ]
+    )
+    raw = np.array(
+        [
+            [1.0, 0.5, -0.5],
+            [1.0, 0.5, -0.5],
+            [1.0, 0.5, -0.5],
+            [1.0, 0.5, -0.5],
+            [1.0, 0.5, -0.5],
+            [1.0, 0.5, -0.5],
+        ]
+    )
+    regimes = ["calm", "calm", "stress", "stress", "calm", "stress"]
+
+    cfg = PortfolioConstructionConfig(
+        method="capped_optimization",
+        vol_lookback_bars=5,
+        covariance_estimator="sample",
+        covariance_regime_overrides={"stress": "robust", "calm": "ewma"},
+        covariance_shrinkage_min_samples=10,
+        covariance_robust_min_samples=6,
+        regime_labels=regimes,
+        max_symbol_weight=0.7,
+        max_gross_exposure=1.0,
+    )
+
+    result = construct_target_weights(raw_signals=raw, prices=prices, symbol_order=["A", "B", "C"], config=cfg)
+    estimators = [row.get("covariance_estimator") for row in result.diagnostics["binding_constraints"]]
+
+    assert estimators[0] == "sample"
+    assert estimators[1] == "sample"
+    assert all(est == "shrinkage" for est in estimators[2:])

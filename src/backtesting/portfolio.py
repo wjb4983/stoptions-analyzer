@@ -29,8 +29,13 @@ class PortfolioConstructionConfig:
     covariance_estimator: CovarianceEstimator = "sample"
     covariance_ewma_halflife: float = 10.0
     covariance_shrinkage: float = 0.15
+    covariance_regime_overrides: dict[str, CovarianceEstimator] | None = None
+    covariance_shrinkage_min_samples: int = 20
+    covariance_robust_min_samples: int = 8
+    regime_labels: list[str] | np.ndarray | None = None
 
     factor_exposures: np.ndarray | None = None
+    factor_covariances: np.ndarray | None = None
     factor_targets: np.ndarray | None = None
     factor_tolerance: float = 1e-3
 
@@ -42,6 +47,11 @@ class PortfolioConstructionConfig:
     turnover_penalty: float = 0.0
     exposure_penalty: float = 0.0
     transaction_cost_penalty: float = 0.0
+    implementation_shortfall_penalty: float = 0.0
+    scenario_risk_penalty: float = 0.0
+    tail_scenarios: np.ndarray | None = None
+    cvar_confidence: float = 0.95
+    max_expected_shortfall: float | None = None
     optimization_iters: int = 120
     optimization_step: float = 0.08
 
@@ -49,7 +59,7 @@ class PortfolioConstructionConfig:
 @dataclass(frozen=True)
 class PortfolioConstructionResult:
     target_weights: np.ndarray
-    diagnostics: dict[str, np.ndarray | list[dict[str, float | int | bool]]]
+    diagnostics: dict[str, np.ndarray | list[dict[str, float | int | bool | str]]]
 
 
 def construct_target_weights(
@@ -71,17 +81,23 @@ def construct_target_weights(
     sector_map = config.sector_map or {}
 
     factor_exposures = _factor_exposure_for_horizon(config.factor_exposures, periods=periods, assets=assets)
+    factor_covariances = _factor_covariance_for_horizon(config.factor_covariances, periods=periods)
+    tail_scenarios = _tail_scenarios_for_horizon(config.tail_scenarios, periods=periods, assets=assets)
+    regimes = _regime_for_horizon(config.regime_labels, periods=periods)
     beta_vector = None
     if config.beta_vector is not None:
         beta_vector = np.asarray(config.beta_vector, dtype=float)
         if beta_vector.shape != (assets,):
             raise ValueError("beta_vector must have shape (assets,)")
 
-    binding_constraints: list[dict[str, float | int | bool]] = []
+    binding_constraints: list[dict[str, float | int | bool | str]] = []
     grad_norm = np.zeros(periods, dtype=float)
     constraint_violation = np.zeros(periods, dtype=float)
     long_risk_contrib = np.zeros(periods, dtype=float)
     short_risk_contrib = np.zeros(periods, dtype=float)
+    factor_risk_contrib = np.zeros(periods, dtype=float)
+    tail_expected_shortfall = np.zeros(periods, dtype=float)
+    tail_constraint_active = np.zeros(periods, dtype=float)
 
     for idx in range(periods):
         row = np.nan_to_num(signals[idx], nan=0.0, posinf=0.0, neginf=0.0)
@@ -96,13 +112,22 @@ def construct_target_weights(
             tradable=tradable,
         )
 
-        diag_row: dict[str, float | int | bool] = {}
+        diag_row: dict[str, float | int | bool | str] = {}
         if config.method == "capped_optimization":
-            cov = _estimate_covariance(prices=px, idx=idx, lookback=max(2, int(config.vol_lookback_bars)), config=config)
+            cov, cov_estimator = _estimate_covariance(
+                prices=px,
+                idx=idx,
+                lookback=max(2, int(config.vol_lookback_bars)),
+                config=config,
+                regime=regimes[idx],
+            )
             fac = factor_exposures[idx] if factor_exposures is not None else None
+            fac_cov = factor_covariances[idx] if factor_covariances is not None else None
+            scenarios = tail_scenarios[idx] if tail_scenarios is not None else None
+            cov_total = _compose_covariance(base_covariance=cov, factor_exposure=fac, factor_covariance=fac_cov)
             optimized, diag_row = _optimize_information_ratio(
                 expected_returns=row,
-                covariance=cov,
+                covariance=cov_total,
                 initial=base,
                 prev_weights=prev,
                 tradable=tradable,
@@ -112,10 +137,15 @@ def construct_target_weights(
                 config=config,
                 factor_exposure=fac,
                 beta_vector=beta_vector,
+                scenario_returns=scenarios,
             )
+            diag_row["covariance_estimator"] = cov_estimator
             constrained = optimized
             grad_norm[idx] = float(diag_row.get("gradient_norm", 0.0))
             constraint_violation[idx] = float(diag_row.get("constraint_violation", 0.0))
+            tail_expected_shortfall[idx] = float(diag_row.get("expected_shortfall", 0.0))
+            tail_constraint_active[idx] = float(bool(diag_row.get("tail_constraint_active", False)))
+            factor_risk_contrib[idx] = _factor_risk_contribution(constrained, cov_total, fac, fac_cov)
         else:
             constrained = _apply_constraints(
                 weights=base,
@@ -126,15 +156,38 @@ def construct_target_weights(
                 config=config,
                 factor_exposure=(factor_exposures[idx] if factor_exposures is not None else None),
                 beta_vector=beta_vector,
+                scenario_returns=(tail_scenarios[idx] if tail_scenarios is not None else None),
             )
         constrained[~tradable] = 0.0
         weights[idx] = constrained
         turnover_by_symbol[idx] = np.abs(constrained - prev)
         prev = constrained
 
-        rc_long, rc_short = _risk_contribution_by_sleeve(constrained, _estimate_covariance(prices=px, idx=idx, lookback=max(2, int(config.vol_lookback_bars)), config=config))
+        cov_for_diag, _ = _estimate_covariance(
+            prices=px,
+            idx=idx,
+            lookback=max(2, int(config.vol_lookback_bars)),
+            config=config,
+            regime=regimes[idx],
+        )
+        fac = factor_exposures[idx] if factor_exposures is not None else None
+        fac_cov = factor_covariances[idx] if factor_covariances is not None else None
+        cov_diag = _compose_covariance(base_covariance=cov_for_diag, factor_exposure=fac, factor_covariance=fac_cov)
+        rc_long, rc_short = _risk_contribution_by_sleeve(constrained, cov_diag)
         long_risk_contrib[idx] = rc_long
         short_risk_contrib[idx] = rc_short
+        if config.method != "capped_optimization":
+            factor_risk_contrib[idx] = _factor_risk_contribution(constrained, cov_diag, fac, fac_cov)
+            scenarios = tail_scenarios[idx] if tail_scenarios is not None else None
+            tail_expected_shortfall[idx] = _expected_shortfall_from_scenarios(
+                constrained,
+                scenario_returns=scenarios,
+                confidence=float(config.cvar_confidence),
+            )
+            tail_constraint_active[idx] = float(
+                config.max_expected_shortfall is not None
+                and tail_expected_shortfall[idx] >= float(config.max_expected_shortfall) - 1e-8
+            )
         binding_constraints.append(diag_row)
 
     gross = np.sum(np.abs(weights), axis=1)
@@ -149,7 +202,7 @@ def construct_target_weights(
         where=np.isfinite(gross),
     )
 
-    diagnostics: dict[str, np.ndarray | list[dict[str, float | int | bool]]] = {
+    diagnostics: dict[str, np.ndarray | list[dict[str, float | int | bool | str]]] = {
         "gross_exposure": gross,
         "net_exposure": net,
         "concentration": concentration,
@@ -161,6 +214,9 @@ def construct_target_weights(
         "kkt_constraint_violation": constraint_violation,
         "risk_contribution_long_sleeve": long_risk_contrib,
         "risk_contribution_short_sleeve": short_risk_contrib,
+        "factor_risk_contribution": factor_risk_contrib,
+        "tail_expected_shortfall": tail_expected_shortfall,
+        "tail_constraint_active": tail_constraint_active,
     }
     return PortfolioConstructionResult(target_weights=weights, diagnostics=diagnostics)
 
@@ -223,7 +279,8 @@ def _optimize_information_ratio(
     config: PortfolioConstructionConfig,
     factor_exposure: np.ndarray | None,
     beta_vector: np.ndarray | None,
-) -> tuple[np.ndarray, dict[str, float | int | bool]]:
+    scenario_returns: np.ndarray | None,
+) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
     w = np.array(initial, dtype=float, copy=True)
     mu = np.nan_to_num(expected_returns, nan=0.0)
     cov = np.nan_to_num(covariance, nan=0.0)
@@ -234,10 +291,24 @@ def _optimize_information_ratio(
     for _ in range(iters):
         grad = mu - float(config.risk_aversion) * (cov @ w)
         grad -= float(config.turnover_penalty + config.transaction_cost_penalty) * np.sign(w - prev_weights)
+
+        shortfall_penalty = float(config.implementation_shortfall_penalty)
+        if shortfall_penalty > 0:
+            grad -= shortfall_penalty * (w - prev_weights)
+
         if factor_exposure is not None and float(config.exposure_penalty) > 0:
             target = _factor_target_vector(config=config, factors=factor_exposure.shape[1])
             mismatch = factor_exposure.T @ w - target
             grad -= float(config.exposure_penalty) * (factor_exposure @ mismatch)
+
+        if scenario_returns is not None and float(config.scenario_risk_penalty) > 0:
+            scenario_pnl = scenario_returns @ w
+            losses = -scenario_pnl
+            tail_cut = np.quantile(losses, float(np.clip(config.cvar_confidence, 0.5, 0.999)))
+            tail_mask = losses >= tail_cut
+            if np.any(tail_mask):
+                tail_grad = -np.mean(scenario_returns[tail_mask], axis=0)
+                grad -= float(config.scenario_risk_penalty) * tail_grad
 
         w = w + step * grad
         w = _apply_constraints(
@@ -249,10 +320,13 @@ def _optimize_information_ratio(
             config=config,
             factor_exposure=factor_exposure,
             beta_vector=beta_vector,
+            scenario_returns=scenario_returns,
         )
         w[~tradable] = 0.0
 
     grad = mu - float(config.risk_aversion) * (cov @ w)
+    if float(config.implementation_shortfall_penalty) > 0:
+        grad -= float(config.implementation_shortfall_penalty) * (w - prev_weights)
     raw_violation = _constraint_violation(
         w=w,
         symbol_order=symbol_order,
@@ -261,7 +335,9 @@ def _optimize_information_ratio(
         config=config,
         factor_exposure=factor_exposure,
         beta_vector=beta_vector,
+        scenario_returns=scenario_returns,
     )
+    es = _expected_shortfall_from_scenarios(w, scenario_returns=scenario_returns, confidence=float(config.cvar_confidence))
     diag = {
         "max_symbol_cap": bool(np.any(np.isclose(np.abs(w), float(config.max_symbol_weight), atol=1e-5))),
         "gross_cap": bool(np.isclose(np.sum(np.abs(w)), float(config.max_gross_exposure), atol=1e-4)),
@@ -271,6 +347,10 @@ def _optimize_information_ratio(
         ),
         "gradient_norm": float(np.linalg.norm(grad)),
         "constraint_violation": float(raw_violation),
+        "expected_shortfall": float(es),
+        "tail_constraint_active": bool(
+            config.max_expected_shortfall is not None and es >= float(config.max_expected_shortfall) - 1e-8
+        ),
     }
     return w, diag
 
@@ -285,6 +365,7 @@ def _apply_constraints(
     config: PortfolioConstructionConfig,
     factor_exposure: np.ndarray | None,
     beta_vector: np.ndarray | None,
+    scenario_returns: np.ndarray | None,
 ) -> np.ndarray:
     out = np.array(weights, dtype=float, copy=True)
 
@@ -315,12 +396,14 @@ def _apply_constraints(
         )
 
     out = _enforce_net_and_gross(out, config=config)
+    out = _enforce_tail_risk_constraint(out, scenario_returns=scenario_returns, config=config)
 
     tc_penalty = float(config.transaction_cost_penalty)
     if tc_penalty > 0:
         mix = 1.0 / (1.0 + tc_penalty)
         out = mix * out + (1.0 - mix) * prev_weights
         out = _enforce_net_and_gross(out, config=config)
+        out = _enforce_tail_risk_constraint(out, scenario_returns=scenario_returns, config=config)
     return out
 
 
@@ -414,6 +497,7 @@ def _constraint_violation(
     config: PortfolioConstructionConfig,
     factor_exposure: np.ndarray | None,
     beta_vector: np.ndarray | None,
+    scenario_returns: np.ndarray | None,
 ) -> float:
     v = 0.0
     v = max(v, float(np.max(np.abs(w)) - float(config.max_symbol_weight)))
@@ -443,19 +527,26 @@ def _constraint_violation(
     if beta_vector is not None:
         beta_gap = float(np.abs(np.dot(beta_vector, w) - float(config.beta_target)) - float(config.beta_tolerance))
         v = max(v, beta_gap)
+
+    if config.max_expected_shortfall is not None:
+        es = _expected_shortfall_from_scenarios(w, scenario_returns=scenario_returns, confidence=float(config.cvar_confidence))
+        v = max(v, es - float(config.max_expected_shortfall))
     return max(0.0, float(v))
 
 
-def _estimate_covariance(*, prices: np.ndarray, idx: int, lookback: int, config: PortfolioConstructionConfig) -> np.ndarray:
+def _estimate_covariance(
+    *, prices: np.ndarray, idx: int, lookback: int, config: PortfolioConstructionConfig, regime: str | None
+) -> tuple[np.ndarray, str]:
     returns = _returns_window(prices=prices, idx=idx, lookback=lookback)
     assets = prices.shape[1]
     if returns.size == 0:
-        return np.eye(assets) * 1e-6
+        return np.eye(assets) * 1e-6, "sample"
 
     clean = np.nan_to_num(returns, nan=0.0)
     if clean.shape[0] < 2:
-        return np.eye(assets) * 1e-6
-    est = config.covariance_estimator
+        return np.eye(assets) * 1e-6, "sample"
+
+    est = _select_covariance_estimator(config=config, sample_depth=clean.shape[0], regime=regime)
     if est == "sample":
         cov = np.cov(clean, rowvar=False)
     elif est == "ewma":
@@ -484,7 +575,120 @@ def _estimate_covariance(*, prices: np.ndarray, idx: int, lookback: int, config:
         cov = tmp
     cov = 0.5 * (cov + cov.T)
     cov += np.eye(assets) * 1e-8
+    return cov, est
+
+
+def _select_covariance_estimator(*, config: PortfolioConstructionConfig, sample_depth: int, regime: str | None) -> CovarianceEstimator:
+    est: CovarianceEstimator = config.covariance_estimator
+    if regime and config.covariance_regime_overrides and regime in config.covariance_regime_overrides:
+        est = config.covariance_regime_overrides[regime]
+
+    if est == "robust" and sample_depth < int(config.covariance_robust_min_samples):
+        return "shrinkage"
+    if est in {"sample", "ewma"} and sample_depth < int(config.covariance_shrinkage_min_samples):
+        return "shrinkage"
+    return est
+
+
+def _compose_covariance(
+    *, base_covariance: np.ndarray, factor_exposure: np.ndarray | None, factor_covariance: np.ndarray | None
+) -> np.ndarray:
+    cov = np.asarray(base_covariance, dtype=float)
+    if factor_exposure is not None and factor_covariance is not None:
+        cov = cov + factor_exposure @ factor_covariance @ factor_exposure.T
+    cov = 0.5 * (cov + cov.T)
+    cov += np.eye(cov.shape[0]) * 1e-10
     return cov
+
+
+def _enforce_tail_risk_constraint(
+    weights: np.ndarray,
+    *,
+    scenario_returns: np.ndarray | None,
+    config: PortfolioConstructionConfig,
+) -> np.ndarray:
+    if config.max_expected_shortfall is None:
+        return weights
+    es = _expected_shortfall_from_scenarios(weights, scenario_returns=scenario_returns, confidence=float(config.cvar_confidence))
+    limit = float(config.max_expected_shortfall)
+    if es <= limit + 1e-12:
+        return weights
+    scale = max(0.0, min(1.0, limit / max(es, 1e-12)))
+    return np.asarray(weights, dtype=float) * scale
+
+
+def _expected_shortfall_from_scenarios(
+    weights: np.ndarray,
+    *,
+    scenario_returns: np.ndarray | None,
+    confidence: float,
+) -> float:
+    if scenario_returns is None or scenario_returns.size == 0:
+        return 0.0
+    losses = -(np.asarray(scenario_returns, dtype=float) @ np.asarray(weights, dtype=float))
+    q = float(np.clip(confidence, 0.5, 0.999))
+    cut = np.quantile(losses, q)
+    tail = losses[losses >= cut]
+    if tail.size == 0:
+        return float(max(0.0, cut))
+    return float(max(0.0, np.mean(tail)))
+
+
+def _factor_risk_contribution(
+    weights: np.ndarray,
+    covariance: np.ndarray,
+    factor_exposure: np.ndarray | None,
+    factor_covariance: np.ndarray | None,
+) -> float:
+    total_var = float(weights @ covariance @ weights)
+    if total_var <= 0:
+        return 0.0
+    if factor_exposure is None or factor_covariance is None:
+        return 0.0
+    factor_var = float(weights @ (factor_exposure @ factor_covariance @ factor_exposure.T) @ weights)
+    return float(np.clip(factor_var / total_var, 0.0, 1.0))
+
+
+def _factor_covariance_for_horizon(covariances: np.ndarray | None, *, periods: int) -> np.ndarray | None:
+    if covariances is None:
+        return None
+    arr = np.asarray(covariances, dtype=float)
+    if arr.ndim == 2:
+        if arr.shape[0] != arr.shape[1]:
+            raise ValueError("factor_covariances with ndim=2 must be square")
+        return np.repeat(arr[None, :, :], repeats=periods, axis=0)
+    if arr.ndim == 3:
+        if arr.shape[0] != periods or arr.shape[1] != arr.shape[2]:
+            raise ValueError("factor_covariances with ndim=3 must have shape (periods, factors, factors)")
+        return arr
+    raise ValueError("factor_covariances must be 2D or 3D")
+
+
+def _tail_scenarios_for_horizon(scenarios: np.ndarray | None, *, periods: int, assets: int) -> np.ndarray | None:
+    if scenarios is None:
+        return None
+    arr = np.asarray(scenarios, dtype=float)
+    if arr.ndim == 2:
+        if arr.shape[1] != assets:
+            raise ValueError("tail_scenarios with ndim=2 must have shape (scenarios, assets)")
+        return np.repeat(arr[None, :, :], repeats=periods, axis=0)
+    if arr.ndim == 3:
+        if arr.shape[0] != periods or arr.shape[2] != assets:
+            raise ValueError("tail_scenarios with ndim=3 must have shape (periods, scenarios, assets)")
+        return arr
+    raise ValueError("tail_scenarios must be 2D or 3D")
+
+
+def _regime_for_horizon(regime_labels: list[str] | np.ndarray | None, *, periods: int) -> list[str | None]:
+    if regime_labels is None:
+        return [None] * periods
+    if isinstance(regime_labels, list):
+        labels = regime_labels
+    else:
+        labels = np.asarray(regime_labels, dtype=object).tolist()
+    if len(labels) != periods:
+        raise ValueError("regime_labels must have one entry per period")
+    return [None if x is None else str(x) for x in labels]
 
 
 def _returns_window(*, prices: np.ndarray, idx: int, lookback: int) -> np.ndarray:
