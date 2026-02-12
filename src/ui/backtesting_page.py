@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 
 from backtesting.cache_runner import (
     run_multi_signal_backtest,
+    run_strategy_optimization,
     run_time_series_momentum_backtest,
     run_walk_forward_backtest,
 )
@@ -230,6 +231,7 @@ class BacktestingPage(ttk.Frame):
 
         row += 1
         self.use_walk_forward_var = tk.BooleanVar(value=False)
+        self.use_optimizer_var = tk.BooleanVar(value=False)
         self.use_walk_forward_check = ttk.Checkbutton(
             strategy_frame,
             text="Use Walk-Forward (Momentum)",
@@ -239,9 +241,18 @@ class BacktestingPage(ttk.Frame):
         self.use_walk_forward_check.grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=6)
 
         row += 1
+        self.use_optimizer_check = ttk.Checkbutton(
+            strategy_frame,
+            text="Run multi-objective optimizer (Momentum)",
+            variable=self.use_optimizer_var,
+            command=self._update_validation_hint,
+        )
+        self.use_optimizer_check.grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=6)
+
+        row += 1
         ttk.Label(
             strategy_frame,
-            text="Walk-forward tunes on train+validation, then evaluates only on out-of-sample test folds.",
+            text="Walk-forward tunes on train+validation, then evaluates only on out-of-sample test folds. Optimizer runs constrained multi-objective search with early stopping.",
             wraplength=520,
             justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
@@ -918,6 +929,7 @@ class BacktestingPage(ttk.Frame):
             "portfolio_min_net": self.portfolio_min_net_entry,
             "portfolio_max_net": self.portfolio_max_net_entry,
             "use_walk_forward": self.use_walk_forward_check,
+            "use_optimizer": self.use_optimizer_check,
             "walk_forward_frame": self.walk_forward_frame,
         }
 
@@ -930,6 +942,7 @@ class BacktestingPage(ttk.Frame):
             self.end_date_var,
             self.strategy_var,
             self.use_walk_forward_var,
+            self.use_optimizer_var,
         ):
             var.trace_add("write", lambda *_args: self._update_validation_hint())
 
@@ -968,6 +981,9 @@ class BacktestingPage(ttk.Frame):
 
         if bool(self.use_walk_forward_var.get()) and self.ui_mode_var.get() != "advanced":
             messages.append("Walk-forward requires Advanced mode.")
+            disable_run = True
+        if bool(self.use_optimizer_var.get()) and self.ui_mode_var.get() != "advanced":
+            messages.append("Optimizer requires Advanced mode.")
             disable_run = True
 
         self._validation_messages = messages
@@ -1051,6 +1067,7 @@ class BacktestingPage(ttk.Frame):
         timeframe = str(settings.get("timeframe", "1m"))
         self.timeframe_var.set(timeframe if timeframe in TIMEFRAMES else "1m")
         self.use_walk_forward_var.set(bool(settings.get("use_walk_forward", False)))
+        self.use_optimizer_var.set(bool(settings.get("use_optimizer", False)))
         self.portfolio_method_var.set(str(settings.get("portfolio_method", "equal_weight")))
         self.portfolio_vol_lookback_var.set(str(settings.get("portfolio_vol_lookback_bars", "20")))
         self.portfolio_target_vol_var.set(str(settings.get("portfolio_target_volatility", "0.10")))
@@ -1139,6 +1156,7 @@ class BacktestingPage(ttk.Frame):
             "custom_bet_pct": str(custom_bet_pct),
             "timeframe": self.timeframe_var.get().strip() or "1m",
             "use_walk_forward": bool(self.use_walk_forward_var.get()),
+            "use_optimizer": bool(self.use_optimizer_var.get()),
             "wf_train_fraction": f"{float(self.wf_train_fraction_var.get()):.2f}",
             "wf_validation_fraction": f"{float(self.wf_validation_fraction_var.get()):.2f}",
             "wf_test_fraction": f"{float(self.wf_test_fraction_var.get()):.2f}",
@@ -1234,7 +1252,21 @@ class BacktestingPage(ttk.Frame):
                 messagebox.showinfo("Invalid input", "Select at least one exit signal.")
                 return
 
-            if bool(self.use_walk_forward_var.get()):
+            if bool(self.use_optimizer_var.get()):
+                worker_target = self._run_optimizer_worker
+                worker_args = (
+                    tickers,
+                    start_date,
+                    end_date,
+                    cache_root,
+                    lookback,
+                    skip,
+                    costs_bps,
+                    selected_entries,
+                    selected_exits,
+                )
+                status_line = f"Running optimizer across {len(selected_entries) * len(selected_exits)} candidates...\n"
+            elif bool(self.use_walk_forward_var.get()):
                 walk_forward_windows = self._validate_walk_forward_inputs()
                 if walk_forward_windows is None:
                     return
@@ -1386,6 +1418,43 @@ class BacktestingPage(ttk.Frame):
             return None
 
         return train_fraction, validation_fraction, test_fraction, step_fraction
+
+    def _run_optimizer_worker(
+        self,
+        tickers: list[str],
+        start_date: date,
+        end_date: date,
+        cache_root: Path,
+        lookback: int,
+        skip: int,
+        costs_bps: float,
+        entry_signals: list[str],
+        exit_signals: list[str],
+    ) -> None:
+        try:
+            entry_grid = {signal: [{}] for signal in entry_signals}
+            exit_grid = {signal: [{}] for signal in exit_signals}
+            core_grid = {
+                "lookback_days": [int(lookback)],
+                "skip_days": [int(skip)],
+                "costs_bps": [float(costs_bps)],
+            }
+            output_text = run_strategy_optimization(
+                tickers=tickers,
+                start_date=start_date,
+                end_date=end_date,
+                cache_root=cache_root,
+                entry_grid=entry_grid,
+                exit_grid=exit_grid,
+                core_grid=core_grid,
+                seed=42,
+                n_trials=max(10, len(entry_signals) * len(exit_signals) * 4),
+                sampler_name="tpe",
+                partial_period_fractions=[0.33, 0.66, 1.0],
+            )
+        except Exception as exc:
+            output_text = f"Backtest failed: {exc}"
+        self.after(0, lambda: self._finish_backtest_run(output_text))
 
     def _run_walk_forward_worker(
         self,

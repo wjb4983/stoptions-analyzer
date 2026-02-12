@@ -48,6 +48,13 @@ from backtesting.walk_forward import (
     persist_walk_forward_outputs,
     run_walk_forward_optimization,
 )
+from backtesting.optimization import (
+    Constraint,
+    Objective,
+    RandomSampler,
+    TPESampler,
+    optimize,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -769,6 +776,110 @@ def run_walk_forward_backtest(
     )
 
 
+def run_strategy_optimization(
+    *,
+    tickers: list[str],
+    start_date: date,
+    end_date: date,
+    cache_root: Path,
+    entry_grid: dict[str, list[dict[str, Any]]],
+    exit_grid: dict[str, list[dict[str, Any]]],
+    core_grid: dict[str, list[Any]],
+    seed: int = 42,
+    n_trials: int = 30,
+    sampler_name: str = "tpe",
+    objectives: list[dict[str, str]] | None = None,
+    max_turnover: float | None = None,
+    max_drawdown_floor: float | None = None,
+    min_trades: float | None = None,
+    partial_period_fractions: list[float] | None = None,
+) -> str:
+    combos, invalid_rows = generate_sweep_combinations(
+        entry_grid=entry_grid,
+        exit_grid=exit_grid,
+        core_grid=core_grid,
+    )
+    if not combos:
+        raise ValueError("No valid combinations generated for optimization")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_optimize_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    objective_defs = objectives or [
+        {"name": "sharpe", "sense": "maximize"},
+        {"name": "turnover_total", "sense": "minimize"},
+        {"name": "max_drawdown", "sense": "maximize"},
+    ]
+    objective_specs = [Objective(name=str(item["name"]), sense=str(item.get("sense", "maximize"))) for item in objective_defs]
+
+    constraints: list[Constraint] = []
+    if max_turnover is not None:
+        constraints.append(Constraint(metric="turnover_total", max_value=float(max_turnover)))
+    if max_drawdown_floor is not None:
+        constraints.append(Constraint(metric="max_drawdown", min_value=float(max_drawdown_floor)))
+    if min_trades is not None:
+        constraints.append(Constraint(metric="trade_count", min_value=float(min_trades)))
+
+    sampler = TPESampler() if sampler_name.lower() == "tpe" else RandomSampler()
+
+    def _evaluate(params: dict[str, Any], period_fraction: float) -> dict[str, float]:
+        combo = combos[int(params["combo_index"])]
+        row = _execute_sweep_combo(
+            {
+                "combo_index": int(params["combo_index"]),
+                "seed": seed,
+                "tickers": tickers,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "cache_root": str(cache_root),
+                "partial_period_fraction": float(period_fraction),
+                **combo,
+            }
+        )
+        return {key: float(value) for key, value in row.items() if isinstance(value, (int, float))}
+
+    result = optimize(
+        space={"combo_index": list(range(len(combos)))},
+        evaluate=_evaluate,
+        objectives=objective_specs,
+        constraints=constraints,
+        sampler=sampler,
+        n_trials=int(n_trials),
+        seed=int(seed),
+        partial_period_fractions=partial_period_fractions,
+        output_dir=run_dir,
+    )
+
+    (run_dir / "invalid_combinations.json").write_text(json.dumps(invalid_rows, indent=2), encoding="utf-8")
+    (run_dir / "optimizer_manifest.json").write_text(
+        json.dumps(
+            {
+                "tickers": tickers,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "entry_grid": entry_grid,
+                "exit_grid": exit_grid,
+                "core_grid": core_grid,
+                "seed": seed,
+                "n_trials": n_trials,
+                "sampler": sampler_name,
+                "objectives": objective_defs,
+                "constraints": [constraint.__dict__ for constraint in constraints],
+                "partial_period_fractions": partial_period_fractions,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    return (
+        f"Optimization complete: {result['trial_count']} trials, {result['feasible_count']} feasible, "
+        f"{result['pareto_count']} Pareto-optimal. Saved outputs to: {run_dir}"
+    )
+
+
 def _format_walk_forward_report(
     *,
     folds: list[dict[str, Any]],
@@ -855,9 +966,16 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         lookback_window=required_lookback_window(entry_cfg, exit_cfg),
     )
     prices = _fill_missing_prices(arrays.close_prices)
+    partial_fraction = float(payload.get("partial_period_fraction", 1.0))
+    if partial_fraction < 1.0:
+        keep_bars = max(2, int(round(prices.shape[0] * partial_fraction)))
+        prices = prices[:keep_bars]
+        missing_mask = arrays.missing_mask[:keep_bars]
+    else:
+        missing_mask = arrays.missing_mask
     signals = build_targets(
         close_prices=prices,
-        missing_mask=arrays.missing_mask,
+        missing_mask=missing_mask,
         entry_config=entry_cfg,
         exit_config=exit_cfg,
     )
@@ -870,6 +988,7 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     turnover = _to_numpy_1d(result.turnover)
+    trades = _to_numpy_2d(result.trades)
     cost_totals = {
         key: float(value)
         for key, value in result.cost_breakdown.get("totals", {}).items()
@@ -898,6 +1017,7 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         "rolling_sharpe_mean": float(metrics.get("rolling_sharpe_mean", 0.0)),
         "rolling_drawdown_worst": float(metrics.get("rolling_drawdown_worst", 0.0)),
         "turnover_total": float(np.sum(turnover)) if turnover.size else 0.0,
+        "trade_count": float(np.sum(np.abs(trades) > 1e-12)) if trades.size else 0.0,
         "cost_total": cost_totals.get("total", 0.0),
     }
 
@@ -1884,6 +2004,15 @@ def _parse_json_object(raw: str | None) -> dict[str, object]:
     return parsed
 
 
+def _parse_json_array(raw: str | None) -> list[object]:
+    if raw is None or not raw.strip():
+        return []
+    parsed = json.loads(raw)
+    if not isinstance(parsed, list):
+        raise ValueError("value must be a JSON array")
+    return parsed
+
+
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tickers", required=True, help="Comma-separated ticker list.")
     parser.add_argument("--start-date", required=True, help="Backtest start date (YYYY-MM-DD).")
@@ -1958,6 +2087,20 @@ def _build_parser() -> argparse.ArgumentParser:
     wf_parser.add_argument("--nested-optimization", action="store_true")
     wf_parser.add_argument("--inner-train-fraction", type=float, default=0.7)
 
+    opt_parser = subparsers.add_parser("optimize", help="Run constrained multi-objective optimization.")
+    _add_common_args(opt_parser)
+    opt_parser.add_argument("--entry-grid", required=True, help="JSON mapping signal->list[params].")
+    opt_parser.add_argument("--exit-grid", required=True, help="JSON mapping signal->list[params].")
+    opt_parser.add_argument("--core-grid", required=True, help="JSON mapping core param->list[values].")
+    opt_parser.add_argument("--seed", type=int, default=42)
+    opt_parser.add_argument("--n-trials", type=int, default=30)
+    opt_parser.add_argument("--sampler", choices=["tpe", "random"], default="tpe")
+    opt_parser.add_argument("--objectives", default='[{"name":"sharpe","sense":"maximize"},{"name":"turnover_total","sense":"minimize"},{"name":"max_drawdown","sense":"maximize"}]')
+    opt_parser.add_argument("--max-turnover", type=float, default=None)
+    opt_parser.add_argument("--max-drawdown-floor", type=float, default=None)
+    opt_parser.add_argument("--min-trades", type=float, default=None)
+    opt_parser.add_argument("--partial-period-fractions", default='[0.33,0.66,1.0]')
+
     parser.set_defaults(command="run")
     return parser
 
@@ -2010,6 +2153,24 @@ def main() -> None:
             label_horizon_bars=int(args.label_horizon_bars),
             nested_optimization=bool(args.nested_optimization),
             inner_train_fraction=float(args.inner_train_fraction),
+        )
+    elif args.command == "optimize":
+        output = run_strategy_optimization(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            cache_root=cache_root,
+            entry_grid={str(k): list(v) for k, v in _parse_json_object(args.entry_grid).items()},
+            exit_grid={str(k): list(v) for k, v in _parse_json_object(args.exit_grid).items()},
+            core_grid={str(k): list(v) for k, v in _parse_json_object(args.core_grid).items()},
+            seed=int(args.seed),
+            n_trials=int(args.n_trials),
+            sampler_name=str(args.sampler),
+            objectives=list(_parse_json_array(args.objectives)),
+            max_turnover=args.max_turnover,
+            max_drawdown_floor=args.max_drawdown_floor,
+            min_trades=args.min_trades,
+            partial_period_fractions=[float(v) for v in _parse_json_array(args.partial_period_fractions)],
         )
     else:
         output = run_time_series_momentum_backtest(
