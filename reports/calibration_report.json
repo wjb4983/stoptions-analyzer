@@ -1,0 +1,13 @@
+{
+  "generated_at": null,
+  "fills_path": "reports/historical_fills.json",
+  "snapshot_count": 0,
+  "fit_error": {
+    "mae_bps_mean": 0.0,
+    "mae_bps_max": 0.0
+  },
+  "stability": {
+    "impact_coefficient_std_bps": 0.0,
+    "impact_coefficient_range_bps": 0.0
+  }
+}
