@@ -154,3 +154,46 @@ def test_dataset_contracts_validation_summary_contains_exclusions(tmp_path) -> N
 
     assert "MSFT" in summary.excluded_symbols
     assert summary.missingness_by_symbol["AAPL"] == pytest.approx(0.5)
+
+
+def test_loader_rejects_forward_known_fields(tmp_path) -> None:
+    ts = np.array([_ms(2024, 1, 2, 14, 30), _ms(2024, 1, 2, 14, 31)], dtype=np.int64)
+    _write_npz(
+        tmp_path,
+        "AAPL",
+        2024,
+        t=ts,
+        o=np.array([100.0, 101.0]),
+        c=np.array([100.5, 101.5]),
+        future_return=np.array([0.01, -0.01]),
+    )
+
+    with pytest.raises(ValueError, match="Forward-known fields"):
+        load_canonical_price_arrays(
+            symbols=["AAPL"],
+            start="2024-01-02T14:30:00+00:00",
+            end="2024-01-02T14:31:00+00:00",
+            cache_root=tmp_path,
+        )
+
+
+def test_loader_rejects_dividend_larger_than_close_for_tradable_bar(tmp_path) -> None:
+    ts = np.array([_ms(2024, 1, 2, 14, 30), _ms(2024, 1, 2, 14, 31)], dtype=np.int64)
+    _write_npz(
+        tmp_path,
+        "AAPL",
+        2024,
+        t=ts,
+        o=np.array([100.0, 101.0]),
+        c=np.array([100.5, 1.0]),
+        dividend=np.array([0.0, 1.5]),
+        tradable=np.array([True, True]),
+    )
+
+    with pytest.raises(ValueError, match="Dividend exceeds close"):
+        load_canonical_price_arrays(
+            symbols=["AAPL"],
+            start="2024-01-02T14:30:00+00:00",
+            end="2024-01-02T14:31:00+00:00",
+            cache_root=tmp_path,
+        )

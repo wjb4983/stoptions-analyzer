@@ -1401,6 +1401,11 @@ def _resample_engine_bundle_from_1m(arrays: EngineArrayBundle, *, timeframe: str
         multiplier_by_symbol=dict(arrays.metadata.multiplier_by_symbol),
         borrow_availability_tier_by_symbol=dict(arrays.metadata.borrow_availability_tier_by_symbol),
         financing_benchmark_by_symbol=dict(arrays.metadata.financing_benchmark_by_symbol),
+        pit_membership_violations_by_symbol=dict(arrays.metadata.pit_membership_violations_by_symbol),
+        adjustment_violations_by_symbol=dict(arrays.metadata.adjustment_violations_by_symbol),
+        delisted_symbols=list(arrays.metadata.delisted_symbols),
+        survivorship_bias_flags_by_symbol=dict(arrays.metadata.survivorship_bias_flags_by_symbol),
+        leakage_flags_by_symbol=dict(arrays.metadata.leakage_flags_by_symbol),
     )
     return EngineArrayBundle(
         date_index=date_index,
@@ -1710,6 +1715,8 @@ def _persist_backtest_outputs(
             "missingness_by_symbol": dataset_contracts.missingness_by_symbol,
             "excluded_symbols": dataset_contracts.excluded_symbols,
             "reasons_by_symbol": dataset_contracts.reasons_by_symbol,
+            "survivorship_bias_flags_by_symbol": dataset_contracts.survivorship_bias_flags_by_symbol,
+            "leakage_flags_by_symbol": dataset_contracts.leakage_flags_by_symbol,
         }
         (run_dir / "dataset_quality_audit.json").write_text(json.dumps(audit_payload, indent=2))
 

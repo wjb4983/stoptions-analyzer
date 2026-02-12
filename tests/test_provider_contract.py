@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+
+import pytest
 from typing import Any
 
 from src.data_access.actions_schema import CANONICAL_ACTION_FIELDS, REQUIRED_ACTION_FIELDS, validate_actions_frame
 from src.data_access.bars_schema import CANONICAL_BAR_FIELDS, REQUIRED_BAR_FIELDS, validate_bars_frame
+from src.data_access.normalization import validate_asof_membership, validate_corporate_action_contracts
 from src.data_access.provider_base import DataProvider
 
 
@@ -85,3 +88,36 @@ def test_provider_contract() -> None:
         assert field in action
         assert isinstance(action[field], CANONICAL_ACTION_FIELDS[field])
     assert action["action_date"].tzinfo == timezone.utc
+
+
+def test_provider_asof_membership_contract() -> None:
+    ts = datetime(2024, 1, 2, 15, 0, tzinfo=timezone.utc)
+    active_from = datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc)
+    active_to = datetime(2024, 1, 2, 15, 30, tzinfo=timezone.utc)
+
+    assert validate_asof_membership(symbol="AAPL", timestamp_utc=ts, active_from=active_from, active_to=active_to)
+    assert not validate_asof_membership(
+        symbol="AAPL",
+        timestamp_utc=datetime(2024, 1, 2, 16, 0, tzinfo=timezone.utc),
+        active_from=active_from,
+        active_to=active_to,
+    )
+
+
+def test_provider_corporate_action_invariants() -> None:
+    valid_rows = [
+        {"symbol": "AAPL", "timestamp_utc": datetime(2024, 1, 2, tzinfo=timezone.utc), "close": 100.0, "split_factor": 1.0, "dividend": 0.5}
+    ]
+    validate_corporate_action_contracts(valid_rows)
+
+    invalid_split_rows = [
+        {"symbol": "AAPL", "timestamp_utc": datetime(2024, 1, 2, tzinfo=timezone.utc), "close": 100.0, "split_factor": 0.0, "dividend": 0.0}
+    ]
+    with pytest.raises(ValueError, match="split_factor"):
+        validate_corporate_action_contracts(invalid_split_rows)
+
+    invalid_dividend_rows = [
+        {"symbol": "AAPL", "timestamp_utc": datetime(2024, 1, 2, tzinfo=timezone.utc), "close": 1.0, "split_factor": 1.0, "dividend": 2.0}
+    ]
+    with pytest.raises(ValueError, match="dividend"):
+        validate_corporate_action_contracts(invalid_dividend_rows)

@@ -49,6 +49,7 @@ def normalize_bars(
     sorted_bars = sorted(coerced, key=lambda item: (item["symbol"], item["timestamp_utc"]))
     deduped = _dedupe_bars(sorted_bars, config.conflict_resolution)
     filled = _apply_missing_bar_policy(deduped, config.missing_bar_policy, config.expected_interval)
+    validate_corporate_action_contracts(filled)
     adjusted = _apply_adjustment_mode(filled, config.adjustment_mode)
     return adjusted
 
@@ -253,6 +254,44 @@ def _apply_adjustments_for_symbol(
                 total_return_factor *= (close_price - dividend) / close_price
 
     return list(reversed(adjusted))
+
+
+def validate_asof_membership(
+    *,
+    symbol: str,
+    timestamp_utc: datetime,
+    active_from: datetime | None,
+    active_to: datetime | None,
+) -> bool:
+    """Validate whether a symbol is active at a point in time."""
+
+    if active_from is not None and timestamp_utc < active_from:
+        return False
+    if active_to is not None and timestamp_utc > active_to:
+        return False
+    return True
+
+
+def validate_corporate_action_contracts(bars: Iterable[Mapping[str, Any]]) -> None:
+    """Fail fast on invalid split/dividend payloads used for adjustment."""
+
+    for bar in bars:
+        split = bar.get("split_factor", 1.0)
+        if split is not None:
+            split_value = _coerce_factor(split)
+            if split_value <= 0:
+                raise ValueError("split_factor must be > 0")
+
+        dividend = bar.get("dividend", bar.get("cash_dividend", 0.0))
+        if dividend is None:
+            dividend = 0.0
+        dividend_value = float(dividend)
+        if dividend_value < 0:
+            raise ValueError("dividend must be >= 0")
+
+        close_value = bar.get("close")
+        if close_value is not None and dividend_value > float(close_value):
+            raise ValueError("dividend cannot exceed close")
 
 
 def _coerce_factor(value: Any) -> float:

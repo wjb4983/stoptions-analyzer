@@ -6,6 +6,19 @@ from datetime import datetime
 from typing import Any, Protocol, Sequence, runtime_checkable
 
 
+FORWARD_KNOWN_FIELD_NAMES = {
+    "future_return",
+    "future_close",
+    "next_close",
+    "next_open",
+    "label",
+    "target",
+    "target_return",
+    "alpha_label",
+    "lookahead_return",
+}
+
+
 @runtime_checkable
 class DataProvider(Protocol):
     """Protocol for data provider integrations.
