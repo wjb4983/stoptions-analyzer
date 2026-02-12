@@ -61,6 +61,7 @@ from backtesting.regimes import (
 )
 from backtesting.strategies import CrossSectionalMomentumConfig, build_cross_sectional_momentum_targets
 from backtesting.walk_forward import (
+    build_cpcv_walk_forward_folds,
     build_walk_forward_folds,
     persist_walk_forward_outputs,
     run_walk_forward_optimization,
@@ -915,6 +916,9 @@ def run_walk_forward_backtest(
     label_horizon_bars: int = 1,
     nested_optimization: bool = False,
     inner_train_fraction: float = 0.7,
+    cv_scheme: str = "walk_forward",
+    cpcv_n_groups: int = 6,
+    cpcv_n_test_groups: int = 2,
     governance_metadata: dict[str, Any] | None = None,
     lineage_parent_manifest: str | None = None,
 ) -> str:
@@ -989,16 +993,26 @@ def run_walk_forward_backtest(
     elif train_bars is None or validation_bars is None or test_bars is None:
         raise ValueError("Either explicit bar windows or train/validation/test fractions are required")
 
-    folds = build_walk_forward_folds(
-        total_bars=total_bars,
-        train_bars=int(train_bars),
-        validation_bars=int(validation_bars),
-        test_bars=int(test_bars),
-        step_bars=None if step_bars is None else int(step_bars),
-        purge_window_bars=int(purge_window_bars),
-        embargo_window_bars=int(embargo_window_bars),
-        label_horizon_bars=int(label_horizon_bars),
-    )
+    if cv_scheme == "cpcv":
+        folds = build_cpcv_walk_forward_folds(
+            total_bars=total_bars,
+            n_groups=int(cpcv_n_groups),
+            n_test_groups=int(cpcv_n_test_groups),
+            purge_window_bars=int(purge_window_bars),
+            embargo_window_bars=int(embargo_window_bars),
+            label_horizon_bars=int(label_horizon_bars),
+        )
+    else:
+        folds = build_walk_forward_folds(
+            total_bars=total_bars,
+            train_bars=int(train_bars),
+            validation_bars=int(validation_bars),
+            test_bars=int(test_bars),
+            step_bars=None if step_bars is None else int(step_bars),
+            purge_window_bars=int(purge_window_bars),
+            embargo_window_bars=int(embargo_window_bars),
+            label_horizon_bars=int(label_horizon_bars),
+        )
     if not folds:
         raise ValueError("No folds generated; increase date range or reduce window sizes")
 
@@ -1086,6 +1100,43 @@ def run_walk_forward_backtest(
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_walk_forward_{timestamp}"
     persist_walk_forward_outputs(run_dir=run_dir, result=wf_result)
     (run_dir / "skipped_invalid_combos.json").write_text(json.dumps(invalid_rows, indent=2))
+    (run_dir / "audit_inputs.json").write_text(
+        json.dumps(
+            {
+                "tickers": tickers,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "entry_grid": entry_grid,
+                "exit_grid": exit_grid,
+                "core_grid": core_grid,
+                "score_metric": score_metric,
+                "cv_scheme": cv_scheme,
+                "cpcv_n_groups": int(cpcv_n_groups),
+                "cpcv_n_test_groups": int(cpcv_n_test_groups),
+                "windowing": {
+                    "train_bars": train_bars,
+                    "validation_bars": validation_bars,
+                    "test_bars": test_bars,
+                    "step_bars": step_bars,
+                    "train_fraction": train_fraction,
+                    "validation_fraction": validation_fraction,
+                    "test_fraction": test_fraction,
+                    "step_fraction": step_fraction,
+                },
+            },
+            indent=2,
+        )
+    )
+    (run_dir / "audit_outputs.json").write_text(
+        json.dumps(
+            {
+                "aggregate_metrics": wf_result.aggregate_metrics,
+                "stability": wf_result.stability,
+                "fold_count": len(wf_result.folds),
+            },
+            indent=2,
+        )
+    )
     report_text = _format_walk_forward_report(
         folds=wf_result.folds,
         aggregate_metrics=wf_result.aggregate_metrics,
@@ -1128,6 +1179,9 @@ def run_walk_forward_backtest(
             "core_grid": core_grid,
             "score_metric": score_metric,
             "nested_optimization": nested_optimization,
+            "cv_scheme": cv_scheme,
+            "cpcv_n_groups": int(cpcv_n_groups),
+            "cpcv_n_test_groups": int(cpcv_n_test_groups),
         },
         "data_snapshot_identifiers": _build_sweep_snapshot_identifiers(
             {
@@ -1153,6 +1207,9 @@ def run_walk_forward_backtest(
                     "start_date": start_date.isoformat(),
                     "end_date": end_date.isoformat(),
                     "score_metric": score_metric,
+                    "cv_scheme": cv_scheme,
+                    "cpcv_n_groups": int(cpcv_n_groups),
+                    "cpcv_n_test_groups": int(cpcv_n_test_groups),
                 },
                 "governance": governance_payload,
                 "lineage_parent_manifest": lineage_parent_manifest,
@@ -1403,6 +1460,11 @@ def _format_walk_forward_report(
     lines.append(f"- unique_selected_params: {unique_count}")
     lines.append(f"- validation_score_mean: {float(stability.get('validation_score_mean', 0.0)):.6f}")
     lines.append(f"- validation_score_std: {float(stability.get('validation_score_std', 0.0)):.6f}")
+    fold_reuse = stability.get("fold_reuse", {})
+    if isinstance(fold_reuse, dict) and fold_reuse:
+        lines.append(f"- fold_reuse_train_avg: {float(fold_reuse.get('train_avg_reuse', 0.0)):.4f}")
+        lines.append(f"- fold_reuse_validation_avg: {float(fold_reuse.get('validation_avg_reuse', 0.0)):.4f}")
+        lines.append(f"- fold_reuse_test_avg: {float(fold_reuse.get('test_avg_reuse', 0.0)):.4f}")
 
     selection_counts = stability.get("selection_counts", {})
     if isinstance(selection_counts, dict) and selection_counts:
@@ -1560,6 +1622,17 @@ def _persist_sweep_outputs(
     (run_dir / "per_combo_summary.json").write_text(json.dumps(ranked_rows, indent=2))
     (run_dir / "skipped_invalid_combos.json").write_text(json.dumps(invalid_rows, indent=2))
     (run_dir / "errors.json").write_text(json.dumps(errors, indent=2))
+    (run_dir / "audit_inputs.json").write_text(json.dumps({"parameters": parameters, "random_seed": int(random_seed)}, indent=2))
+    (run_dir / "audit_outputs.json").write_text(
+        json.dumps(
+            {
+                "ranked_rows": ranked_rows,
+                "invalid_rows": invalid_rows,
+                "errors": errors,
+            },
+            indent=2,
+        )
+    )
 
     top_rows = ranked_rows[: max(0, top_n)]
     robustness_report = build_sweep_robustness_report(ranked_rows=ranked_rows)
@@ -1573,6 +1646,8 @@ def _persist_sweep_outputs(
             f"core=(lookback_days={row['lookback_days']}, skip_days={row['skip_days']}, costs_bps={row['costs_bps']})"
         )
     pbo_style = robustness_report.get("pbo_style", {})
+    white = robustness_report.get("white_reality_check", {})
+    spa = robustness_report.get("spa", {})
     report_lines.extend([
         "",
         "Robustness Diagnostics",
@@ -1580,6 +1655,8 @@ def _persist_sweep_outputs(
         f"deflated_sharpe_ratio={float(robustness_report.get('deflated_sharpe_ratio', 0.0)):.6f}",
         f"pbo_probability={float(pbo_style.get('probability_of_overfitting', 0.0)):.6f}",
         f"pbo_median_logit={float(pbo_style.get('median_logit', 0.0)):.6f}",
+        f"white_reality_check_pvalue={float(white.get('p_value', 1.0)):.6f}",
+        f"spa_pvalue={float(spa.get('p_value', 1.0)):.6f}",
     ])
     (run_dir / "top_n_report.txt").write_text("\n".join(report_lines))
 

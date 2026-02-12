@@ -419,6 +419,75 @@ def build_backtest_robustness_report(
     }
 
 
+
+
+def compute_white_reality_check(
+    *,
+    candidate_returns: np.ndarray,
+    n_bootstrap: int = 500,
+    seed: int = 42,
+) -> dict[str, float]:
+    arr = np.asarray(candidate_returns, dtype=float)
+    if arr.ndim != 2 or arr.size == 0:
+        return {"observed_max_mean": 0.0, "p_value": 1.0, "n_candidates": 0.0, "n_observations": 0.0}
+    n_obs, n_candidates = arr.shape
+    centered = arr - np.mean(arr, axis=0, keepdims=True)
+    observed = float(np.max(np.mean(arr, axis=0)))
+    rng = np.random.default_rng(seed)
+    boot_stats: list[float] = []
+    for _ in range(max(1, int(n_bootstrap))):
+        idx = rng.integers(0, n_obs, size=n_obs)
+        sample = centered[idx, :]
+        boot_stats.append(float(np.max(np.mean(sample, axis=0))))
+    p_value = float(np.mean(np.asarray(boot_stats) >= observed)) if boot_stats else 1.0
+    return {
+        "observed_max_mean": observed,
+        "p_value": p_value,
+        "n_candidates": float(n_candidates),
+        "n_observations": float(n_obs),
+    }
+
+
+def compute_spa_pvalue(
+    *,
+    candidate_returns: np.ndarray,
+    benchmark_returns: np.ndarray | None = None,
+    n_bootstrap: int = 500,
+    seed: int = 42,
+) -> dict[str, float]:
+    arr = np.asarray(candidate_returns, dtype=float)
+    if arr.ndim != 2 or arr.size == 0:
+        return {"observed_stat": 0.0, "p_value": 1.0, "n_candidates": 0.0, "n_observations": 0.0}
+    n_obs, n_candidates = arr.shape
+    bench = np.zeros(n_obs, dtype=float) if benchmark_returns is None else np.asarray(benchmark_returns, dtype=float).reshape(-1)
+    if bench.size != n_obs:
+        raise ValueError("benchmark_returns must match candidate_returns length")
+
+    excess = arr - bench[:, None]
+    means = np.mean(excess, axis=0)
+    stds = np.std(excess, axis=0, ddof=1)
+    denom = stds / np.sqrt(max(1, n_obs))
+    t_stats = np.divide(means, denom, out=np.zeros_like(means), where=denom > 1e-12)
+    observed = float(np.max(np.maximum(t_stats, 0.0)))
+
+    centered = excess - means[None, :]
+    rng = np.random.default_rng(seed)
+    boot_max: list[float] = []
+    for _ in range(max(1, int(n_bootstrap))):
+        idx = rng.integers(0, n_obs, size=n_obs)
+        sample = centered[idx, :]
+        s_mean = np.mean(sample, axis=0)
+        s_std = np.std(sample, axis=0, ddof=1)
+        s_denom = s_std / np.sqrt(max(1, n_obs))
+        s_t = np.divide(s_mean, s_denom, out=np.zeros_like(s_mean), where=s_denom > 1e-12)
+        boot_max.append(float(np.max(np.maximum(s_t, 0.0))))
+    p_value = float(np.mean(np.asarray(boot_max) >= observed)) if boot_max else 1.0
+    return {
+        "observed_stat": observed,
+        "p_value": p_value,
+        "n_candidates": float(n_candidates),
+        "n_observations": float(n_obs),
+    }
 def build_sweep_robustness_report(
     *,
     ranked_rows: list[dict[str, object]],
@@ -436,6 +505,18 @@ def build_sweep_robustness_report(
                 "probability_of_overfitting": 0.0,
                 "median_logit": 0.0,
             },
+            "white_reality_check": {
+                "observed_max_mean": 0.0,
+                "p_value": 1.0,
+                "n_candidates": 0.0,
+                "n_observations": 0.0,
+            },
+            "spa": {
+                "observed_stat": 0.0,
+                "p_value": 1.0,
+                "n_candidates": 0.0,
+                "n_observations": 0.0,
+            },
         }
 
     centered = scores - float(np.mean(scores))
@@ -452,9 +533,26 @@ def build_sweep_robustness_report(
     )
 
     pbo = _compute_pbo_style(ranked_rows=ranked_rows, score_key=score_key, n_monte_carlo=n_monte_carlo, seed=seed)
+
+    wr_cols = [
+        key for key in sorted({k for row in ranked_rows for k in row.keys()})
+        if key.startswith("ret_")
+    ]
+    if wr_cols:
+        candidate_returns = np.asarray(
+            [[float(row.get(col, 0.0)) for col in wr_cols] for row in ranked_rows],
+            dtype=float,
+        ).T
+    else:
+        candidate_returns = scores.reshape(-1, 1)
+    white = compute_white_reality_check(candidate_returns=candidate_returns, n_bootstrap=max(200, n_monte_carlo), seed=seed)
+    spa = compute_spa_pvalue(candidate_returns=candidate_returns, n_bootstrap=max(200, n_monte_carlo), seed=seed)
+
     return {
         "deflated_sharpe_ratio": dsr,
         "pbo_style": pbo,
+        "white_reality_check": white,
+        "spa": spa,
     }
 
 
