@@ -25,9 +25,40 @@ class BreakoutEntryConfig:
     breakout_window: int = 20
 
 
-EntrySignalConfig = (
-    TimeSeriesMomentumEntryConfig | MovingAverageTrendEntryConfig | BreakoutEntryConfig
-)
+@dataclass(frozen=True)
+class MeanReversionEntryConfig:
+    name: str = "mean_reversion"
+    lookback_days: int = 20
+    zscore_threshold: float = 1.0
+    long_only: bool = False
+
+
+@dataclass(frozen=True)
+class VolatilityCarryEntryConfig:
+    name: str = "vol_carry"
+    short_vol_window: int = 10
+    long_vol_window: int = 30
+    min_carry_spread: float = 0.0
+
+
+@dataclass(frozen=True)
+class TrendStrengthRegimeEntryConfig:
+    name: str = "trend_strength"
+    trend_window: int = 20
+    strength_window: int = 20
+    min_strength: float = 0.55
+
+
+@dataclass(frozen=True)
+class SeasonalityEventEntryConfig:
+    name: str = "seasonality_event"
+    seasonal_period: int = 5
+    event_offset: int = 0
+    event_window: int = 1
+    long_only: bool = False
+
+
+EntrySignalConfig = TimeSeriesMomentumEntryConfig | MovingAverageTrendEntryConfig | BreakoutEntryConfig | MeanReversionEntryConfig | VolatilityCarryEntryConfig | TrendStrengthRegimeEntryConfig | SeasonalityEventEntryConfig
 
 
 @dataclass(frozen=True)
@@ -68,6 +99,16 @@ def _int(value: Any, field_name: str) -> int:
     return parsed
 
 
+def _float(value: Any, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a float") from exc
+    if not (parsed == parsed):
+        raise ValueError(f"{field_name} must be finite")
+    return parsed
+
+
 def parse_entry_signal_config(
     signal_name: str,
     params: Mapping[str, Any] | None,
@@ -98,6 +139,52 @@ def parse_entry_signal_config(
     if signal_name == "breakout":
         return BreakoutEntryConfig(
             breakout_window=_int(payload.get("breakout_window", 20), "breakout_window")
+        )
+    if signal_name == "mean_reversion":
+        lookback_days = _int(payload.get("lookback_days", 20), "lookback_days")
+        zscore_threshold = _float(payload.get("zscore_threshold", 1.0), "zscore_threshold")
+        if zscore_threshold <= 0.0:
+            raise ValueError("zscore_threshold must be > 0")
+        return MeanReversionEntryConfig(
+            lookback_days=lookback_days,
+            zscore_threshold=zscore_threshold,
+            long_only=bool(payload.get("long_only", False)),
+        )
+    if signal_name == "vol_carry":
+        short_vol_window = _int(payload.get("short_vol_window", 10), "short_vol_window")
+        long_vol_window = _int(payload.get("long_vol_window", 30), "long_vol_window")
+        if short_vol_window >= long_vol_window:
+            raise ValueError("short_vol_window must be < long_vol_window")
+        min_carry_spread = _float(payload.get("min_carry_spread", 0.0), "min_carry_spread")
+        if min_carry_spread < 0.0:
+            raise ValueError("min_carry_spread must be >= 0")
+        return VolatilityCarryEntryConfig(
+            short_vol_window=short_vol_window,
+            long_vol_window=long_vol_window,
+            min_carry_spread=min_carry_spread,
+        )
+    if signal_name == "trend_strength":
+        trend_window = _int(payload.get("trend_window", 20), "trend_window")
+        strength_window = _int(payload.get("strength_window", 20), "strength_window")
+        min_strength = _float(payload.get("min_strength", 0.55), "min_strength")
+        if min_strength < 0.5 or min_strength > 1.0:
+            raise ValueError("min_strength must be between 0.5 and 1.0")
+        return TrendStrengthRegimeEntryConfig(
+            trend_window=trend_window,
+            strength_window=strength_window,
+            min_strength=min_strength,
+        )
+    if signal_name == "seasonality_event":
+        seasonal_period = _int(payload.get("seasonal_period", 5), "seasonal_period")
+        event_window = _int(payload.get("event_window", 1), "event_window")
+        event_offset = int(payload.get("event_offset", 0))
+        if event_offset < 0:
+            raise ValueError("event_offset must be >= 0")
+        return SeasonalityEventEntryConfig(
+            seasonal_period=seasonal_period,
+            event_offset=event_offset,
+            event_window=event_window,
+            long_only=bool(payload.get("long_only", False)),
         )
     raise ValueError(f"Unsupported entry signal: {signal_name}")
 
@@ -145,6 +232,14 @@ def required_lookback_window(entry: EntrySignalConfig, exit_cfg: ExitSignalConfi
             return entry.ma_window + 1
         if isinstance(entry, BreakoutEntryConfig):
             return entry.breakout_window + 1
+        if isinstance(entry, MeanReversionEntryConfig):
+            return entry.lookback_days + 1
+        if isinstance(entry, VolatilityCarryEntryConfig):
+            return entry.long_vol_window + 1
+        if isinstance(entry, TrendStrengthRegimeEntryConfig):
+            return max(entry.trend_window, entry.strength_window) + 1
+        if isinstance(entry, SeasonalityEventEntryConfig):
+            return max(entry.seasonal_period + entry.event_offset + entry.event_window, 1)
         return 1
 
     def _exit_window() -> int:
@@ -153,3 +248,99 @@ def required_lookback_window(entry: EntrySignalConfig, exit_cfg: ExitSignalConfi
         return 1
 
     return max(_entry_window(), _exit_window())
+
+
+@dataclass(frozen=True)
+class TimeSeriesMomentumKnobs:
+    lookback_days: int
+    skip_days: int
+    min_abs_return: float
+
+
+@dataclass(frozen=True)
+class MeanReversionKnobs:
+    lookback_days: int
+    zscore_threshold: float
+
+
+@dataclass(frozen=True)
+class VolatilityCarryKnobs:
+    short_vol_window: int
+    long_vol_window: int
+    min_carry_spread: float
+
+
+@dataclass(frozen=True)
+class TrendStrengthKnobs:
+    trend_window: int
+    strength_window: int
+    min_strength: float
+
+
+@dataclass(frozen=True)
+class SeasonalityEventKnobs:
+    seasonal_period: int
+    event_offset: int
+    event_window: int
+
+
+StrategyKnobSchema = (
+    TimeSeriesMomentumKnobs
+    | MeanReversionKnobs
+    | VolatilityCarryKnobs
+    | TrendStrengthKnobs
+    | SeasonalityEventKnobs
+)
+
+
+def parse_strategy_knobs(strategy_name: str, params: Mapping[str, Any] | None) -> StrategyKnobSchema:
+    payload = dict(params or {})
+    if strategy_name == "ts_momentum":
+        lookback_days = _int(payload.get("lookback_days", 90), "lookback_days")
+        skip_days = int(payload.get("skip_days", 5))
+        if skip_days < 0 or skip_days >= lookback_days:
+            raise ValueError("skip_days must be >=0 and < lookback_days")
+        min_abs_return = _float(payload.get("min_abs_return", 0.0), "min_abs_return")
+        if min_abs_return < 0:
+            raise ValueError("min_abs_return must be >= 0")
+        return TimeSeriesMomentumKnobs(lookback_days=lookback_days, skip_days=skip_days, min_abs_return=min_abs_return)
+    if strategy_name == "mean_reversion":
+        lookback_days = _int(payload.get("lookback_days", 20), "lookback_days")
+        zscore_threshold = _float(payload.get("zscore_threshold", 1.0), "zscore_threshold")
+        if zscore_threshold <= 0:
+            raise ValueError("zscore_threshold must be > 0")
+        return MeanReversionKnobs(lookback_days=lookback_days, zscore_threshold=zscore_threshold)
+    if strategy_name == "vol_carry":
+        short_vol_window = _int(payload.get("short_vol_window", 10), "short_vol_window")
+        long_vol_window = _int(payload.get("long_vol_window", 30), "long_vol_window")
+        if short_vol_window >= long_vol_window:
+            raise ValueError("short_vol_window must be < long_vol_window")
+        min_carry_spread = _float(payload.get("min_carry_spread", 0.0), "min_carry_spread")
+        return VolatilityCarryKnobs(
+            short_vol_window=short_vol_window,
+            long_vol_window=long_vol_window,
+            min_carry_spread=min_carry_spread,
+        )
+    if strategy_name == "trend_strength":
+        trend_window = _int(payload.get("trend_window", 20), "trend_window")
+        strength_window = _int(payload.get("strength_window", 20), "strength_window")
+        min_strength = _float(payload.get("min_strength", 0.55), "min_strength")
+        if min_strength < 0.5 or min_strength > 1.0:
+            raise ValueError("min_strength must be between 0.5 and 1.0")
+        return TrendStrengthKnobs(
+            trend_window=trend_window,
+            strength_window=strength_window,
+            min_strength=min_strength,
+        )
+    if strategy_name == "seasonality_event":
+        seasonal_period = _int(payload.get("seasonal_period", 5), "seasonal_period")
+        event_offset = int(payload.get("event_offset", 0))
+        if event_offset < 0:
+            raise ValueError("event_offset must be >= 0")
+        event_window = _int(payload.get("event_window", 1), "event_window")
+        return SeasonalityEventKnobs(
+            seasonal_period=seasonal_period,
+            event_offset=event_offset,
+            event_window=event_window,
+        )
+    raise ValueError(f"Unsupported strategy knobs for: {strategy_name}")
