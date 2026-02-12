@@ -14,7 +14,8 @@ from config import BACKTEST_CACHE_DIR
 from data_access.actions_schema import OPTIONAL_ACTION_FIELDS, REQUIRED_ACTION_FIELDS
 from data_access.bars_schema import coerce_vendor_bar, validate_bars_frame
 from data_access.cache import _safe_ticker_name
-from data_access.provider_base import DataProvider
+from data_access.normalization import validate_asof_membership
+from data_access.provider_base import DataProvider, FORWARD_KNOWN_FIELD_NAMES
 
 _pd_spec = importlib.util.find_spec("pandas")
 if _pd_spec:
@@ -127,6 +128,7 @@ def _load_npz_file(
     symbol: str, path: Path, start_dt: datetime, end_dt: datetime
 ) -> Iterable[dict]:
     with np.load(path, mmap_mode="r") as data:
+        _validate_no_forward_known_fields(data.files)
         timestamps = data.get("t")
         if timestamps is None:
             return
@@ -135,8 +137,20 @@ def _load_npz_file(
         mask = (timestamps >= start_ms) & (timestamps <= end_ms)
         if not mask.any():
             return
+        active_from_values = data.get("active_from")
+        active_to_values = data.get("active_to")
+        active_from = None if active_from_values is None else int(np.asarray(active_from_values).reshape(-1)[0])
+        active_to = None if active_to_values is None else int(np.asarray(active_to_values).reshape(-1)[0])
+
         idx = np.nonzero(mask)[0]
         for pos in idx:
+            ts_ms = int(timestamps[pos])
+            ts_utc = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+            from_dt = None if active_from is None else datetime.fromtimestamp(active_from / 1000, tz=timezone.utc)
+            to_dt = None if active_to is None else datetime.fromtimestamp(active_to / 1000, tz=timezone.utc)
+            if not validate_asof_membership(symbol=symbol, timestamp_utc=ts_utc, active_from=from_dt, active_to=to_dt):
+                continue
+
             payload = {
                 "t": int(timestamps[pos]),
                 "o": data.get("o")[pos],
@@ -200,3 +214,10 @@ def _empty_bars_frame():
     return pd.DataFrame(
         columns=["symbol", "timestamp_utc", "open", "high", "low", "close", "volume", "trades", "vwap"]
     )
+
+
+def _validate_no_forward_known_fields(columns: Sequence[str]) -> None:
+    lowered = {str(name).lower() for name in columns}
+    overlaps = sorted(field for field in FORWARD_KNOWN_FIELD_NAMES if field in lowered)
+    if overlaps:
+        raise ValueError(f"Forward-known fields detected in provider payload: {', '.join(overlaps)}")

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -28,6 +28,11 @@ class EngineArrayMetadata:
     multiplier_by_symbol: dict[str, float]
     borrow_availability_tier_by_symbol: dict[str, str]
     financing_benchmark_by_symbol: dict[str, str]
+    pit_membership_violations_by_symbol: dict[str, int]
+    adjustment_violations_by_symbol: dict[str, int]
+    delisted_symbols: list[str]
+    survivorship_bias_flags_by_symbol: dict[str, bool]
+    leakage_flags_by_symbol: dict[str, bool]
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,9 @@ class SymbolDatasetAudit:
     bars_tradable: int
     missing_ratio: float
     coverage_ratio: float
+    pit_membership_violations: int
+    adjustment_violations: int
+    delisted: bool
 
 
 @dataclass(frozen=True)
@@ -77,6 +85,10 @@ class _LoadedSymbolDataset:
     multiplier: float
     borrow_availability_tier: str
     financing_benchmark: str
+    pit_membership_violations: int
+    adjustment_violations: int
+    delisted: bool
+    forward_known_fields: tuple[str, ...]
 
 
 def load_canonical_price_arrays(
@@ -120,13 +132,21 @@ def load_canonical_price_arrays(
         _validate_timestamps(symbol, ts)
         if validate_split_adjustment:
             _validate_split_adjustment(symbol, loaded.split_factors)
-        _validate_adjustment_consistency(symbol=symbol, split_factors=loaded.split_factors, dividends=loaded.dividends)
+        _validate_adjustment_consistency(
+            symbol=symbol,
+            split_factors=loaded.split_factors,
+            dividends=loaded.dividends,
+            open_values=loaded.open_values,
+            close_values=loaded.close_values,
+            tradable_mask=loaded.tradable_mask,
+        )
         _validate_missing_data_contract(
             symbol=symbol,
             open_values=loaded.open_values,
             close_values=loaded.close_values,
             tradable_mask=loaded.tradable_mask,
         )
+        _validate_no_forward_known_fields(symbol=symbol, forward_known_fields=loaded.forward_known_fields)
 
         if ts.size == 0:
             excluded_symbols[symbol] = "No point-in-time universe overlap in requested window"
@@ -172,6 +192,9 @@ def load_canonical_price_arrays(
             bars_tradable=int(np.sum(loaded.tradable_mask)),
             missing_ratio=missing_ratio,
             coverage_ratio=coverage_ratio,
+            pit_membership_violations=loaded.pit_membership_violations,
+            adjustment_violations=loaded.adjustment_violations,
+            delisted=loaded.delisted,
         )
 
     for col, symbol in enumerate(accepted_symbols):
@@ -208,6 +231,11 @@ def load_canonical_price_arrays(
                 "bars_tradable": audit.bars_tradable,
                 "missing_ratio": audit.missing_ratio,
                 "coverage_ratio": audit.coverage_ratio,
+                "pit_membership_violations": audit.pit_membership_violations,
+                "adjustment_violations": audit.adjustment_violations,
+                "delisted": int(audit.delisted),
+                "survivorship_bias_flag": int(audit.delisted or audit.pit_membership_violations > 0),
+                "leakage_flag": int(bool(symbol_series[symbol].forward_known_fields)),
             }
             for symbol, audit in per_symbol_audit.items()
         },
@@ -218,6 +246,21 @@ def load_canonical_price_arrays(
             symbol: symbol_series[symbol].borrow_availability_tier for symbol in accepted_symbols
         },
         financing_benchmark_by_symbol={symbol: symbol_series[symbol].financing_benchmark for symbol in accepted_symbols},
+        pit_membership_violations_by_symbol={
+            symbol: symbol_series[symbol].pit_membership_violations for symbol in accepted_symbols
+        },
+        adjustment_violations_by_symbol={
+            symbol: symbol_series[symbol].adjustment_violations for symbol in accepted_symbols
+        },
+        delisted_symbols=[symbol for symbol in accepted_symbols if symbol_series[symbol].delisted],
+        survivorship_bias_flags_by_symbol={
+            symbol: bool(symbol_series[symbol].delisted or symbol_series[symbol].pit_membership_violations > 0)
+            for symbol in accepted_symbols
+        },
+        leakage_flags_by_symbol={
+            symbol: bool(symbol_series[symbol].forward_known_fields)
+            for symbol in accepted_symbols
+        },
     )
 
     return EngineArrayBundle(
@@ -249,6 +292,8 @@ def _load_symbol_npz_range(
     split_parts: list[np.ndarray] = []
     dividend_parts: list[np.ndarray] = []
     tradable_parts: list[np.ndarray] = []
+    pit_violations_total = 0
+    forward_known_fields: set[str] = set()
     universe_total = 0
     original_total = 0
     symbol_metadata: dict[str, str | float | None] = {
@@ -286,6 +331,9 @@ def _load_symbol_npz_range(
                 active_to=active_to,
             )
             universe_total += int(np.sum(pit_mask & mask))
+            pit_violations_total += int(np.sum(mask & ~pit_mask))
+
+            forward_known_fields.update(_extract_forward_known_fields(payload))
 
             split_values = _extract_split_factors(payload)
             if split_values is not None:
@@ -314,6 +362,10 @@ def _load_symbol_npz_range(
             multiplier=float(symbol_metadata["multiplier"]),
             borrow_availability_tier=str(symbol_metadata["borrow_availability_tier"]),
             financing_benchmark=str(symbol_metadata["financing_benchmark"]),
+            pit_membership_violations=0,
+            adjustment_violations=0,
+            delisted=False,
+            forward_known_fields=tuple(sorted(forward_known_fields)),
         )
 
     ts = np.concatenate(timestamps_parts)
@@ -323,7 +375,16 @@ def _load_symbol_npz_range(
     dividend_values = np.concatenate(dividend_parts) if dividend_parts else None
     tradable_values = np.concatenate(tradable_parts) if tradable_parts else np.ones(ts.size, dtype=bool)
 
+    adjustment_violations = _count_adjustment_violations(
+        split_factors=split_values,
+        dividends=dividend_values,
+        open_values=open_values,
+        close_values=close_values,
+        tradable_mask=tradable_values,
+    )
+
     delisting_return = _extract_terminal_return(path=ticker_root)
+    is_delisted = delisting_return is not None
     if delisting_return is not None:
         _validate_delisting_contract(symbol=symbol, timestamps=ts, terminal_return=delisting_return)
         close_values[-1] = close_values[-1] * (1.0 + delisting_return)
@@ -342,6 +403,10 @@ def _load_symbol_npz_range(
         multiplier=float(symbol_metadata["multiplier"]),
         borrow_availability_tier=str(symbol_metadata["borrow_availability_tier"]),
         financing_benchmark=str(symbol_metadata["financing_benchmark"]),
+        pit_membership_violations=pit_violations_total,
+        adjustment_violations=adjustment_violations,
+        delisted=is_delisted,
+        forward_known_fields=tuple(sorted(forward_known_fields)),
     )
 
 
@@ -421,6 +486,32 @@ def _extract_terminal_return(*, path: Path) -> float | None:
 
 
 
+def _extract_forward_known_fields(payload: np.lib.npyio.NpzFile) -> set[str]:
+    fields: set[str] = set()
+    for key in payload.files:
+        lowered = str(key).lower()
+        if any(token in lowered for token in ("future", "lookahead", "next_", "target", "label")):
+            fields.add(str(key))
+    return fields
+
+
+def _count_adjustment_violations(
+    *,
+    split_factors: np.ndarray | None,
+    dividends: np.ndarray | None,
+    open_values: np.ndarray,
+    close_values: np.ndarray,
+    tradable_mask: np.ndarray,
+) -> int:
+    violations = 0
+    if split_factors is not None:
+        violations += int(np.sum(~np.isfinite(split_factors) | (split_factors <= 0)))
+    if dividends is not None:
+        violations += int(np.sum(~np.isfinite(dividends) | (dividends < 0)))
+        if tradable_mask.size == dividends.size:
+            violations += int(np.sum((dividends > close_values) & tradable_mask))
+    return int(violations)
+
 
 def _extract_dividend_values(payload: np.lib.npyio.NpzFile) -> np.ndarray | None:
     for key in ("dividend", "div", "cash_dividend"):
@@ -462,16 +553,30 @@ def _validate_adjustment_consistency(
     symbol: str,
     split_factors: np.ndarray | None,
     dividends: np.ndarray | None,
+    open_values: np.ndarray,
+    close_values: np.ndarray,
+    tradable_mask: np.ndarray,
 ) -> None:
     if dividends is not None:
         if np.any(~np.isfinite(dividends)):
             raise ValueError(f"Invalid dividend values (non-finite) for {symbol}.")
         if np.any(dividends < 0):
             raise ValueError(f"Invalid dividend values (<0) for {symbol}.")
+    if split_factors is not None and split_factors.size not in (0, open_values.size):
+        raise ValueError(f"Split factor length mismatch for {symbol}.")
+    if dividends is not None and dividends.size not in (0, close_values.size):
+        raise ValueError(f"Dividend length mismatch for {symbol}.")
+    if dividends is not None and tradable_mask.size == dividends.size and np.any((dividends > close_values) & tradable_mask):
+        raise ValueError(f"Dividend exceeds close for tradable bars for {symbol}.")
     if split_factors is None or dividends is None:
         return
     if split_factors.size != dividends.size:
         raise ValueError(f"Split/dividend length mismatch for {symbol}.")
+def _validate_no_forward_known_fields(*, symbol: str, forward_known_fields: tuple[str, ...]) -> None:
+    if forward_known_fields:
+        raise ValueError(f"Forward-known fields are not allowed for {symbol}: {', '.join(forward_known_fields)}")
+
+
 def _validate_missing_data_contract(
     *,
     symbol: str,
@@ -504,6 +609,8 @@ class DatasetValidationSummary:
     missingness_by_symbol: dict[str, float]
     excluded_symbols: dict[str, str]
     reasons_by_symbol: dict[str, str]
+    survivorship_bias_flags_by_symbol: dict[str, bool]
+    leakage_flags_by_symbol: dict[str, bool]
 
 
 def validate_engine_dataset_contracts(
@@ -530,6 +637,8 @@ def validate_engine_dataset_contracts(
         missingness_by_symbol=dict(bundle.metadata.missingness_by_symbol),
         excluded_symbols=dict(bundle.metadata.excluded_symbols),
         reasons_by_symbol=reasons_by_symbol,
+        survivorship_bias_flags_by_symbol=dict(bundle.metadata.survivorship_bias_flags_by_symbol),
+        leakage_flags_by_symbol=dict(bundle.metadata.leakage_flags_by_symbol),
     )
 
 def _normalize_datetime(value: datetime | str) -> datetime:
