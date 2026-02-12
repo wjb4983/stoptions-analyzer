@@ -7,6 +7,7 @@ import numpy as np
 
 
 PortfolioMethod = Literal["equal_weight", "vol_target", "inverse_vol", "capped_optimization"]
+CovarianceEstimator = Literal["sample", "ewma", "shrinkage", "robust"]
 
 
 @dataclass(frozen=True)
@@ -17,15 +18,38 @@ class PortfolioConstructionConfig:
     max_symbol_weight: float = 0.25
     max_sector_weight: float = 0.60
     max_gross_exposure: float = 1.0
+    min_gross_exposure: float = 0.0
     min_net_exposure: float = -1.0
     max_net_exposure: float = 1.0
     sector_map: dict[str, str] | None = None
+    country_map: dict[str, str] | None = None
+    sector_caps: dict[str, float] | None = None
+    country_caps: dict[str, float] | None = None
+
+    covariance_estimator: CovarianceEstimator = "sample"
+    covariance_ewma_halflife: float = 10.0
+    covariance_shrinkage: float = 0.15
+
+    factor_exposures: np.ndarray | None = None
+    factor_targets: np.ndarray | None = None
+    factor_tolerance: float = 1e-3
+
+    beta_vector: np.ndarray | None = None
+    beta_target: float = 0.0
+    beta_tolerance: float = 1e-3
+
+    risk_aversion: float = 1.0
+    turnover_penalty: float = 0.0
+    exposure_penalty: float = 0.0
+    transaction_cost_penalty: float = 0.0
+    optimization_iters: int = 120
+    optimization_step: float = 0.08
 
 
 @dataclass(frozen=True)
 class PortfolioConstructionResult:
     target_weights: np.ndarray
-    diagnostics: dict[str, np.ndarray]
+    diagnostics: dict[str, np.ndarray | list[dict[str, float | int | bool]]]
 
 
 def construct_target_weights(
@@ -46,6 +70,19 @@ def construct_target_weights(
     prev = np.zeros(assets, dtype=float)
     sector_map = config.sector_map or {}
 
+    factor_exposures = _factor_exposure_for_horizon(config.factor_exposures, periods=periods, assets=assets)
+    beta_vector = None
+    if config.beta_vector is not None:
+        beta_vector = np.asarray(config.beta_vector, dtype=float)
+        if beta_vector.shape != (assets,):
+            raise ValueError("beta_vector must have shape (assets,)")
+
+    binding_constraints: list[dict[str, float | int | bool]] = []
+    grad_norm = np.zeros(periods, dtype=float)
+    constraint_violation = np.zeros(periods, dtype=float)
+    long_risk_contrib = np.zeros(periods, dtype=float)
+    short_risk_contrib = np.zeros(periods, dtype=float)
+
     for idx in range(periods):
         row = np.nan_to_num(signals[idx], nan=0.0, posinf=0.0, neginf=0.0)
         tradable = np.isfinite(px[idx]) & (px[idx] > 0.0)
@@ -58,16 +95,47 @@ def construct_target_weights(
             config=config,
             tradable=tradable,
         )
-        constrained = _apply_constraints(
-            weights=base,
-            symbol_order=symbol_order,
-            sector_map=sector_map,
-            config=config,
-        )
+
+        diag_row: dict[str, float | int | bool] = {}
+        if config.method == "capped_optimization":
+            cov = _estimate_covariance(prices=px, idx=idx, lookback=max(2, int(config.vol_lookback_bars)), config=config)
+            fac = factor_exposures[idx] if factor_exposures is not None else None
+            optimized, diag_row = _optimize_information_ratio(
+                expected_returns=row,
+                covariance=cov,
+                initial=base,
+                prev_weights=prev,
+                tradable=tradable,
+                symbol_order=symbol_order,
+                sector_map=sector_map,
+                country_map=config.country_map or {},
+                config=config,
+                factor_exposure=fac,
+                beta_vector=beta_vector,
+            )
+            constrained = optimized
+            grad_norm[idx] = float(diag_row.get("gradient_norm", 0.0))
+            constraint_violation[idx] = float(diag_row.get("constraint_violation", 0.0))
+        else:
+            constrained = _apply_constraints(
+                weights=base,
+                prev_weights=prev,
+                symbol_order=symbol_order,
+                sector_map=sector_map,
+                country_map=config.country_map or {},
+                config=config,
+                factor_exposure=(factor_exposures[idx] if factor_exposures is not None else None),
+                beta_vector=beta_vector,
+            )
         constrained[~tradable] = 0.0
         weights[idx] = constrained
         turnover_by_symbol[idx] = np.abs(constrained - prev)
         prev = constrained
+
+        rc_long, rc_short = _risk_contribution_by_sleeve(constrained, _estimate_covariance(prices=px, idx=idx, lookback=max(2, int(config.vol_lookback_bars)), config=config))
+        long_risk_contrib[idx] = rc_long
+        short_risk_contrib[idx] = rc_short
+        binding_constraints.append(diag_row)
 
     gross = np.sum(np.abs(weights), axis=1)
     net = np.sum(weights, axis=1)
@@ -81,13 +149,18 @@ def construct_target_weights(
         where=np.isfinite(gross),
     )
 
-    diagnostics = {
+    diagnostics: dict[str, np.ndarray | list[dict[str, float | int | bool]]] = {
         "gross_exposure": gross,
         "net_exposure": net,
         "concentration": concentration,
         "leverage_usage": leverage_usage,
         "turnover": np.sum(turnover_by_symbol, axis=1),
         "turnover_by_symbol": turnover_by_symbol,
+        "binding_constraints": binding_constraints,
+        "kkt_gradient_norm": grad_norm,
+        "kkt_constraint_violation": constraint_violation,
+        "risk_contribution_long_sleeve": long_risk_contrib,
+        "risk_contribution_short_sleeve": short_risk_contrib,
     }
     return PortfolioConstructionResult(target_weights=weights, diagnostics=diagnostics)
 
@@ -137,12 +210,81 @@ def _build_base_weights(
     raise ValueError(f"Unknown portfolio method: {config.method}")
 
 
+def _optimize_information_ratio(
+    *,
+    expected_returns: np.ndarray,
+    covariance: np.ndarray,
+    initial: np.ndarray,
+    prev_weights: np.ndarray,
+    tradable: np.ndarray,
+    symbol_order: list[str],
+    sector_map: dict[str, str],
+    country_map: dict[str, str],
+    config: PortfolioConstructionConfig,
+    factor_exposure: np.ndarray | None,
+    beta_vector: np.ndarray | None,
+) -> tuple[np.ndarray, dict[str, float | int | bool]]:
+    w = np.array(initial, dtype=float, copy=True)
+    mu = np.nan_to_num(expected_returns, nan=0.0)
+    cov = np.nan_to_num(covariance, nan=0.0)
+    cov = 0.5 * (cov + cov.T)
+    step = max(1e-4, float(config.optimization_step))
+    iters = max(1, int(config.optimization_iters))
+
+    for _ in range(iters):
+        grad = mu - float(config.risk_aversion) * (cov @ w)
+        grad -= float(config.turnover_penalty + config.transaction_cost_penalty) * np.sign(w - prev_weights)
+        if factor_exposure is not None and float(config.exposure_penalty) > 0:
+            target = _factor_target_vector(config=config, factors=factor_exposure.shape[1])
+            mismatch = factor_exposure.T @ w - target
+            grad -= float(config.exposure_penalty) * (factor_exposure @ mismatch)
+
+        w = w + step * grad
+        w = _apply_constraints(
+            weights=w,
+            prev_weights=prev_weights,
+            symbol_order=symbol_order,
+            sector_map=sector_map,
+            country_map=country_map,
+            config=config,
+            factor_exposure=factor_exposure,
+            beta_vector=beta_vector,
+        )
+        w[~tradable] = 0.0
+
+    grad = mu - float(config.risk_aversion) * (cov @ w)
+    raw_violation = _constraint_violation(
+        w=w,
+        symbol_order=symbol_order,
+        sector_map=sector_map,
+        country_map=country_map,
+        config=config,
+        factor_exposure=factor_exposure,
+        beta_vector=beta_vector,
+    )
+    diag = {
+        "max_symbol_cap": bool(np.any(np.isclose(np.abs(w), float(config.max_symbol_weight), atol=1e-5))),
+        "gross_cap": bool(np.isclose(np.sum(np.abs(w)), float(config.max_gross_exposure), atol=1e-4)),
+        "net_bound": bool(
+            np.isclose(np.sum(w), float(config.min_net_exposure), atol=1e-4)
+            or np.isclose(np.sum(w), float(config.max_net_exposure), atol=1e-4)
+        ),
+        "gradient_norm": float(np.linalg.norm(grad)),
+        "constraint_violation": float(raw_violation),
+    }
+    return w, diag
+
+
 def _apply_constraints(
     *,
     weights: np.ndarray,
+    prev_weights: np.ndarray,
     symbol_order: list[str],
     sector_map: dict[str, str],
+    country_map: dict[str, str],
     config: PortfolioConstructionConfig,
+    factor_exposure: np.ndarray | None,
+    beta_vector: np.ndarray | None,
 ) -> np.ndarray:
     out = np.array(weights, dtype=float, copy=True)
 
@@ -150,23 +292,49 @@ def _apply_constraints(
     if max_symbol > 0:
         out = np.clip(out, -max_symbol, max_symbol)
 
-    if float(config.max_sector_weight) > 0 and sector_map:
-        sectors: dict[str, list[int]] = {}
-        for idx, symbol in enumerate(symbol_order):
-            sector = sector_map.get(symbol)
-            if sector:
-                sectors.setdefault(sector, []).append(idx)
-        for idxs in sectors.values():
-            gross_sector = float(np.sum(np.abs(out[idxs])))
-            cap = float(config.max_sector_weight)
-            if gross_sector > cap > 0:
-                scale = cap / gross_sector
-                out[idxs] *= scale
+    _apply_group_caps(out, symbol_order=symbol_order, group_map=sector_map, default_cap=float(config.max_sector_weight), explicit_caps=config.sector_caps)
+    _apply_group_caps(out, symbol_order=symbol_order, group_map=country_map, default_cap=float(config.max_gross_exposure), explicit_caps=config.country_caps)
 
+    out = _enforce_net_and_gross(out, config=config)
+
+    if factor_exposure is not None:
+        target = _factor_target_vector(config=config, factors=factor_exposure.shape[1])
+        out = _project_linear_constraint(
+            out,
+            matrix=factor_exposure.T,
+            target=target,
+            tolerance=float(max(config.factor_tolerance, 0.0)),
+        )
+
+    if beta_vector is not None:
+        out = _project_linear_constraint(
+            out,
+            matrix=np.asarray(beta_vector, dtype=float)[None, :],
+            target=np.array([float(config.beta_target)]),
+            tolerance=float(max(config.beta_tolerance, 0.0)),
+        )
+
+    out = _enforce_net_and_gross(out, config=config)
+
+    tc_penalty = float(config.transaction_cost_penalty)
+    if tc_penalty > 0:
+        mix = 1.0 / (1.0 + tc_penalty)
+        out = mix * out + (1.0 - mix) * prev_weights
+        out = _enforce_net_and_gross(out, config=config)
+    return out
+
+
+def _enforce_net_and_gross(weights: np.ndarray, *, config: PortfolioConstructionConfig) -> np.ndarray:
+    out = np.array(weights, copy=True)
     gross = float(np.sum(np.abs(out)))
     max_gross = max(0.0, float(config.max_gross_exposure))
     if gross > 0 and max_gross > 0 and gross > max_gross:
         out *= max_gross / gross
+        gross = max_gross
+
+    min_gross = max(0.0, float(config.min_gross_exposure))
+    if gross > 0 and gross < min_gross:
+        out *= min_gross / gross
 
     net = float(np.sum(out))
     min_net = float(config.min_net_exposure)
@@ -179,25 +347,149 @@ def _apply_constraints(
         long_mask = out > 0
         short_mask = out < 0
         if target_net < net and np.any(long_mask):
-            # reduce long side
             reduction = net - target_net
             long_sum = float(np.sum(out[long_mask]))
             if long_sum > 0:
                 out[long_mask] *= max(0.0, 1.0 - reduction / long_sum)
         elif target_net > net and np.any(short_mask):
-            # reduce short side magnitude
             increase = target_net - net
             short_mag = float(np.sum(np.abs(out[short_mask])))
             if short_mag > 0:
                 out[short_mask] *= max(0.0, 1.0 - increase / short_mag)
-
     return out
 
 
-def _rolling_volatility(*, prices: np.ndarray, idx: int, lookback: int) -> np.ndarray:
+def _apply_group_caps(
+    weights: np.ndarray,
+    *,
+    symbol_order: list[str],
+    group_map: dict[str, str],
+    default_cap: float,
+    explicit_caps: dict[str, float] | None,
+) -> None:
+    if not group_map:
+        return
+    groups: dict[str, list[int]] = {}
+    for idx, symbol in enumerate(symbol_order):
+        group = group_map.get(symbol)
+        if group:
+            groups.setdefault(group, []).append(idx)
+    for group, idxs in groups.items():
+        cap = float(explicit_caps[group]) if explicit_caps and group in explicit_caps else default_cap
+        cap = max(0.0, cap)
+        gross_group = float(np.sum(np.abs(weights[idxs])))
+        if gross_group > cap > 0:
+            weights[idxs] *= cap / gross_group
+
+
+def _project_linear_constraint(
+    values: np.ndarray,
+    *,
+    matrix: np.ndarray,
+    target: np.ndarray,
+    tolerance: float,
+) -> np.ndarray:
+    if matrix.size == 0:
+        return values
+    A = np.asarray(matrix, dtype=float)
+    b = np.asarray(target, dtype=float)
+    mismatch = A @ values - b
+    if np.all(np.abs(mismatch) <= tolerance):
+        return values
+    gram = A @ A.T
+    gram += np.eye(gram.shape[0]) * 1e-8
+    try:
+        lam = np.linalg.solve(gram, mismatch)
+    except np.linalg.LinAlgError:
+        lam = np.linalg.pinv(gram) @ mismatch
+    return values - A.T @ lam
+
+
+def _constraint_violation(
+    *,
+    w: np.ndarray,
+    symbol_order: list[str],
+    sector_map: dict[str, str],
+    country_map: dict[str, str],
+    config: PortfolioConstructionConfig,
+    factor_exposure: np.ndarray | None,
+    beta_vector: np.ndarray | None,
+) -> float:
+    v = 0.0
+    v = max(v, float(np.max(np.abs(w)) - float(config.max_symbol_weight)))
+    gross = float(np.sum(np.abs(w)))
+    v = max(v, gross - float(config.max_gross_exposure))
+    v = max(v, float(config.min_gross_exposure) - gross)
+    net = float(np.sum(w))
+    v = max(v, net - float(config.max_net_exposure), float(config.min_net_exposure) - net)
+
+    for group_map, caps, default_cap in (
+        (sector_map, config.sector_caps, float(config.max_sector_weight)),
+        (country_map, config.country_caps, float(config.max_gross_exposure)),
+    ):
+        groups: dict[str, list[int]] = {}
+        for idx, symbol in enumerate(symbol_order):
+            g = group_map.get(symbol)
+            if g:
+                groups.setdefault(g, []).append(idx)
+        for g, idxs in groups.items():
+            cap = float(caps[g]) if caps and g in caps else default_cap
+            v = max(v, float(np.sum(np.abs(w[idxs]))) - cap)
+
+    if factor_exposure is not None:
+        target = _factor_target_vector(config=config, factors=factor_exposure.shape[1])
+        v = max(v, float(np.max(np.abs(factor_exposure.T @ w - target)) - float(config.factor_tolerance)))
+
+    if beta_vector is not None:
+        beta_gap = float(np.abs(np.dot(beta_vector, w) - float(config.beta_target)) - float(config.beta_tolerance))
+        v = max(v, beta_gap)
+    return max(0.0, float(v))
+
+
+def _estimate_covariance(*, prices: np.ndarray, idx: int, lookback: int, config: PortfolioConstructionConfig) -> np.ndarray:
+    returns = _returns_window(prices=prices, idx=idx, lookback=lookback)
     assets = prices.shape[1]
+    if returns.size == 0:
+        return np.eye(assets) * 1e-6
+
+    clean = np.nan_to_num(returns, nan=0.0)
+    if clean.shape[0] < 2:
+        return np.eye(assets) * 1e-6
+    est = config.covariance_estimator
+    if est == "sample":
+        cov = np.cov(clean, rowvar=False)
+    elif est == "ewma":
+        cov = _ewma_covariance(clean, halflife=float(config.covariance_ewma_halflife))
+    elif est == "shrinkage":
+        sample = np.cov(clean, rowvar=False)
+        diag = np.diag(np.diag(sample))
+        alpha = float(np.clip(config.covariance_shrinkage, 0.0, 1.0))
+        cov = (1.0 - alpha) * sample + alpha * diag
+    elif est == "robust":
+        med = np.median(clean, axis=0)
+        mad = np.median(np.abs(clean - med), axis=0) + 1e-8
+        z = np.clip((clean - med) / (1.4826 * mad), -3.0, 3.0)
+        cov = np.cov(z, rowvar=False)
+    else:
+        raise ValueError(f"Unknown covariance estimator: {est}")
+
+    cov = np.nan_to_num(cov, nan=0.0)
+    if cov.ndim == 0:
+        cov = np.eye(assets) * float(cov)
+    cov = np.asarray(cov, dtype=float)
+    if cov.shape != (assets, assets):
+        tmp = np.eye(assets) * 1e-6
+        m = min(assets, cov.shape[0])
+        tmp[:m, :m] = cov[:m, :m]
+        cov = tmp
+    cov = 0.5 * (cov + cov.T)
+    cov += np.eye(assets) * 1e-8
+    return cov
+
+
+def _returns_window(*, prices: np.ndarray, idx: int, lookback: int) -> np.ndarray:
     if idx <= 0:
-        return np.zeros(assets, dtype=float)
+        return np.empty((0, prices.shape[1]), dtype=float)
     start = max(1, idx - lookback + 1)
     window = prices[start - 1 : idx + 1]
     prev = window[:-1]
@@ -205,8 +497,15 @@ def _rolling_volatility(*, prices: np.ndarray, idx: int, lookback: int) -> np.nd
     rets = np.full_like(curr, np.nan, dtype=float)
     valid = np.isfinite(prev) & np.isfinite(curr) & (prev > 0)
     rets[valid] = curr[valid] / prev[valid] - 1.0
-    vol = np.zeros(assets, dtype=float)
-    for col in range(assets):
+    return rets
+
+
+def _rolling_volatility(*, prices: np.ndarray, idx: int, lookback: int) -> np.ndarray:
+    rets = _returns_window(prices=prices, idx=idx, lookback=lookback)
+    if rets.size == 0:
+        return np.zeros(prices.shape[1], dtype=float)
+    vol = np.zeros(prices.shape[1], dtype=float)
+    for col in range(rets.shape[1]):
         series = rets[:, col]
         series = series[np.isfinite(series)]
         if series.size >= 2:
@@ -214,6 +513,61 @@ def _rolling_volatility(*, prices: np.ndarray, idx: int, lookback: int) -> np.nd
             if np.isfinite(sigma) and sigma > 0:
                 vol[col] = sigma
     return vol
+
+
+def _ewma_covariance(returns: np.ndarray, *, halflife: float) -> np.ndarray:
+    lam = np.exp(np.log(0.5) / max(halflife, 1e-6))
+    centered = returns - np.mean(returns, axis=0, keepdims=True)
+    cov = np.zeros((returns.shape[1], returns.shape[1]), dtype=float)
+    wsum = 0.0
+    for i in range(centered.shape[0]):
+        weight = lam ** (centered.shape[0] - 1 - i)
+        v = centered[i][:, None]
+        cov += weight * (v @ v.T)
+        wsum += weight
+    if wsum > 0:
+        cov /= wsum
+    return cov
+
+
+def _factor_exposure_for_horizon(
+    exposures: np.ndarray | None,
+    *,
+    periods: int,
+    assets: int,
+) -> np.ndarray | None:
+    if exposures is None:
+        return None
+    arr = np.asarray(exposures, dtype=float)
+    if arr.ndim == 2:
+        if arr.shape[0] != assets:
+            raise ValueError("factor_exposures with ndim=2 must have shape (assets, factors)")
+        return np.repeat(arr[None, :, :], repeats=periods, axis=0)
+    if arr.ndim == 3:
+        if arr.shape[0] != periods or arr.shape[1] != assets:
+            raise ValueError("factor_exposures with ndim=3 must have shape (periods, assets, factors)")
+        return arr
+    raise ValueError("factor_exposures must be 2D or 3D")
+
+
+def _factor_target_vector(*, config: PortfolioConstructionConfig, factors: int) -> np.ndarray:
+    if config.factor_targets is None:
+        return np.zeros(factors, dtype=float)
+    target = np.asarray(config.factor_targets, dtype=float)
+    if target.shape != (factors,):
+        raise ValueError("factor_targets must have shape (factors,)")
+    return target
+
+
+def _risk_contribution_by_sleeve(weights: np.ndarray, covariance: np.ndarray) -> tuple[float, float]:
+    mrc = covariance @ weights
+    total_var = float(weights @ mrc)
+    if total_var <= 0:
+        return 0.0, 0.0
+    contrib = weights * mrc / total_var
+    long = float(np.sum(contrib[weights > 0]))
+    short = float(np.sum(contrib[weights < 0]))
+    return long, short
 
 
 def _normalize_gross(values: np.ndarray) -> np.ndarray:
