@@ -403,6 +403,8 @@ def run_time_series_momentum_backtest(
         carry_financing_benchmarks=[arrays.metadata.financing_benchmark_by_symbol[symbol] for symbol in symbol_order],
         borrow_rate_series=borrow_rate_series,
         borrow_available_flags=borrow_available_flags,
+        corporate_action_splits=arrays.split_factors,
+        corporate_action_dividends=arrays.dividends,
     )
 
     timestamps = arrays.date_index
@@ -499,6 +501,8 @@ def run_time_series_momentum_backtest(
         regime_labels=regime_labels,
         regime_pnl_attribution=regime_pnl_attribution,
         governance=governance_payload,
+        corporate_action_splits=arrays.split_factors,
+        corporate_action_dividends=arrays.dividends,
     )
 
     trade_log_rows = _build_trade_log_rows(
@@ -1864,6 +1868,10 @@ def _resample_engine_bundle_from_1m(arrays: EngineArrayBundle, *, timeframe: str
     open_prices = arrays.open_prices[selector]
     close_prices = arrays.close_prices[selector]
     missing_mask = arrays.missing_mask[selector]
+    raw_open_prices = arrays.raw_open_prices[selector]
+    raw_close_prices = arrays.raw_close_prices[selector]
+    split_factors = arrays.split_factors[selector]
+    dividends = arrays.dividends[selector]
 
     symbol_order = sorted(arrays.metadata.symbol_to_column.items(), key=lambda item: item[1])
     missingness_by_symbol = {
@@ -1897,6 +1905,10 @@ def _resample_engine_bundle_from_1m(arrays: EngineArrayBundle, *, timeframe: str
         date_index=date_index,
         open_prices=open_prices,
         close_prices=close_prices,
+        raw_open_prices=raw_open_prices,
+        raw_close_prices=raw_close_prices,
+        split_factors=split_factors,
+        dividends=dividends,
         missing_mask=missing_mask,
         metadata=metadata,
     )
@@ -2148,6 +2160,8 @@ def _persist_backtest_outputs(
     regime_labels: np.ndarray | None = None,
     regime_pnl_attribution: list[dict[str, float | str | int]] | None = None,
     governance: dict[str, Any] | None = None,
+    corporate_action_splits: np.ndarray | None = None,
+    corporate_action_dividends: np.ndarray | None = None,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
@@ -2215,6 +2229,14 @@ def _persist_backtest_outputs(
             rows=regime_pnl_attribution,
         )
 
+    _write_corporate_actions_applied_csv(
+        run_dir=run_dir,
+        timestamps=time_strings,
+        symbol_order=symbol_order,
+        split_factors=corporate_action_splits,
+        dividends=corporate_action_dividends,
+    )
+
     metrics_rows = [{"metric": key, "value": float(value)} for key, value in metrics.items()]
     metrics_csv = run_dir / "metrics.csv"
     with metrics_csv.open("w", newline="") as handle:
@@ -2280,6 +2302,39 @@ def _persist_backtest_outputs(
 
     return run_dir
 
+
+
+def _write_corporate_actions_applied_csv(
+    *,
+    run_dir: Path,
+    timestamps: list[str],
+    symbol_order: list[str],
+    split_factors: np.ndarray | None,
+    dividends: np.ndarray | None,
+) -> None:
+    csv_path = run_dir / "corporate_actions_applied.csv"
+    rows: list[dict[str, object]] = []
+    if split_factors is not None and dividends is not None:
+        split_vals = np.asarray(split_factors, dtype=float)
+        div_vals = np.asarray(dividends, dtype=float)
+        if split_vals.shape == div_vals.shape and split_vals.shape[0] == len(timestamps):
+            for row_idx, ts in enumerate(timestamps):
+                for col_idx, symbol in enumerate(symbol_order):
+                    split = float(split_vals[row_idx, col_idx])
+                    div = float(div_vals[row_idx, col_idx])
+                    if abs(split - 1.0) > 1e-12 or abs(div) > 1e-12:
+                        rows.append(
+                            {
+                                "timestamp": ts,
+                                "symbol": symbol,
+                                "split_factor": split,
+                                "dividend": div,
+                            }
+                        )
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["timestamp", "symbol", "split_factor", "dividend"])
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _write_robustness_report(*, run_dir: Path, robustness_report: dict[str, Any]) -> None:

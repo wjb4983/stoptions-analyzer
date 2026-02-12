@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from data_access.provider_base import DataProvider
+
 import numpy as np
 
 from config import BACKTEST_CACHE_DIR
@@ -42,6 +44,10 @@ class EngineArrayBundle:
     date_index: np.ndarray
     open_prices: np.ndarray
     close_prices: np.ndarray
+    raw_open_prices: np.ndarray
+    raw_close_prices: np.ndarray
+    split_factors: np.ndarray
+    dividends: np.ndarray
     missing_mask: np.ndarray
     metadata: EngineArrayMetadata
 
@@ -100,6 +106,7 @@ def load_canonical_price_arrays(
     timeframe: str = "1m",
     lookback_window: int = 0,
     validate_split_adjustment: bool = True,
+    provider: DataProvider | None = None,
 ) -> EngineArrayBundle:
     """Load aligned open/close arrays and missing mask from local NPZ cache."""
 
@@ -165,6 +172,10 @@ def load_canonical_price_arrays(
 
     open_prices = np.full((aligned_index.size, len(accepted_symbols)), np.nan, dtype=np.float64)
     close_prices = np.full((aligned_index.size, len(accepted_symbols)), np.nan, dtype=np.float64)
+    raw_open_prices = np.full((aligned_index.size, len(accepted_symbols)), np.nan, dtype=np.float64)
+    raw_close_prices = np.full((aligned_index.size, len(accepted_symbols)), np.nan, dtype=np.float64)
+    split_factors = np.ones((aligned_index.size, len(accepted_symbols)), dtype=np.float64)
+    dividends = np.zeros((aligned_index.size, len(accepted_symbols)), dtype=np.float64)
     missing_mask = np.ones((aligned_index.size, len(accepted_symbols)), dtype=bool)
     per_symbol_audit: dict[str, SymbolDatasetAudit] = {}
 
@@ -176,8 +187,14 @@ def load_canonical_price_arrays(
         if ts.size == 0:
             continue
         idx = np.searchsorted(aligned_index, ts)
+        raw_open_prices[idx, col] = open_values
+        raw_close_prices[idx, col] = close_values
         open_prices[idx, col] = open_values
         close_prices[idx, col] = close_values
+        if loaded.split_factors is not None:
+            split_factors[idx, col] = loaded.split_factors
+        if loaded.dividends is not None:
+            dividends[idx, col] = loaded.dividends
         symbol_missing = ~loaded.tradable_mask
         missing_mask[idx, col] = symbol_missing
 
@@ -196,6 +213,26 @@ def load_canonical_price_arrays(
             adjustment_violations=loaded.adjustment_violations,
             delisted=loaded.delisted,
         )
+
+    _apply_provider_corporate_actions(
+        provider=provider,
+        symbols=accepted_symbols,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        aligned_index=aligned_index,
+        symbol_to_column={symbol: idx for idx, symbol in enumerate(accepted_symbols)},
+        split_factors=split_factors,
+        dividends=dividends,
+    )
+
+    adjusted_open_prices, adjusted_close_prices = _build_adjusted_price_views(
+        raw_open_prices=raw_open_prices,
+        raw_close_prices=raw_close_prices,
+        split_factors=split_factors,
+        dividends=dividends,
+    )
+    open_prices = adjusted_open_prices
+    close_prices = adjusted_close_prices
 
     for col, symbol in enumerate(accepted_symbols):
         available_bars = int((~missing_mask[:, col]).sum())
@@ -267,6 +304,10 @@ def load_canonical_price_arrays(
         date_index=aligned_index,
         open_prices=open_prices,
         close_prices=close_prices,
+        raw_open_prices=raw_open_prices,
+        raw_close_prices=raw_close_prices,
+        split_factors=split_factors,
+        dividends=dividends,
         missing_mask=missing_mask,
         metadata=metadata,
     )
@@ -640,6 +681,109 @@ def validate_engine_dataset_contracts(
         survivorship_bias_flags_by_symbol=dict(bundle.metadata.survivorship_bias_flags_by_symbol),
         leakage_flags_by_symbol=dict(bundle.metadata.leakage_flags_by_symbol),
     )
+
+
+
+def _apply_provider_corporate_actions(
+    *,
+    provider: DataProvider | None,
+    symbols: list[str],
+    start_dt: datetime,
+    end_dt: datetime,
+    aligned_index: np.ndarray,
+    symbol_to_column: dict[str, int],
+    split_factors: np.ndarray,
+    dividends: np.ndarray,
+) -> None:
+    if provider is None or aligned_index.size == 0 or not symbols:
+        return
+    actions = provider.get_corporate_actions(symbols=symbols, start=start_dt, end=end_dt)
+    rows = _normalize_action_rows(actions)
+    if not rows:
+        return
+    timestamp_to_row = {int(ts): idx for idx, ts in enumerate(aligned_index.tolist())}
+    for row in rows:
+        symbol = str(row.get("symbol", "")).upper()
+        if symbol not in symbol_to_column:
+            continue
+        action_ts = _normalize_action_timestamp(row.get("action_date"))
+        row_idx = timestamp_to_row.get(action_ts)
+        if row_idx is None:
+            continue
+        col_idx = symbol_to_column[symbol]
+        action_type = str(row.get("action_type", "")).strip().lower()
+        value = float(row.get("value", 0.0) or 0.0)
+        if action_type == "split":
+            ratio = row.get("ratio", value)
+            split_value = float(ratio or 1.0)
+            if split_value > 0:
+                split_factors[row_idx, col_idx] = split_value
+        elif action_type == "dividend":
+            if value >= 0:
+                dividends[row_idx, col_idx] = value
+
+
+def _normalize_action_rows(actions: Any) -> list[dict[str, Any]]:
+    if actions is None:
+        return []
+    if isinstance(actions, list):
+        return [dict(row) for row in actions if isinstance(row, dict)]
+    if hasattr(actions, "to_dict"):
+        try:
+            return [dict(row) for row in actions.to_dict(orient="records")]
+        except Exception:
+            pass
+    if hasattr(actions, "rows"):
+        return [dict(row) for row in getattr(actions, "rows", []) if isinstance(row, dict)]
+    return []
+
+
+def _normalize_action_timestamp(value: Any) -> int:
+    dt = value
+    if isinstance(value, str):
+        dt = datetime.fromisoformat(value)
+    elif isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 10**12:
+            return int(ts)
+        return int(ts * 1000)
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return int(dt.timestamp() * 1000)
+    raise ValueError(f"Unsupported action timestamp type: {type(value)!r}")
+
+
+def _build_adjusted_price_views(
+    *,
+    raw_open_prices: np.ndarray,
+    raw_close_prices: np.ndarray,
+    split_factors: np.ndarray,
+    dividends: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    open_adj = np.asarray(raw_open_prices, dtype=float).copy()
+    close_adj = np.asarray(raw_close_prices, dtype=float).copy()
+    if open_adj.size == 0:
+        return open_adj, close_adj
+    n_rows, n_cols = open_adj.shape
+    for col in range(n_cols):
+        factor = 1.0
+        for row in range(n_rows - 1, -1, -1):
+            if np.isfinite(open_adj[row, col]):
+                open_adj[row, col] = open_adj[row, col] * factor
+            if np.isfinite(close_adj[row, col]):
+                close_adj[row, col] = close_adj[row, col] * factor
+            split = float(split_factors[row, col]) if np.isfinite(split_factors[row, col]) else 1.0
+            close_raw = raw_close_prices[row, col]
+            div = float(dividends[row, col]) if np.isfinite(dividends[row, col]) else 0.0
+            total_return_factor = 1.0
+            if np.isfinite(close_raw) and close_raw > 0.0 and div > 0.0 and div <= close_raw:
+                total_return_factor = (close_raw - div) / close_raw
+            if split > 0:
+                factor *= split * total_return_factor
+    return open_adj, close_adj
 
 def _normalize_datetime(value: datetime | str) -> datetime:
     if isinstance(value, datetime):

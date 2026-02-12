@@ -126,6 +126,8 @@ def backtest_vectorized(
     borrow_available_flags: Any | None = None,
     symbols: list[str] | tuple[str, ...] | None = None,
     dates: Any | None = None,
+    corporate_action_splits: Any | None = None,
+    corporate_action_dividends: Any | None = None,
     time_in_force: str = "gtc",
     urgency: str = "normal",
 ) -> BacktestResult:
@@ -163,6 +165,7 @@ def backtest_vectorized(
     portfolio_weights = _normalize_weights(weights, n_assets)
 
     positions = _shift(signal_values, 1)
+    positions = _apply_split_transforms(positions, corporate_action_splits)
     requested_trades = positions - _shift(positions, 1)
 
     gross_asset_returns = np.zeros_like(price_values, dtype=float)
@@ -246,7 +249,14 @@ def backtest_vectorized(
     )
     borrow_cost = carry_result["portfolio"]
 
-    net_returns = gross_returns - slippage_cost - fee_cost - borrow_cost
+    dividend_returns = _estimate_dividend_return(
+        positions=positions,
+        prices=price_values,
+        dividends=corporate_action_dividends,
+        portfolio_weights=portfolio_weights,
+    )
+
+    net_returns = gross_returns + dividend_returns - slippage_cost - fee_cost - borrow_cost
 
     equity_curve = initial_equity * np.cumprod(1.0 + net_returns)
     pnl = np.zeros_like(equity_curve)
@@ -267,6 +277,7 @@ def backtest_vectorized(
         "borrow": _to_series(borrow_cost, index),
         "borrow_by_asset": _to_aligned_output(carry_result["weighted_by_asset"], index),
         "carry_attribution_by_asset": _to_aligned_output(carry_result["raw_by_asset"], index),
+        "dividend_return": _to_series(dividend_returns, index),
         "total": _to_series(slippage_cost + fee_cost + borrow_cost, index),
         "totals": {
             "slippage": float(np.sum(slippage_cost)),
@@ -304,6 +315,38 @@ def backtest_vectorized(
         ],
         execution_events=replay_lifecycle([event.__dict__ for event in lifecycle_events]),
     )
+
+
+def _apply_split_transforms(positions: np.ndarray, splits: Any | None) -> np.ndarray:
+    if splits is None:
+        return positions
+    split_values = _ensure_2d(np.asarray(splits, dtype=float))
+    if split_values.shape != positions.shape:
+        return positions
+    transformed = np.asarray(positions, dtype=float).copy()
+    for row in range(1, transformed.shape[0]):
+        for col in range(transformed.shape[1]):
+            split = split_values[row, col]
+            if np.isfinite(split) and split > 0.0 and split != 1.0:
+                transformed[row:, col] *= split
+    return transformed
+
+
+def _estimate_dividend_return(
+    *,
+    positions: np.ndarray,
+    prices: np.ndarray,
+    dividends: Any | None,
+    portfolio_weights: np.ndarray,
+) -> np.ndarray:
+    if dividends is None:
+        return np.zeros(positions.shape[0], dtype=float)
+    dividend_values = _ensure_2d(np.asarray(dividends, dtype=float))
+    if dividend_values.shape != positions.shape:
+        return np.zeros(positions.shape[0], dtype=float)
+    valid_prices = np.where(prices > 0.0, prices, np.nan)
+    cash_yield = np.divide(dividend_values, valid_prices, out=np.zeros_like(dividend_values), where=np.isfinite(valid_prices))
+    return np.sum(_shift(positions, 1) * cash_yield * portfolio_weights, axis=1)
 
 
 def _shift(values: np.ndarray, periods: int) -> np.ndarray:
