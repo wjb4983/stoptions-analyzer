@@ -2,10 +2,13 @@
 
 from .diagnostics import compute_signal_diagnostics, validate_signal_diagnostics
 from .options import aggregate_option_exposures, summarize_lifecycle_events
+from .prompt_pack import build_prompt_pack_markdown, write_prompt_pack
 
 __all__ = [
     "aggregate_option_exposures",
     "summarize_lifecycle_events",
     "compute_signal_diagnostics",
     "validate_signal_diagnostics",
+    "build_prompt_pack_markdown",
+    "write_prompt_pack",
 ]

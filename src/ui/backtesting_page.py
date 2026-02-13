@@ -9,6 +9,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from analysis.prompt_pack import write_prompt_pack
 from backtesting.cache_runner import (
     run_multi_signal_backtest,
     run_strategy_optimization,
@@ -587,15 +588,17 @@ class BacktestingPage(ttk.Frame):
         button_row.columnconfigure(0, weight=1)
         button_row.columnconfigure(1, weight=1)
         button_row.columnconfigure(2, weight=1)
+        button_row.columnconfigure(3, weight=1)
 
         ttk.Button(button_row, text="Save Parameters", command=self.save_settings).grid(row=0, column=0, padx=10, pady=4)
         self.run_button = ttk.Button(button_row, text="Run Backtest", command=self.run_backtest)
         self.run_button.grid(row=0, column=1, padx=10, pady=4)
+        ttk.Button(button_row, text="Export Prompt Pack", command=self.export_prompt_pack).grid(row=0, column=2, padx=10, pady=4)
         ttk.Button(
             button_row,
             text="Back to Main Menu",
             command=lambda: controller.show_frame("MainMenu"),
-        ).grid(row=0, column=2, padx=10, pady=4)
+        ).grid(row=0, column=3, padx=10, pady=4)
 
         self._register_advanced_widgets()
         self._bind_validation_watchers()
@@ -1274,6 +1277,49 @@ class BacktestingPage(ttk.Frame):
         self.workflow_reason_var.set("")
         self._refresh_experiment_browser()
         self.experiment_detail_var.set(f"Applied {action} to run {run_id[:12]} with reason logged.")
+
+    def export_prompt_pack(self) -> None:
+        if not self.save_settings(show_confirmation=False):
+            return
+        settings_payload = dict(self.controller.state.backtest_settings or {})
+        recent_outputs = self._collect_prompt_pack_recent_outputs()
+        output_path = write_prompt_pack(
+            output_dir=BACKTEST_OUTPUT_DIR / "prompt_packs",
+            file_stem="backtesting_prompt_pack",
+            title="Backtesting Prompt Pack",
+            config=settings_payload,
+            recent_outputs=recent_outputs,
+        )
+        messagebox.showinfo("Prompt pack exported", f"Saved prompt pack to:\n{output_path}")
+
+    def _collect_prompt_pack_recent_outputs(self) -> dict[str, object]:
+        run_dir: Path | None = None
+        selected = self.experiment_tree.selection()
+        if selected:
+            values = self.experiment_tree.item(selected[0], "values")
+            if len(values) >= 3:
+                run_name = str(values[2])
+                run_dir = next((d for d in self.current_run_dirs if d.name == run_name), None)
+        if run_dir is None and self.current_run_dirs:
+            run_dir = self.current_run_dirs[-1]
+
+        payload: dict[str, object] = {
+            "last_console_output": self._last_output_text[-6000:],
+            "available_run_dirs": [str(path) for path in self.current_run_dirs[-10:]],
+        }
+        if run_dir is None:
+            return payload
+
+        payload["selected_run_dir"] = str(run_dir)
+        payload["selected_run_name"] = run_dir.name
+        payload["metrics"] = self._load_metric_map(run_dir)
+        manifest = self._read_json(run_dir / "manifest.json")
+        payload["manifest"] = manifest if isinstance(manifest, dict) else {}
+        for stem in ("fold_summary", "stress_scenarios", "risk_diagnostics", "drawdown", "trades", "trade_log"):
+            rows = self._load_rows(run_dir, stem)
+            if rows:
+                payload[f"{stem}_sample"] = rows[:25]
+        return payload
 
     def _export_selected_review_packet(self) -> None:
         selected = self.experiment_tree.selection()

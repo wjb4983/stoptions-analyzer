@@ -24,6 +24,7 @@ from analysis.cross_sectional import (
     STRATEGY_REGISTRY,
     compute_cross_sectional_momentum,
 )
+from analysis.prompt_pack import write_prompt_pack
 from analysis.reporting import format_cross_sectional_report, format_time_series_report
 from analysis.time_series import (
     TIME_SERIES_STRATEGY_REGISTRY,
@@ -79,6 +80,8 @@ class GeneralAnalysisPage(ttk.Frame):
         self._last_request_time = 0.0
         self._min_request_interval = 0.05
         self._grouped_ticker_pattern = re.compile(r"^[A-Z0-9]+$")
+        self._latest_combined_report = ""
+        self._latest_report_path = ""
 
         header = ttk.Label(self, text="General Analysis", font=("Arial", 18, "bold"))
         header.pack(pady=10)
@@ -223,11 +226,14 @@ class GeneralAnalysisPage(ttk.Frame):
         ttk.Button(button_row, text="Run Analysis", command=self.run_analysis).grid(
             row=0, column=0, padx=10
         )
+        ttk.Button(button_row, text="Export Prompt Pack", command=self.export_prompt_pack).grid(
+            row=0, column=1, padx=10
+        )
         ttk.Button(
             button_row,
             text="Back to Main Menu",
             command=lambda: controller.show_frame("MainMenu"),
-        ).grid(row=0, column=1, padx=10)
+        ).grid(row=0, column=2, padx=10)
 
         output_frame = ttk.LabelFrame(self, text="Latest Analysis Output")
         output_frame.pack(padx=40, pady=(5, 15), fill="both", expand=True)
@@ -407,10 +413,31 @@ class GeneralAnalysisPage(ttk.Frame):
 
         analysis_slug = "combined" if len(report_labels) > 1 else report_labels[0]
         output_path = self._write_report(combined_report, output_dir, strategy, analysis_slug)
+        self._latest_combined_report = combined_report
+        self._latest_report_path = str(output_path)
         messagebox.showinfo(
             "Analysis complete",
             f"{analysis_type} {strategy.lower()} results written to:\n{output_path}",
         )
+
+    def export_prompt_pack(self) -> None:
+        output_dir = self.output_dir_var.get().strip() or str(ANALYSIS_OUTPUT_DIR)
+        prompt_dir = Path(output_dir) / "prompt_packs"
+        settings_payload = dict(DEFAULT_GENERAL_ANALYSIS_SETTINGS)
+        settings_payload.update(self.controller.state.general_analysis_settings or {})
+        recent_outputs = {
+            "latest_report_path": self._latest_report_path,
+            "latest_report_excerpt": self._latest_combined_report[:4000],
+            "tickers": list(self.controller.state.tickers),
+        }
+        output_path = write_prompt_pack(
+            output_dir=prompt_dir,
+            file_stem="analysis_prompt_pack",
+            title="General Analysis Prompt Pack",
+            config=settings_payload,
+            recent_outputs=recent_outputs,
+        )
+        messagebox.showinfo("Prompt pack exported", f"Saved prompt pack to:\n{output_path}")
 
     def _selected_strategy_key(self) -> str:
         label = self.cross_sectional_var.get()
