@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 
@@ -85,3 +87,86 @@ def rolling_dynamic_ensemble(
         )
         blended[idx] = float(np.dot(sig[idx, :], weights))
     return blended
+
+
+@dataclass(frozen=True)
+class RegimeMetaPolicyConfig:
+    strategy_names: tuple[str, ...]
+    regime_weight_map: dict[str, tuple[float, ...]]
+    default_weights: tuple[float, ...] | None = None
+    turnover_limit: float = 0.35
+    max_weight: float = 0.75
+    min_weight: float = 0.0
+
+
+def _normalize_with_constraints(
+    weights: np.ndarray,
+    *,
+    min_weight: float,
+    max_weight: float,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    clipped = np.clip(np.asarray(weights, dtype=float), float(min_weight), float(max_weight))
+    total = float(np.sum(clipped))
+    if total <= eps:
+        return np.full(clipped.shape, 1.0 / max(1, clipped.size), dtype=float)
+    return clipped / total
+
+
+def build_regime_weight_schedule(
+    *,
+    regime_labels: np.ndarray,
+    config: RegimeMetaPolicyConfig,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    labels = np.asarray(regime_labels, dtype=object)
+    n_periods = labels.size
+    n_strategies = len(config.strategy_names)
+    if n_strategies <= 0:
+        raise ValueError("config.strategy_names must be non-empty")
+
+    if config.default_weights is None:
+        base = np.full(n_strategies, 1.0 / n_strategies, dtype=float)
+    else:
+        if len(config.default_weights) != n_strategies:
+            raise ValueError("default_weights must match strategy_names length")
+        base = np.asarray(config.default_weights, dtype=float)
+
+    max_turnover = max(0.0, float(config.turnover_limit))
+    prev = _normalize_with_constraints(base, min_weight=config.min_weight, max_weight=config.max_weight)
+    schedule = np.zeros((n_periods, n_strategies), dtype=float)
+    turnover = np.zeros(n_periods, dtype=float)
+
+    for idx in range(n_periods):
+        label = str(labels[idx])
+        proposed = config.regime_weight_map.get(label)
+        raw = np.asarray(proposed if proposed is not None else prev, dtype=float)
+        if raw.size != n_strategies:
+            raise ValueError(f"regime vector length mismatch for {label}")
+        target = _normalize_with_constraints(raw, min_weight=config.min_weight, max_weight=config.max_weight)
+
+        diff = target - prev
+        step_turnover = float(np.sum(np.abs(diff)))
+        if step_turnover > max_turnover and step_turnover > 0.0:
+            target = prev + diff * (max_turnover / step_turnover)
+            target = _normalize_with_constraints(target, min_weight=config.min_weight, max_weight=config.max_weight)
+            step_turnover = float(np.sum(np.abs(target - prev)))
+
+        turnover[idx] = step_turnover
+        schedule[idx] = target
+        prev = target
+
+    diagnostics = {
+        "meta_turnover": turnover,
+        "meta_concentration": np.max(schedule, axis=1) if n_periods else np.array([], dtype=float),
+    }
+    return schedule, diagnostics
+
+
+def apply_weight_schedule(strategy_sleeves: np.ndarray, weight_schedule: np.ndarray) -> np.ndarray:
+    sleeves = np.asarray(strategy_sleeves, dtype=float)
+    weights = np.asarray(weight_schedule, dtype=float)
+    if sleeves.ndim != 2 or weights.ndim != 2:
+        raise ValueError("strategy_sleeves and weight_schedule must be 2D arrays")
+    if sleeves.shape != weights.shape:
+        raise ValueError("strategy_sleeves and weight_schedule must have matching shape")
+    return np.sum(sleeves * weights, axis=1)
