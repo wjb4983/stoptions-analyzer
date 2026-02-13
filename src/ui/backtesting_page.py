@@ -32,7 +32,7 @@ ENTRY_SIGNALS = ["ts_momentum", "ma_trend", "breakout"]
 EXIT_SIGNALS = ["none", "momentum_flip", "trailing_stop", "max_hold"]
 STRATEGIES = ["momentum", "xsmom"]
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
-PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization"]
+PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization", "hrp", "herc"]
 EXECUTION_MODELS = ["bps", "spread", "participation", "square_root", "latency_drift", "modular", "volatility_scaled"]
 
 TIMEFRAME_HISTORY_DAYS = {"1m": 14, "5m": 30, "15m": 60, "30m": 120, "1h": 365, "1d": 3650}
@@ -257,6 +257,29 @@ class BacktestingPage(ttk.Frame):
         self.portfolio_max_sector_var = tk.StringVar(value="0.60")
         self.portfolio_max_sector_entry = ttk.Entry(strategy_frame, textvariable=self.portfolio_max_sector_var)
         self.portfolio_max_sector_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Rebalance Frequency (bars)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_rebalance_frequency_var = tk.StringVar(value="1")
+        self.portfolio_rebalance_frequency_entry = ttk.Entry(strategy_frame, textvariable=self.portfolio_rebalance_frequency_var)
+        self.portfolio_rebalance_frequency_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Cluster Linkage").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_clustering_linkage_var = tk.StringVar(value="single")
+        self.portfolio_clustering_linkage_combo = ttk.Combobox(
+            strategy_frame,
+            textvariable=self.portfolio_clustering_linkage_var,
+            state="readonly",
+            values=["single", "complete", "average", "ward"],
+        )
+        self.portfolio_clustering_linkage_combo.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Covariance Shrinkage Strength").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_covariance_shrinkage_var = tk.StringVar(value="0.15")
+        self.portfolio_covariance_shrinkage_entry = ttk.Entry(strategy_frame, textvariable=self.portfolio_covariance_shrinkage_var)
+        self.portfolio_covariance_shrinkage_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Max Gross Exposure").grid(row=row, column=0, sticky="w", padx=8, pady=6)
@@ -1583,6 +1606,9 @@ class BacktestingPage(ttk.Frame):
             "portfolio_target_vol": self.portfolio_target_vol_entry,
             "portfolio_max_symbol": self.portfolio_max_symbol_entry,
             "portfolio_max_sector": self.portfolio_max_sector_entry,
+            "portfolio_rebalance_frequency": self.portfolio_rebalance_frequency_entry,
+            "portfolio_clustering_linkage": self.portfolio_clustering_linkage_combo,
+            "portfolio_covariance_shrinkage": self.portfolio_covariance_shrinkage_entry,
             "portfolio_max_gross": self.portfolio_max_gross_entry,
             "portfolio_min_net": self.portfolio_min_net_entry,
             "portfolio_max_net": self.portfolio_max_net_entry,
@@ -1737,6 +1763,9 @@ class BacktestingPage(ttk.Frame):
         self.portfolio_target_vol_var.set(str(settings.get("portfolio_target_volatility", "0.10")))
         self.portfolio_max_symbol_var.set(str(settings.get("portfolio_max_symbol_weight", "0.25")))
         self.portfolio_max_sector_var.set(str(settings.get("portfolio_max_sector_weight", "0.60")))
+        self.portfolio_rebalance_frequency_var.set(str(settings.get("portfolio_rebalance_frequency_bars", "1")))
+        self.portfolio_clustering_linkage_var.set(str(settings.get("portfolio_clustering_linkage", "single")))
+        self.portfolio_covariance_shrinkage_var.set(str(settings.get("portfolio_covariance_shrinkage", "0.15")))
         self.portfolio_max_gross_var.set(str(settings.get("portfolio_max_gross_exposure", "1.0")))
         self.portfolio_min_net_var.set(str(settings.get("portfolio_min_net_exposure", "-1.0")))
         self.portfolio_max_net_var.set(str(settings.get("portfolio_max_net_exposure", "1.0")))
@@ -1862,6 +1891,9 @@ class BacktestingPage(ttk.Frame):
             "portfolio_target_volatility": self.portfolio_target_vol_var.get().strip() or "0.10",
             "portfolio_max_symbol_weight": self.portfolio_max_symbol_var.get().strip() or "0.25",
             "portfolio_max_sector_weight": self.portfolio_max_sector_var.get().strip() or "0.60",
+            "portfolio_rebalance_frequency_bars": self.portfolio_rebalance_frequency_var.get().strip() or "1",
+            "portfolio_clustering_linkage": self.portfolio_clustering_linkage_var.get().strip() or "single",
+            "portfolio_covariance_shrinkage": self.portfolio_covariance_shrinkage_var.get().strip() or "0.15",
             "portfolio_max_gross_exposure": self.portfolio_max_gross_var.get().strip() or "1.0",
             "portfolio_min_net_exposure": self.portfolio_min_net_var.get().strip() or "-1.0",
             "portfolio_max_net_exposure": self.portfolio_max_net_var.get().strip() or "1.0",
@@ -1930,6 +1962,8 @@ class BacktestingPage(ttk.Frame):
         parsed_target_vol = parse_float(self.portfolio_target_vol_var.get())
         parsed_max_symbol = parse_float(self.portfolio_max_symbol_var.get())
         parsed_max_sector = parse_float(self.portfolio_max_sector_var.get())
+        parsed_rebalance_frequency = parse_float(self.portfolio_rebalance_frequency_var.get())
+        parsed_cov_shrinkage = parse_float(self.portfolio_covariance_shrinkage_var.get())
         parsed_max_gross = parse_float(self.portfolio_max_gross_var.get())
         parsed_min_net = parse_float(self.portfolio_min_net_var.get())
         parsed_max_net = parse_float(self.portfolio_max_net_var.get())
@@ -1943,6 +1977,9 @@ class BacktestingPage(ttk.Frame):
             "portfolio_target_volatility": float(parsed_target_vol) if parsed_target_vol is not None else 0.10,
             "portfolio_max_symbol_weight": float(parsed_max_symbol) if parsed_max_symbol is not None else 0.25,
             "portfolio_max_sector_weight": float(parsed_max_sector) if parsed_max_sector is not None else 0.60,
+            "portfolio_rebalance_frequency_bars": int(parsed_rebalance_frequency) if parsed_rebalance_frequency is not None else 1,
+            "portfolio_clustering_linkage": self.portfolio_clustering_linkage_var.get().strip() or "single",
+            "portfolio_covariance_shrinkage": float(parsed_cov_shrinkage) if parsed_cov_shrinkage is not None else 0.15,
             "portfolio_max_gross_exposure": float(parsed_max_gross) if parsed_max_gross is not None else 1.0,
             "portfolio_min_net_exposure": float(parsed_min_net) if parsed_min_net is not None else -1.0,
             "portfolio_max_net_exposure": float(parsed_max_net) if parsed_max_net is not None else 1.0,
