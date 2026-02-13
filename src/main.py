@@ -8,6 +8,7 @@ from ui import (
     CallPutAnalysisPage,
     GeneralAnalysisPage,
     MainMenu,
+    ResearchLabPage,
     SpreadAnalysisPage,
     TickerEntryPage,
     TickerSelectPage,
@@ -31,6 +32,7 @@ class StoptionsApp(tk.Tk):
         self.frames: dict[str, ttk.Frame] = {}
         for frame_cls in (
             MainMenu,
+            ResearchLabPage,
             BacktestingPage,
             TickerEntryPage,
             TickerSelectPage,
