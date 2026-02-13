@@ -60,20 +60,46 @@ class Position:
     average_price: float = 0.0
 
     def apply_fill(self, fill: Fill) -> None:
-        """Apply a fill to update quantity and volume-weighted average price."""
+        """Apply a fill with explicit add, reduce, and reversal handling."""
 
         signed_qty = fill.order.quantity if fill.order.side == "buy" else -fill.order.quantity
-        new_qty = self.quantity + signed_qty
-        if new_qty == 0:
+        if signed_qty == 0:
+            return
+
+        current_qty = self.quantity
+        if current_qty == 0:
+            self.quantity = signed_qty
+            self.average_price = fill.price
+            return
+
+        same_side = current_qty * signed_qty > 0
+        if same_side:
+            # Add-to-same-side: update VWAP entry.
+            new_qty = current_qty + signed_qty
+            weighted_cost = self.average_price * current_qty + fill.price * signed_qty
+            self.quantity = new_qty
+            self.average_price = weighted_cost / new_qty
+            return
+
+        fill_abs = abs(signed_qty)
+        current_abs = abs(current_qty)
+        if fill_abs < current_abs:
+            # Reduce-without-crossing: realize PnL externally via cash; keep entry basis unchanged.
+            self.quantity = current_qty + signed_qty
+            return
+
+        if fill_abs == current_abs:
+            # Fully close to flat.
             self.quantity = 0.0
             self.average_price = 0.0
             return
-        if self.quantity == 0:
-            self.average_price = fill.price
-        else:
-            weighted_cost = self.average_price * self.quantity + fill.price * signed_qty
-            self.average_price = weighted_cost / new_qty
-        self.quantity = new_qty
+
+        # Cross-through-zero reversal:
+        # 1) Closing leg flattens existing position (realized PnL bookkeeping remains separate).
+        # 2) Opening residual establishes new opposite-side position at execution price.
+        opening_residual = fill_abs - current_abs
+        self.quantity = opening_residual if signed_qty > 0 else -opening_residual
+        self.average_price = fill.price
 
 
 @dataclass
