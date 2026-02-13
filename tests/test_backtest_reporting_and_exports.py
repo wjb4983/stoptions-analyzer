@@ -131,6 +131,8 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "metric_schema_version.txt",
         "robustness_report.json",
         "robustness_report.csv",
+        "capacity_frontier.json",
+        "capacity_frontier.csv",
     ]:
         assert (run_dir / name).exists(), name
 
@@ -162,7 +164,9 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     capacity = robustness["capacity_diagnostics"]
     assert "expected_slippage_curve" in capacity
     assert "performance_degradation_curve" in capacity
+    assert "capacity_frontier" in capacity
     assert len(capacity["expected_slippage_curve"]) > 0
+    assert len(capacity["capacity_frontier"]) > 0
 
     report_txt = (run_dir / "report.txt").read_text()
     assert "Bootstrap Confidence Intervals" in report_txt

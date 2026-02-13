@@ -610,14 +610,19 @@ class BacktestingPage(ttk.Frame):
         cost_pane.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
         cost_frame = ttk.Labelframe(cost_pane, text="Risk/Cost Attribution")
         turnover_frame = ttk.Labelframe(cost_pane, text="Turnover by Symbol/Sector")
+        capacity_frame = ttk.Labelframe(cost_pane, text="Capacity Frontier (Net Alpha bps)")
         cost_pane.add(cost_frame, weight=1)
         cost_pane.add(turnover_frame, weight=1)
+        cost_pane.add(capacity_frame, weight=1)
         cost_frame.columnconfigure(0, weight=1)
         turnover_frame.columnconfigure(0, weight=1)
+        capacity_frame.columnconfigure(0, weight=1)
         self.cost_canvas = tk.Canvas(cost_frame, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
         self.cost_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
         self.turnover_canvas = tk.Canvas(turnover_frame, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
         self.turnover_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.capacity_canvas = tk.Canvas(capacity_frame, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.capacity_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
 
         wf_tab = ttk.Frame(self.section_notebook)
         wf_tab.columnconfigure(0, weight=1)
@@ -1254,6 +1259,21 @@ class BacktestingPage(ttk.Frame):
             aggregate[sym] = aggregate.get(sym, 0.0) + val
         ordered = sorted(aggregate.items(), key=lambda kv: kv[1], reverse=True)
         self._draw_bar_canvas(self.turnover_canvas, ordered[:10], color="#2ca02c")
+
+        frontier_rows = self._read_json(run_dir / "capacity_frontier.json")
+        if isinstance(frontier_rows, list):
+            points = []
+            for row in frontier_rows:
+                if not isinstance(row, dict):
+                    continue
+                x = self._safe_float(row.get("aum_scale"))
+                y = self._safe_float(row.get("expected_alpha_net_cost_bps"))
+                if x is not None and y is not None:
+                    points.append((x, y))
+            points.sort(key=lambda item: item[0])
+            self._draw_line_canvas(self.capacity_canvas, [val for _, val in points], color="#1f77b4")
+        else:
+            self._draw_line_canvas(self.capacity_canvas, [], color="#1f77b4")
 
     def _refresh_wf_fraction_labels(self) -> None:
         self.wf_train_fraction_label.config(text=f"{float(self.wf_train_fraction_var.get()):.2f}")

@@ -2487,6 +2487,7 @@ def _persist_backtest_outputs(
 
     if robustness_report is not None:
         _write_robustness_report(run_dir=run_dir, robustness_report=robustness_report)
+        _write_capacity_frontier_artifacts(run_dir=run_dir, robustness_report=robustness_report)
     if scenario_payload is not None:
         (run_dir / "stress_scenarios.json").write_text(json.dumps(scenario_payload, indent=2))
 
@@ -2575,6 +2576,23 @@ def _write_corporate_actions_applied_csv(
         writer = csv.DictWriter(handle, fieldnames=["timestamp", "symbol", "split_factor", "dividend"])
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_capacity_frontier_artifacts(*, run_dir: Path, robustness_report: dict[str, Any]) -> None:
+    capacity = robustness_report.get("capacity_diagnostics", {}) if isinstance(robustness_report, dict) else {}
+    frontier = capacity.get("capacity_frontier", []) if isinstance(capacity, dict) else []
+    if not isinstance(frontier, list) or not frontier:
+        return
+    normalized = [row for row in frontier if isinstance(row, dict)]
+    if not normalized:
+        return
+    (run_dir / "capacity_frontier.json").write_text(json.dumps(normalized, indent=2))
+    fieldnames = sorted({key for row in normalized for key in row.keys()})
+    with (run_dir / "capacity_frontier.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in normalized:
+            writer.writerow(row)
 
 
 def _write_robustness_report(*, run_dir: Path, robustness_report: dict[str, Any]) -> None:

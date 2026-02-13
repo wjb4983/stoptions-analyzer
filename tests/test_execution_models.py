@@ -10,10 +10,12 @@ from src.backtesting.execution import (
     ParticipationImpactSlippage,
     SpreadSlippage,
     VolatilityScaledSlippage,
+    build_child_order_trajectory,
     calibrate_impact_coefficient_bps,
     load_impact_calibration_buckets,
     load_slippage_calibration_snapshots,
     select_slippage_calibration_snapshot,
+    simulate_alpha_decay_pnl,
 )
 from src.backtesting.cache_runner import _build_slippage_model
 from src.backtesting.vectorized import backtest_vectorized
@@ -234,3 +236,50 @@ def test_slippage_snapshot_uses_latest_stable_snapshot(tmp_path) -> None:
     assert selection.source == "snapshot"
     assert selection.effective_date == "2024-02-01"
     assert model.impact_coefficient_bps == 25.0
+
+
+def test_scheduler_trajectories_sum_to_parent_notional() -> None:
+    parent = 120.0
+    volume = np.array([1.0, 2.0, 3.0, 4.0], dtype=float)
+    for scheduler in ("twap", "vwap", "pov", "arrival_price"):
+        traj = build_child_order_trajectory(
+            parent_size=parent,
+            horizon_bars=4,
+            scheduler=scheduler,
+            volume_profile=volume,
+            pov_rate=0.3,
+        )
+        assert np.isclose(np.sum(traj.child_sizes), parent)
+        assert np.isclose(np.sum(traj.schedule_weights), 1.0)
+
+
+def test_alpha_decay_net_pnl_degrades_with_longer_horizon() -> None:
+    short_horizon = simulate_alpha_decay_pnl(
+        parent_size=100.0,
+        arrival_price=100.0,
+        scheduler="twap",
+        horizon_bars=2,
+        alpha_bps=25.0,
+        alpha_half_life_bars=2.0,
+        slippage_bps=2.0,
+        fee_bps=0.5,
+    )
+    long_horizon = simulate_alpha_decay_pnl(
+        parent_size=100.0,
+        arrival_price=100.0,
+        scheduler="twap",
+        horizon_bars=8,
+        alpha_bps=25.0,
+        alpha_half_life_bars=2.0,
+        slippage_bps=2.0,
+        fee_bps=0.5,
+    )
+    assert float(long_horizon["realized_alpha_bps"]) < float(short_horizon["realized_alpha_bps"])
+    assert float(long_horizon["net_pnl"]) < float(short_horizon["net_pnl"])
+
+
+def test_arrival_price_schedule_front_loads_execution() -> None:
+    arrival = build_child_order_trajectory(parent_size=100.0, horizon_bars=6, scheduler="arrival_price", arrival_urgency=3.0)
+    twap = build_child_order_trajectory(parent_size=100.0, horizon_bars=6, scheduler="twap")
+    assert arrival.schedule_weights[0] > twap.schedule_weights[0]
+    assert arrival.schedule_weights[-1] < twap.schedule_weights[-1]
