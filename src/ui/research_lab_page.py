@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import json
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 import tkinter as tk
@@ -14,7 +15,20 @@ from backtesting.cache_runner import (
     run_walk_forward_backtest,
 )
 from config import BACKTEST_OUTPUT_DIR, DEFAULT_BACKTEST_SETTINGS
-from utils.parsing import normalize_cache_root, parse_date
+from utils.parsing import normalize_cache_root, parse_date, parse_float
+
+
+@dataclass
+class ResearchWorkflowConfig:
+    entry_signals: list[str]
+    exit_signals: list[str]
+    optimization_n_trials: int
+    optimization_sampler: str
+    train_fraction: float
+    validation_fraction: float
+    test_fraction: float
+    step_fraction: float
+    stress_controls: dict[str, object]
 
 
 class ResearchLabPage(ttk.Frame):
@@ -23,6 +37,9 @@ class ResearchLabPage(ttk.Frame):
         self.controller = controller
         self._is_running = False
         self._research_lab_dir = BACKTEST_OUTPUT_DIR / "research_lab"
+        self._sampler_options = ("tpe", "bayesian", "random")
+        self._signal_options = ("ts_momentum", "ma_trend", "breakout")
+        self._exit_signal_options = ("none", "momentum_flip", "trailing_stop", "max_hold")
 
         ttk.Label(self, text="Research Lab", font=("Arial", 18, "bold")).pack(pady=(12, 8))
         ttk.Label(
@@ -89,6 +106,8 @@ class ResearchLabPage(ttk.Frame):
             action=self.run_hypothesis_pipeline,
         )
 
+        self._build_workflow_controls()
+
         button_row = ttk.Frame(self)
         button_row.pack(pady=(16, 8))
         ttk.Button(
@@ -128,7 +147,100 @@ class ResearchLabPage(ttk.Frame):
         self.output_text.insert(tk.END, f"{text}\n")
         self.output_text.see(tk.END)
 
-    def _start_worker(self, target: Callable[[dict[str, Any]], str], label: str) -> None:
+    def _build_workflow_controls(self) -> None:
+        controls = ttk.LabelFrame(self, text="Workflow Controls")
+        controls.pack(fill="x", padx=40, pady=(6, 8))
+        controls.columnconfigure(1, weight=1)
+
+        self.entry_signals_var = tk.StringVar(value="ts_momentum, breakout")
+        self.exit_signals_var = tk.StringVar(value="none, momentum_flip")
+        self.optimization_trials_var = tk.StringVar(value="20")
+        self.optimization_sampler_var = tk.StringVar(value="tpe")
+        self.wf_train_fraction_var = tk.StringVar(value="0.70")
+        self.wf_validation_fraction_var = tk.StringVar(value="0.15")
+        self.wf_test_fraction_var = tk.StringVar(value="0.15")
+        self.wf_step_fraction_var = tk.StringVar(value="0.15")
+
+        self.stress_enable_historical_replay_var = tk.BooleanVar(value=True)
+        self.stress_historical_window_fraction_var = tk.StringVar(value="0.20")
+        self.stress_historical_replay_window_bars_var = tk.StringVar(value="20")
+        self.stress_synthetic_jump_magnitude_var = tk.StringVar(value="0.02")
+        self.stress_synthetic_jump_interval_var = tk.StringVar(value="7")
+        self.stress_synthetic_vol_cluster_multiplier_var = tk.StringVar(value="1.6")
+        self.stress_overlay_spread_multiplier_var = tk.StringVar(value="2.5")
+        self.stress_overlay_liquidity_multiplier_var = tk.StringVar(value="0.4")
+
+        row = 0
+        ttk.Label(controls, text="Entry signals (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        ttk.Entry(controls, textvariable=self.entry_signals_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+
+        row += 1
+        ttk.Label(controls, text="Exit signals (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        ttk.Entry(controls, textvariable=self.exit_signals_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+
+        row += 1
+        ttk.Label(controls, text="Optimization trials / sampler").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        optimization_row = ttk.Frame(controls)
+        optimization_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(optimization_row, textvariable=self.optimization_trials_var, width=8).pack(side="left")
+        ttk.Label(optimization_row, text=" / ").pack(side="left")
+        ttk.Combobox(
+            optimization_row,
+            textvariable=self.optimization_sampler_var,
+            values=self._sampler_options,
+            state="readonly",
+            width=12,
+        ).pack(side="left")
+
+        row += 1
+        ttk.Label(controls, text="Walk-forward train/val/test/step").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        wf_row = ttk.Frame(controls)
+        wf_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(wf_row, textvariable=self.wf_train_fraction_var, width=6).pack(side="left")
+        ttk.Label(wf_row, text=" / ").pack(side="left")
+        ttk.Entry(wf_row, textvariable=self.wf_validation_fraction_var, width=6).pack(side="left")
+        ttk.Label(wf_row, text=" / ").pack(side="left")
+        ttk.Entry(wf_row, textvariable=self.wf_test_fraction_var, width=6).pack(side="left")
+        ttk.Label(wf_row, text=" / ").pack(side="left")
+        ttk.Entry(wf_row, textvariable=self.wf_step_fraction_var, width=6).pack(side="left")
+
+        row += 1
+        ttk.Label(controls, text="Stress: Replay/Jump/Overlay").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        stress_row = ttk.Frame(controls)
+        stress_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Checkbutton(
+            stress_row,
+            text="Historical replay regimes",
+            variable=self.stress_enable_historical_replay_var,
+        ).pack(side="left")
+
+        row += 1
+        ttk.Label(controls, text="Stress window frac / replay bars").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        stress_row2 = ttk.Frame(controls)
+        stress_row2.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(stress_row2, textvariable=self.stress_historical_window_fraction_var, width=8).pack(side="left")
+        ttk.Label(stress_row2, text=" / ").pack(side="left")
+        ttk.Entry(stress_row2, textvariable=self.stress_historical_replay_window_bars_var, width=8).pack(side="left")
+
+        row += 1
+        ttk.Label(controls, text="Stress jump mag / interval / vol cluster").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        stress_row3 = ttk.Frame(controls)
+        stress_row3.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(stress_row3, textvariable=self.stress_synthetic_jump_magnitude_var, width=8).pack(side="left")
+        ttk.Label(stress_row3, text=" / ").pack(side="left")
+        ttk.Entry(stress_row3, textvariable=self.stress_synthetic_jump_interval_var, width=8).pack(side="left")
+        ttk.Label(stress_row3, text=" / ").pack(side="left")
+        ttk.Entry(stress_row3, textvariable=self.stress_synthetic_vol_cluster_multiplier_var, width=8).pack(side="left")
+
+        row += 1
+        ttk.Label(controls, text="Stress overlay spread / liquidity").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        stress_row4 = ttk.Frame(controls)
+        stress_row4.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(stress_row4, textvariable=self.stress_overlay_spread_multiplier_var, width=8).pack(side="left")
+        ttk.Label(stress_row4, text=" / ").pack(side="left")
+        ttk.Entry(stress_row4, textvariable=self.stress_overlay_liquidity_multiplier_var, width=8).pack(side="left")
+
+    def _start_worker(self, target: Callable[[dict[str, Any], ResearchWorkflowConfig], str], label: str) -> None:
         if self._is_running:
             messagebox.showinfo("Run in progress", "Wait for the current Research Lab run to finish.")
             return
@@ -136,13 +248,16 @@ class ResearchLabPage(ttk.Frame):
         context = self._build_common_context()
         if context is None:
             return
+        config = self._build_workflow_config()
+        if config is None:
+            return
 
         self._is_running = True
         self._append_output(f"Starting: {label}")
 
         def worker() -> None:
             try:
-                output = target(context)
+                output = target(context, config)
             except Exception as exc:
                 output = f"Research workflow failed: {exc}"
             self.after(0, lambda: self._finish_worker(output))
@@ -201,9 +316,86 @@ class ResearchLabPage(ttk.Frame):
     def open_governance_workspace(self) -> None:
         self.controller.show_frame("BacktestingPage")
 
-    def _build_signal_grids(self, context: dict[str, Any]) -> tuple[dict[str, list[dict[str, object]]], dict[str, list[dict[str, object]]], dict[str, list[object]]]:
-        entry_grid = {"ts_momentum": [{}], "breakout": [{}]}
-        exit_grid = {"none": [{}], "momentum_flip": [{}]}
+    def _parse_signal_csv(self, raw_text: str, *, valid_options: tuple[str, ...], field_name: str) -> list[str] | None:
+        parsed = [item.strip() for item in raw_text.split(",") if item.strip()]
+        if not parsed:
+            messagebox.showinfo("Invalid input", f"{field_name} must include at least one signal.")
+            return None
+        invalid = [item for item in parsed if item not in valid_options]
+        if invalid:
+            messagebox.showinfo("Invalid input", f"Unsupported {field_name.lower()}: {', '.join(invalid)}")
+            return None
+        return parsed
+
+    def _build_workflow_config(self) -> ResearchWorkflowConfig | None:
+        entry_signals = self._parse_signal_csv(
+            self.entry_signals_var.get().strip(),
+            valid_options=self._signal_options,
+            field_name="Entry signals",
+        )
+        if entry_signals is None:
+            return None
+
+        exit_signals = self._parse_signal_csv(
+            self.exit_signals_var.get().strip(),
+            valid_options=self._exit_signal_options,
+            field_name="Exit signals",
+        )
+        if exit_signals is None:
+            return None
+
+        n_trials = int(parse_float(self.optimization_trials_var.get()) or 20)
+        if n_trials <= 0:
+            messagebox.showinfo("Invalid input", "Optimization trials must be greater than zero.")
+            return None
+
+        sampler = self.optimization_sampler_var.get().strip().lower() or "tpe"
+        if sampler not in self._sampler_options:
+            messagebox.showinfo("Invalid input", "Optimization sampler must be one of: tpe, bayesian, random.")
+            return None
+
+        train_fraction = float(parse_float(self.wf_train_fraction_var.get()) or 0.70)
+        validation_fraction = float(parse_float(self.wf_validation_fraction_var.get()) or 0.15)
+        test_fraction = float(parse_float(self.wf_test_fraction_var.get()) or 0.15)
+        step_fraction = float(parse_float(self.wf_step_fraction_var.get()) or 0.15)
+
+        if any(frac <= 0.0 for frac in (train_fraction, validation_fraction, test_fraction, step_fraction)):
+            messagebox.showinfo("Invalid input", "Walk-forward fractions must all be positive.")
+            return None
+        if abs((train_fraction + validation_fraction + test_fraction) - 1.0) > 1e-6:
+            messagebox.showinfo("Invalid input", "Walk-forward train + validation + test fractions must sum to 1.0.")
+            return None
+
+        stress_controls = {
+            "enable_historical_replay_regimes": bool(self.stress_enable_historical_replay_var.get()),
+            "historical_window_fraction": float(parse_float(self.stress_historical_window_fraction_var.get()) or 0.20),
+            "historical_replay_window_bars": int(parse_float(self.stress_historical_replay_window_bars_var.get()) or 20),
+            "synthetic_jump_magnitude": float(parse_float(self.stress_synthetic_jump_magnitude_var.get()) or 0.02),
+            "synthetic_jump_interval": int(parse_float(self.stress_synthetic_jump_interval_var.get()) or 7),
+            "synthetic_vol_cluster_multiplier": float(parse_float(self.stress_synthetic_vol_cluster_multiplier_var.get()) or 1.6),
+            "overlay_spread_multiplier": float(parse_float(self.stress_overlay_spread_multiplier_var.get()) or 2.5),
+            "overlay_liquidity_multiplier": float(parse_float(self.stress_overlay_liquidity_multiplier_var.get()) or 0.4),
+        }
+
+        return ResearchWorkflowConfig(
+            entry_signals=entry_signals,
+            exit_signals=exit_signals,
+            optimization_n_trials=n_trials,
+            optimization_sampler=sampler,
+            train_fraction=train_fraction,
+            validation_fraction=validation_fraction,
+            test_fraction=test_fraction,
+            step_fraction=step_fraction,
+            stress_controls=stress_controls,
+        )
+
+    def _build_signal_grids(
+        self,
+        context: dict[str, Any],
+        config: ResearchWorkflowConfig,
+    ) -> tuple[dict[str, list[dict[str, object]]], dict[str, list[dict[str, object]]], dict[str, list[object]]]:
+        entry_grid = {signal: [{}] for signal in config.entry_signals}
+        exit_grid = {signal: [{}] for signal in config.exit_signals}
         core_grid = {
             "lookback_days": [int(context["lookback"])],
             "skip_days": [int(context["skip"])],
@@ -211,8 +403,8 @@ class ResearchLabPage(ttk.Frame):
         }
         return entry_grid, exit_grid, core_grid
 
-    def _run_walk_forward_workflow(self, context: dict[str, Any]) -> str:
-        entry_grid, exit_grid, core_grid = self._build_signal_grids(context)
+    def _run_walk_forward_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
+        entry_grid, exit_grid, core_grid = self._build_signal_grids(context, config)
         return run_walk_forward_backtest(
             tickers=list(context["tickers"]),
             start_date=context["start_date"],
@@ -221,15 +413,16 @@ class ResearchLabPage(ttk.Frame):
             entry_grid=entry_grid,
             exit_grid=exit_grid,
             core_grid=core_grid,
-            train_fraction=0.70,
-            validation_fraction=0.15,
-            test_fraction=0.15,
-            step_fraction=0.15,
+            train_fraction=config.train_fraction,
+            validation_fraction=config.validation_fraction,
+            test_fraction=config.test_fraction,
+            step_fraction=config.step_fraction,
             governance_metadata={"promotion_state": "research", "approval_status": "pending"},
+            stress_controls=dict(config.stress_controls),
         )
 
-    def _run_optimization_workflow(self, context: dict[str, Any]) -> str:
-        entry_grid, exit_grid, core_grid = self._build_signal_grids(context)
+    def _run_optimization_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
+        entry_grid, exit_grid, core_grid = self._build_signal_grids(context, config)
         return run_strategy_optimization(
             tickers=list(context["tickers"]),
             start_date=context["start_date"],
@@ -239,13 +432,14 @@ class ResearchLabPage(ttk.Frame):
             exit_grid=exit_grid,
             core_grid=core_grid,
             seed=42,
-            n_trials=20,
-            sampler_name="tpe",
+            n_trials=config.optimization_n_trials,
+            sampler_name=config.optimization_sampler,
             partial_period_fractions=[0.5, 1.0],
             governance_metadata={"promotion_state": "research", "approval_status": "pending"},
+            stress_controls=dict(config.stress_controls),
         )
 
-    def _run_stress_workflow(self, context: dict[str, Any]) -> str:
+    def _run_stress_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
         return run_multi_signal_backtest(
             tickers=list(context["tickers"]),
             start_date=context["start_date"],
@@ -255,9 +449,10 @@ class ResearchLabPage(ttk.Frame):
             skip_days=int(context["skip"]),
             costs_bps=float(context["costs_bps"]),
             timeframe=str(DEFAULT_BACKTEST_SETTINGS.get("timeframe", "1m")),
-            entry_signals=["ts_momentum", "breakout"],
-            exit_signals=["none", "momentum_flip", "trailing_stop"],
+            entry_signals=list(config.entry_signals),
+            exit_signals=list(config.exit_signals),
             governance_metadata={"promotion_state": "research", "approval_status": "pending"},
+            stress_controls=dict(config.stress_controls),
         )
 
     def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any]) -> str:
