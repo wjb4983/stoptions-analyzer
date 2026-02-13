@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import csv
 import json
+import webbrowser
 from datetime import date
 from pathlib import Path
 import tkinter as tk
@@ -15,7 +16,16 @@ from backtesting.cache_runner import (
     run_walk_forward_backtest,
 )
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PRESETS, DEFAULT_BACKTEST_SETTINGS
-from ui.backtesting_insights import build_guardrails, build_scenario_comparison, metric_deltas, parameter_diffs, parse_tags, read_experiment_index, read_stress_scenarios
+from ui.backtesting_insights import (
+    build_guardrails,
+    build_scenario_comparison,
+    fold_variance_rows,
+    metric_deltas,
+    parameter_diffs,
+    parse_tags,
+    read_experiment_index,
+    read_stress_scenarios,
+)
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
 ENTRY_SIGNALS = ["ts_momentum", "ma_trend", "breakout"]
@@ -529,7 +539,7 @@ class BacktestingPage(ttk.Frame):
         browser_tab.rowconfigure(1, weight=1)
         self.section_notebook.add(browser_tab, text="Experiment Browser")
         ttk.Button(browser_tab, text="Refresh Browser", command=self._refresh_experiment_browser).grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
-        ttk.Button(browser_tab, text="Export Review Packet", command=self._export_selected_review_packet).grid(row=0, column=0, sticky="e", padx=10, pady=(8, 4))
+        ttk.Button(browser_tab, text="Export Notebook Bundle", command=self._export_selected_review_packet).grid(row=0, column=0, sticky="e", padx=10, pady=(8, 4))
         self.experiment_tree = ttk.Treeview(browser_tab, show="headings", height=10)
         self.experiment_tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 4))
         self.experiment_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_experiment_tree_selected())
@@ -556,18 +566,24 @@ class BacktestingPage(ttk.Frame):
         cmp_pane.grid(row=1, column=0, rowspan=2, sticky="nsew", padx=10, pady=4)
         metrics_frame = ttk.Labelframe(cmp_pane, text="Metric Deltas")
         params_frame = ttk.Labelframe(cmp_pane, text="Parameter Diffs")
+        variance_frame = ttk.Labelframe(cmp_pane, text="Fold-by-fold WF Variance")
         scenario_frame = ttk.Labelframe(cmp_pane, text="Scenario Comparison")
         cmp_pane.add(metrics_frame, weight=1)
         cmp_pane.add(params_frame, weight=1)
+        cmp_pane.add(variance_frame, weight=1)
         cmp_pane.add(scenario_frame, weight=1)
         metrics_frame.columnconfigure(0, weight=1)
         metrics_frame.rowconfigure(0, weight=1)
         params_frame.columnconfigure(0, weight=1)
         params_frame.rowconfigure(0, weight=1)
+        variance_frame.columnconfigure(0, weight=1)
+        variance_frame.rowconfigure(0, weight=1)
         self.metric_delta_tree = ttk.Treeview(metrics_frame, show="headings", height=12)
         self.metric_delta_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
         self.param_diff_tree = ttk.Treeview(params_frame, show="headings", height=12)
         self.param_diff_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.fold_variance_tree = ttk.Treeview(variance_frame, show="headings", height=12)
+        self.fold_variance_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
         scenario_frame.columnconfigure(0, weight=1)
         scenario_frame.rowconfigure(0, weight=1)
         self.scenario_compare_tree = ttk.Treeview(scenario_frame, show="headings", height=12)
@@ -606,22 +622,40 @@ class BacktestingPage(ttk.Frame):
         self.section_notebook.add(trades_tab, text="Trades/Costs diagnostics")
         self.trades_tree = ttk.Treeview(trades_tab, show="headings", height=14)
         self.trades_tree.grid(row=0, column=0, sticky="nsew", padx=10, pady=(8, 4))
-        cost_pane = ttk.Panedwindow(trades_tab, orient="horizontal")
-        cost_pane.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
-        cost_frame = ttk.Labelframe(cost_pane, text="Risk/Cost Attribution")
-        turnover_frame = ttk.Labelframe(cost_pane, text="Turnover by Symbol/Sector")
-        capacity_frame = ttk.Labelframe(cost_pane, text="Capacity Frontier (Net Alpha bps)")
-        cost_pane.add(cost_frame, weight=1)
-        cost_pane.add(turnover_frame, weight=1)
-        cost_pane.add(capacity_frame, weight=1)
-        cost_frame.columnconfigure(0, weight=1)
-        turnover_frame.columnconfigure(0, weight=1)
-        capacity_frame.columnconfigure(0, weight=1)
-        self.cost_canvas = tk.Canvas(cost_frame, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
-        self.cost_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
-        self.turnover_canvas = tk.Canvas(turnover_frame, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
+
+        self.attribution_notebook = ttk.Notebook(trades_tab)
+        self.attribution_notebook.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+
+        turnover_tab = ttk.Frame(self.attribution_notebook)
+        turnover_tab.columnconfigure(0, weight=1)
+        self.attribution_notebook.add(turnover_tab, text="Turnover Attribution")
+        self.turnover_canvas = tk.Canvas(turnover_tab, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
         self.turnover_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
-        self.capacity_canvas = tk.Canvas(capacity_frame, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
+
+        slippage_tab = ttk.Frame(self.attribution_notebook)
+        slippage_tab.columnconfigure(0, weight=1)
+        self.attribution_notebook.add(slippage_tab, text="Slippage Attribution")
+        self.cost_canvas = tk.Canvas(slippage_tab, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.cost_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+        regime_tab = ttk.Frame(self.attribution_notebook)
+        regime_tab.columnconfigure(0, weight=1)
+        regime_tab.rowconfigure(0, weight=1)
+        self.attribution_notebook.add(regime_tab, text="Regime Attribution")
+        self.regime_tree = ttk.Treeview(regime_tab, show="headings", height=10)
+        self.regime_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+        drawdown_tab = ttk.Frame(self.attribution_notebook)
+        drawdown_tab.columnconfigure(0, weight=1)
+        drawdown_tab.rowconfigure(0, weight=1)
+        self.attribution_notebook.add(drawdown_tab, text="Drawdown Decomposition")
+        self.drawdown_decomp_tree = ttk.Treeview(drawdown_tab, show="headings", height=10)
+        self.drawdown_decomp_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+        capacity_tab = ttk.Frame(self.attribution_notebook)
+        capacity_tab.columnconfigure(0, weight=1)
+        self.attribution_notebook.add(capacity_tab, text="Capacity Frontier")
+        self.capacity_canvas = tk.Canvas(capacity_tab, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
         self.capacity_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
 
         wf_tab = ttk.Frame(self.section_notebook)
@@ -1038,7 +1072,7 @@ class BacktestingPage(ttk.Frame):
     def _export_selected_review_packet(self) -> None:
         selected = self.experiment_tree.selection()
         if not selected:
-            messagebox.showinfo("Review packet", "Select an experiment run first.")
+            messagebox.showinfo("Notebook bundle", "Select an experiment run first.")
             return
         values = self.experiment_tree.item(selected[0], "values")
         if len(values) < 3:
@@ -1046,19 +1080,61 @@ class BacktestingPage(ttk.Frame):
         run_name = str(values[2])
         run_dir = next((d for d in self.current_run_dirs if d.name == run_name), None)
         if run_dir is None:
-            messagebox.showinfo("Review packet", f"Run {run_name} not found on disk.")
+            messagebox.showinfo("Notebook bundle", f"Run {run_name} not found on disk.")
             return
+
+        bundle_dir = run_dir / "notebook_bundle"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        copied: list[str] = []
+        stems = [
+            "metrics",
+            "equity",
+            "returns",
+            "trades",
+            "trade_log",
+            "drawdown",
+            "risk_diagnostics",
+            "turnover_by_symbol",
+            "regime_pnl_attribution",
+            "fold_summary",
+            "capacity_frontier",
+            "stress_scenarios",
+        ]
+        for stem in stems:
+            rows = self._load_rows(run_dir, stem)
+            if rows:
+                csv_path = bundle_dir / f"{stem}.csv"
+                with csv_path.open("w", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+                    writer.writeheader()
+                    writer.writerows(rows)
+                copied.append(csv_path.name)
+                try:
+                    import pandas as pd  # type: ignore
+                    pd.DataFrame(rows).to_parquet(bundle_dir / f"{stem}.parquet", index=False)
+                    copied.append(f"{stem}.parquet")
+                except Exception:
+                    pass
+            else:
+                src_json = run_dir / f"{stem}.json"
+                if src_json.exists():
+                    dst_json = bundle_dir / src_json.name
+                    dst_json.write_text(src_json.read_text(encoding="utf-8"), encoding="utf-8")
+                    copied.append(dst_json.name)
+
         manifest = self._read_json(run_dir / "manifest.json")
         metrics = self._load_metric_map(run_dir)
         packet = {
             "run": run_dir.name,
+            "source_dir": str(run_dir),
             "manifest": manifest if isinstance(manifest, dict) else {},
             "metrics": metrics,
+            "bundle_files": sorted(copied),
             "generated_at": date.today().isoformat(),
         }
-        packet_path = run_dir / "review_packet.json"
+        packet_path = bundle_dir / "bundle_metadata.json"
         packet_path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
-        messagebox.showinfo("Review packet", f"Saved review packet to {packet_path}")
+        messagebox.showinfo("Notebook bundle", f"Saved notebook bundle to {bundle_dir}")
 
     def _populate_run_compare_combos(self, selected: list[Path] | None = None) -> None:
         runs = selected or self.current_run_dirs
@@ -1107,6 +1183,14 @@ class BacktestingPage(ttk.Frame):
         scenario_rows = build_scenario_comparison(base_scenarios, other_scenarios)
         self._set_tree_data(self.scenario_compare_tree, scenario_rows[:120])
 
+        base_folds = self._read_json(base_run / "fold_summary.json")
+        other_folds = self._read_json(other_run / "fold_summary.json")
+        fold_rows = fold_variance_rows(
+            [row for row in base_folds if isinstance(row, dict)] if isinstance(base_folds, list) else [],
+            [row for row in other_folds if isinstance(row, dict)] if isinstance(other_folds, list) else [],
+        )
+        self._set_tree_data(self.fold_variance_tree, fold_rows[:120])
+
     def _render_guardrails(self, run_dir: Path) -> None:
         for child in self.guardrail_frame.winfo_children():
             child.destroy()
@@ -1116,7 +1200,16 @@ class BacktestingPage(ttk.Frame):
         trade_count = int(metrics.get("trade_count", 0.0)) if "trade_count" in metrics else None
         robustness = self._read_json(run_dir / "robustness_report.json")
         robustness_payload = robustness if isinstance(robustness, dict) else None
-        badges = build_guardrails(metrics, fold_rows=rows, trade_count=trade_count, robustness=robustness_payload)
+        evidence_links = {
+            "overfit_risk": str(run_dir / "robustness_report.json"),
+            "low_sample": str(run_dir / "trades.csv"),
+            "high_turnover": str(run_dir / "turnover_by_symbol.csv"),
+            "unstable_params": str(run_dir / "fold_summary.json"),
+            "weak_rc": str(run_dir / "robustness_report.json"),
+            "weak_spa": str(run_dir / "robustness_report.json"),
+            "default": str(run_dir / "manifest.json"),
+        }
+        badges = build_guardrails(metrics, fold_rows=rows, trade_count=trade_count, robustness=robustness_payload, evidence_links=evidence_links)
         scenario_payload = read_stress_scenarios(run_dir)
         scenario_checks = scenario_payload.get("scenario_guardrails", []) if isinstance(scenario_payload, dict) else []
         if isinstance(scenario_checks, list):
@@ -1125,13 +1218,18 @@ class BacktestingPage(ttk.Frame):
                 badges.append({"label": "Stress Failures", "severity": "high", "reason": f"{len(failed)} scenario guardrail checks failed."})
         palette = {"high": "#d9534f", "medium": "#f0ad4e", "low": "#5cb85c"}
         for badge in badges:
+            artifact = str(badge.get("artifact", ""))
+            suffix = f" [evidence: {Path(artifact).name}]" if artifact else ""
             label = ttk.Label(
                 self.guardrail_frame,
-                text=f"{badge['label']}: {badge['reason']}",
+                text=f"{badge['label']}: {badge['reason']}{suffix}",
                 background=palette.get(str(badge.get("severity", "low")), "#5cb85c"),
                 foreground="#ffffff",
                 padding=(6, 2),
+                cursor="hand2" if artifact else "",
             )
+            if artifact:
+                label.bind("<Button-1>", lambda _e, p=artifact: webbrowser.open(f"file://{Path(p).resolve()}"))
             label.pack(side="right", padx=3)
 
     def _draw_line_canvas(self, canvas: tk.Canvas, values: list[float], color: str = "#1f77b4") -> None:
@@ -1259,6 +1357,23 @@ class BacktestingPage(ttk.Frame):
             aggregate[sym] = aggregate.get(sym, 0.0) + val
         ordered = sorted(aggregate.items(), key=lambda kv: kv[1], reverse=True)
         self._draw_bar_canvas(self.turnover_canvas, ordered[:10], color="#2ca02c")
+
+        regime_rows = self._load_rows(run_dir, "regime_pnl_attribution")
+        self._set_tree_data(self.regime_tree, regime_rows[:120])
+
+        drawdown_rows = self._load_rows(run_dir, "drawdown")
+        decomposition: list[dict[str, object]] = []
+        for idx, row in enumerate(drawdown_rows[:50]):
+            dd = self._safe_float(row.get("drawdown"))
+            if dd is None:
+                continue
+            decomposition.append({
+                "rank": idx + 1,
+                "timestamp": row.get("timestamp", ""),
+                "drawdown": dd,
+                "depth_pct": abs(dd) * 100.0,
+            })
+        self._set_tree_data(self.drawdown_decomp_tree, decomposition)
 
         frontier_rows = self._read_json(run_dir / "capacity_frontier.json")
         if isinstance(frontier_rows, list):

@@ -14,6 +14,7 @@ from src.analysis.reporting import (
     format_backtest_report,
 )
 from src.backtesting import cache_runner
+from src.ui.backtesting_insights import fold_variance_rows, insights_table_schema, metric_deltas
 
 
 
@@ -433,3 +434,36 @@ def test_load_run_manifest_strict_validates_determinism_metadata(tmp_path: Path,
         assert False, "expected strict loader to fail"
     except ValueError as exc:
         assert "config hash" in str(exc).lower()
+
+
+def test_insights_table_schema_snapshot_for_metric_deltas() -> None:
+    rows = metric_deltas(
+        {"sharpe": 1.0, "cagr": 0.10, "max_drawdown": -0.20},
+        {"sharpe": 1.3, "cagr": 0.08, "max_drawdown": -0.18},
+    )
+    assert insights_table_schema(rows) == ["metric", "base", "compare", "delta", "delta_pct"]
+
+
+def test_insights_table_schema_snapshot_for_fold_variance() -> None:
+    base_rows = [
+        {"fold": 1, "oos_sharpe": 0.9, "diagnostics": {"turnover": 0.2}},
+        {"fold": 2, "oos_sharpe": 1.1, "diagnostics": {"turnover": 0.3}},
+        {"fold": 3, "oos_sharpe": 1.0, "diagnostics": {"turnover": 0.4}},
+    ]
+    compare_rows = [
+        {"fold": 1, "oos_sharpe": 0.8, "diagnostics": {"turnover": 0.25}},
+        {"fold": 2, "oos_sharpe": 1.2, "diagnostics": {"turnover": 0.35}},
+        {"fold": 3, "oos_sharpe": 0.95, "diagnostics": {"turnover": 0.45}},
+    ]
+    rows = fold_variance_rows(base_rows, compare_rows)
+    assert insights_table_schema(rows) == [
+        "metric",
+        "base_mean",
+        "compare_mean",
+        "delta_mean",
+        "base_std",
+        "compare_std",
+        "delta_std",
+        "base_n",
+        "compare_n",
+    ]
