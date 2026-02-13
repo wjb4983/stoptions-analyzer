@@ -1,26 +1,78 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 import statistics
 from typing import Any
 
+from backtesting.experiment_registry import append_governance_event, read_registry
+
 
 def read_experiment_index(output_dir: Path) -> list[dict[str, Any]]:
-    jsonl_path = output_dir / "experiment_index.jsonl"
-    rows: list[dict[str, Any]] = []
-    if jsonl_path.exists():
-        for line in jsonl_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                parsed = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                rows.append(parsed)
-    return rows
+    return list(reversed(read_registry(output_dir)))
+
+
+def apply_governance_decision(
+    output_dir: Path,
+    *,
+    run_id: str,
+    action: str,
+    reason: str,
+    actor: str = "ui",
+) -> bool:
+    action_l = action.strip().lower()
+    if action_l not in {"promote", "reject", "waive"}:
+        raise ValueError(f"Unsupported governance action: {action}")
+    if not reason.strip():
+        raise ValueError("A reason is required for governance actions")
+
+    rows = read_registry(output_dir)
+    target: dict[str, Any] | None = None
+    for row in rows:
+        if str(row.get("run_id", "")) == run_id:
+            target = row
+            break
+    if target is None:
+        return False
+
+    governance = target.get("governance", {}) if isinstance(target.get("governance"), dict) else {}
+    if action_l == "promote":
+        current = str(governance.get("promotion_state", "research")).strip() or "research"
+        order = ["research", "paper", "shadow", "production"]
+        if current in order and current != order[-1]:
+            governance["promotion_state"] = order[order.index(current) + 1]
+        governance["approval_status"] = "approved"
+    elif action_l == "reject":
+        governance["approval_status"] = "rejected"
+    else:
+        governance["approval_status"] = "waived"
+
+    event = {
+        "timestamp": datetime.now().isoformat(),
+        "event": f"workflow_{action_l}",
+        "reason": reason.strip(),
+        "actor": actor,
+    }
+    trail = governance.get("audit_trail") if isinstance(governance.get("audit_trail"), list) else []
+    trail.append(event)
+    governance["audit_trail"] = trail
+    target["governance"] = governance
+
+    append_governance_event(
+        output_dir,
+        run_id=run_id,
+        action=action_l,
+        reason=reason.strip(),
+        actor=actor,
+        resulting_promotion_state=str(governance.get("promotion_state", "")),
+        resulting_approval_status=str(governance.get("approval_status", "")),
+    )
+
+    from backtesting.experiment_registry import append_experiment_entry
+
+    append_experiment_entry(output_dir, target)
+    return True
 
 
 def parse_tags(manifest: dict[str, Any] | None) -> list[str]:
