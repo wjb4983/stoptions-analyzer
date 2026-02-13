@@ -134,8 +134,15 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "robustness_report.csv",
         "capacity_frontier.json",
         "capacity_frontier.csv",
+        "regimes.csv",
+        "regimes.json",
     ]:
         assert (run_dir / name).exists(), name
+
+    regimes_rows = json.loads((run_dir / "regimes.json").read_text())
+    assert len(regimes_rows) == len(timestamps)
+    assert "regime" in regimes_rows[0]
+    assert any(key.startswith("prob_state_") for key in regimes_rows[0].keys())
 
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["metric_schema_version"] == cache_runner.CANONICAL_METRIC_SCHEMA_VERSION

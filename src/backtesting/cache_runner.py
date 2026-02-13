@@ -284,6 +284,11 @@ def run_time_series_momentum_backtest(
 
     regime_state = compute_regime_labels(prices)
     regime_labels = np.asarray(regime_state["labels"], dtype=object)
+    regime_probabilities = np.asarray(
+        regime_state.get("regime_probabilities", np.zeros((prices.shape[0], 0), dtype=float)),
+        dtype=float,
+    )
+    regime_states = np.asarray(regime_state.get("regime_states", np.array([], dtype=object)), dtype=object)
 
     if strategy == "xsmom":
         base_params = {
@@ -425,6 +430,13 @@ def run_time_series_momentum_backtest(
         regime_labels=regime_labels,
         risk_map=regime_risk_map,
     )
+    if (
+        regime_probabilities.ndim == 2
+        and regime_probabilities.shape[0] == prices.shape[0]
+        and regime_states.size == regime_probabilities.shape[1]
+    ):
+        for idx, state_name in enumerate(regime_states.tolist()):
+            regime_diag[f"regime_probability_{state_name}"] = regime_probabilities[:, idx]
     portfolio_result.diagnostics.update(regime_diag)
 
     result = backtest_vectorized(
@@ -591,6 +603,8 @@ def run_time_series_momentum_backtest(
         robustness_report=robustness_report,
         scenario_payload=scenario_payload,
         regime_labels=regime_labels,
+        regime_probabilities=regime_probabilities,
+        regime_states=regime_states,
         regime_pnl_attribution=regime_pnl_attribution,
         regime_ensemble_report=regime_ensemble_report,
         governance=governance_payload,
@@ -2796,6 +2810,8 @@ def _persist_backtest_outputs(
     robustness_report: dict[str, Any] | None = None,
     scenario_payload: dict[str, Any] | None = None,
     regime_labels: np.ndarray | None = None,
+    regime_probabilities: np.ndarray | None = None,
+    regime_states: np.ndarray | None = None,
     regime_pnl_attribution: list[dict[str, float | str | int]] | None = None,
     regime_ensemble_report: dict[str, Any] | None = None,
     governance: dict[str, Any] | None = None,
@@ -2861,6 +2877,8 @@ def _persist_backtest_outputs(
             run_dir=run_dir,
             timestamps=time_strings,
             regime_labels=np.asarray(regime_labels, dtype=object),
+            regime_probabilities=np.asarray(regime_probabilities, dtype=float) if regime_probabilities is not None else None,
+            regime_states=np.asarray(regime_states, dtype=object) if regime_states is not None else None,
         )
     if regime_pnl_attribution is not None:
         _write_regime_pnl_attribution(
@@ -3601,17 +3619,30 @@ def _write_regime_labels_csv_json(
     run_dir: Path,
     timestamps: list[str],
     regime_labels: np.ndarray,
+    regime_probabilities: np.ndarray | None = None,
+    regime_states: np.ndarray | None = None,
 ) -> None:
     rows = []
+    states = np.asarray(regime_states, dtype=object) if regime_states is not None else np.array([], dtype=object)
+    probs = np.asarray(regime_probabilities, dtype=float) if regime_probabilities is not None else np.zeros((len(timestamps), 0), dtype=float)
+    valid_probs = probs.ndim == 2 and probs.shape[0] == len(timestamps) and states.size == probs.shape[1]
+
     for idx, ts in enumerate(timestamps):
         label = ""
         if idx < regime_labels.size:
             label = str(regime_labels[idx])
-        rows.append({"timestamp": ts, "regime": label})
+        row: dict[str, object] = {"timestamp": ts, "regime": label}
+        if valid_probs:
+            for col, state in enumerate(states.tolist()):
+                row[f"prob_{state}"] = float(probs[idx, col])
+        rows.append(row)
 
     csv_path = run_dir / "regimes.csv"
     with csv_path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["timestamp", "regime"])
+        fieldnames = ["timestamp", "regime"]
+        if valid_probs:
+            fieldnames.extend([f"prob_{state}" for state in states.tolist()])
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
     (run_dir / "regimes.json").write_text(json.dumps(rows, indent=2))
