@@ -7,6 +7,7 @@ from models.deployment import (
     REASON_RISK_BREACH,
     REASON_ROLLBACK_TO_PRIOR_CHAMPION,
     REASON_ROBUSTNESS_FAILURE,
+    REASON_CAPACITY_CONSTRAINT,
     REASON_SHADOW_UNDERPERFORMANCE,
 )
 
@@ -131,3 +132,44 @@ def test_shadow_mode_auto_rollback_on_robustness_failure() -> None:
     assert slots.challenger is None
     assert slots.candidate == "model_v2"
 
+
+
+def test_shadow_mode_blocks_high_sharpe_low_capacity_unless_niche() -> None:
+    slots = ModelSlots(champion="model_v1", challenger="model_v2")
+    gates = PromotionGates(high_sharpe_threshold=1.5, min_capacity_score=0.3)
+
+    blocked = slots.evaluate_shadow_mode(
+        champion_metrics={"risk_adjusted_return": 1.0},
+        challenger_metrics={
+            "risk_adjusted_return": 2.0,
+            "sharpe": 2.0,
+            "capacity_score": 0.1,
+            "max_drawdown": -0.05,
+            "turnover_total": 1.0,
+            "stability_score": 0.9,
+        },
+        gates=gates,
+    )
+    assert blocked["rolled_back"] is True
+    assert blocked["reason_code"] == REASON_CAPACITY_CONSTRAINT
+
+
+def test_shadow_mode_allows_niche_for_high_sharpe_low_capacity() -> None:
+    slots = ModelSlots(champion="model_v1", challenger="model_v2")
+    gates = PromotionGates(high_sharpe_threshold=1.5, min_capacity_score=0.3)
+
+    decision = slots.evaluate_shadow_mode(
+        champion_metrics={"risk_adjusted_return": 1.0},
+        challenger_metrics={
+            "risk_adjusted_return": 1.4,
+            "sharpe": 2.0,
+            "capacity_score": 0.1,
+            "is_niche": True,
+            "max_drawdown": -0.05,
+            "turnover_total": 1.0,
+            "stability_score": 0.9,
+        },
+        gates=gates,
+    )
+
+    assert decision["promoted"] is True
