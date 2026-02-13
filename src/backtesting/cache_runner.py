@@ -4035,6 +4035,27 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "max_pretrend_pvalue": _float("max_pretrend_pvalue", 0.10),
         "min_placebo_pvalue": _float("min_placebo_pvalue", 0.05),
         "max_relative_attenuation": _float("max_relative_attenuation", 0.50),
+        "max_feature_mean_shift": _float("max_feature_mean_shift", 0.15),
+        "max_feature_std_ratio_shift": _float("max_feature_std_ratio_shift", 0.35),
+        "max_feature_psi": _float("max_feature_psi", 0.20),
+        "max_label_psi": _float("max_label_psi", 0.20),
+        "max_label_kld": _float("max_label_kld", 0.12),
+        "max_label_error_rate_drift": _float("max_label_error_rate_drift", 0.03),
+        "max_residual_mean_shift": _float("max_residual_mean_shift", 0.10),
+        "max_residual_std_ratio_shift": _float("max_residual_std_ratio_shift", 0.25),
+        "max_residual_autocorr": _float("max_residual_autocorr", 0.20),
+        "max_false_alarm_rate": _float("max_false_alarm_rate", 0.25),
+        "retrain_on": source.get("retrain_on", ["high"]),
+        "recalibrate_on": source.get("recalibrate_on", ["medium"]),
+        "alert_routing": source.get(
+            "alert_routing",
+            {
+                "low": ["dashboard"],
+                "medium": ["dashboard", "slack:#ml-monitoring"],
+                "high": ["dashboard", "slack:#incident-ml", "pagerduty:ml-oncall"],
+            },
+        ),
+        "feature_thresholds": source.get("feature_thresholds", {}),
     }
 
     drift_monitoring = evaluate_drift_monitoring(
