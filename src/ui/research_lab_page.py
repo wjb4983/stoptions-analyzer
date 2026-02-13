@@ -40,6 +40,7 @@ class ResearchLabPage(ttk.Frame):
         self._sampler_options = ("tpe", "bayesian", "random")
         self._signal_options = ("ts_momentum", "ma_trend", "breakout")
         self._exit_signal_options = ("none", "momentum_flip", "trailing_stop", "max_hold")
+        self._wizard_state_path = self._research_lab_dir / "wizard_state.json"
 
         ttk.Label(self, text="Research Lab", font=("Arial", 18, "bold")).pack(pady=(12, 8))
         ttk.Label(
@@ -107,6 +108,7 @@ class ResearchLabPage(ttk.Frame):
         )
 
         self._build_workflow_controls()
+        self._build_wizard_mode()
 
         button_row = ttk.Frame(self)
         button_row.pack(pady=(16, 8))
@@ -240,6 +242,322 @@ class ResearchLabPage(ttk.Frame):
         ttk.Label(stress_row4, text=" / ").pack(side="left")
         ttk.Entry(stress_row4, textvariable=self.stress_overlay_liquidity_multiplier_var, width=8).pack(side="left")
 
+
+    def _build_wizard_mode(self) -> None:
+        self._wizard_step_index = 0
+        self._wizard_steps = [
+            "idea capture",
+            "data universe + period",
+            "test plan",
+            "run workflows",
+            "review + promote/reject",
+        ]
+
+        self.wizard_idea_name_var = tk.StringVar(value="")
+        self.wizard_idea_thesis_var = tk.StringVar(value="")
+        self.wizard_idea_owner_var = tk.StringVar(value="research_lab_ui")
+        self.wizard_data_universe_var = tk.StringVar(value=", ".join(self.controller.state.tickers))
+        self.wizard_period_start_var = tk.StringVar(value=str(DEFAULT_BACKTEST_SETTINGS.get("start_date", "")))
+        self.wizard_period_end_var = tk.StringVar(value=str(DEFAULT_BACKTEST_SETTINGS.get("end_date", "")))
+        self.wizard_test_plan_var = tk.StringVar(value="walk_forward")
+        self.wizard_acceptance_var = tk.StringVar(value="Sharpe >= 0.8 and drawdown >= -0.25")
+        self.wizard_run_validation_var = tk.BooleanVar(value=True)
+        self.wizard_run_optimization_var = tk.BooleanVar(value=True)
+        self.wizard_run_stress_var = tk.BooleanVar(value=True)
+        self.wizard_review_notes_var = tk.StringVar(value="")
+        self.wizard_promotion_decision_var = tk.StringVar(value="pending")
+
+        wizard = ttk.LabelFrame(self, text="Wizard Mode — Hypothesis Lifecycle")
+        wizard.pack(fill="x", padx=40, pady=(8, 8))
+        wizard.columnconfigure(0, weight=1)
+
+        self._wizard_section_label = ttk.Label(wizard, text="", font=("Arial", 11, "bold"))
+        self._wizard_section_label.grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
+
+        self._wizard_validation_label = ttk.Label(wizard, text="", foreground="#8a2d2d")
+        self._wizard_validation_label.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 6))
+
+        self._wizard_content_frame = ttk.Frame(wizard)
+        self._wizard_content_frame.grid(row=2, column=0, sticky="ew", padx=10)
+        self._wizard_content_frame.columnconfigure(0, weight=1)
+
+        self._wizard_step_frames: list[ttk.Frame] = []
+        self._wizard_build_step_idea_capture()
+        self._wizard_build_step_universe_period()
+        self._wizard_build_step_test_plan()
+        self._wizard_build_step_run_workflows()
+        self._wizard_build_step_review()
+
+        nav = ttk.Frame(wizard)
+        nav.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 10))
+        self._wizard_back_button = ttk.Button(nav, text="Back", command=self._wizard_go_back)
+        self._wizard_back_button.pack(side="left")
+        self._wizard_next_button = ttk.Button(nav, text="Next", command=self._wizard_go_next)
+        self._wizard_next_button.pack(side="right")
+
+        self._wizard_attach_state_traces()
+        self._wizard_load_state()
+        self._wizard_show_step(self._wizard_step_index)
+
+    def _wizard_add_step_frame(self) -> ttk.Frame:
+        frame = ttk.Frame(self._wizard_content_frame)
+        frame.grid(row=0, column=0, sticky="ew")
+        frame.columnconfigure(0, weight=1)
+        self._wizard_step_frames.append(frame)
+        return frame
+
+    def _wizard_build_step_idea_capture(self) -> None:
+        frame = self._wizard_add_step_frame()
+        ttk.Label(frame, text="[STEP 1] IDEA CAPTURE", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(frame, text="Idea name").grid(row=1, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.wizard_idea_name_var).grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(frame, text="Core thesis").grid(row=3, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.wizard_idea_thesis_var).grid(row=4, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(frame, text="Owner").grid(row=5, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.wizard_idea_owner_var).grid(row=6, column=0, sticky="ew")
+
+    def _wizard_build_step_universe_period(self) -> None:
+        frame = self._wizard_add_step_frame()
+        ttk.Label(frame, text="[STEP 2] DATA UNIVERSE + PERIOD", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(frame, text="Universe tickers (comma-separated)").grid(row=1, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.wizard_data_universe_var).grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        period_row = ttk.Frame(frame)
+        period_row.grid(row=3, column=0, sticky="w")
+        ttk.Label(period_row, text="Period start").pack(side="left")
+        ttk.Entry(period_row, textvariable=self.wizard_period_start_var, width=14).pack(side="left", padx=(8, 12))
+        ttk.Label(period_row, text="Period end").pack(side="left")
+        ttk.Entry(period_row, textvariable=self.wizard_period_end_var, width=14).pack(side="left", padx=(8, 0))
+
+    def _wizard_build_step_test_plan(self) -> None:
+        frame = self._wizard_add_step_frame()
+        ttk.Label(frame, text="[STEP 3] TEST PLAN", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(frame, text="Primary test").grid(row=1, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.wizard_test_plan_var).grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(frame, text="Acceptance criteria").grid(row=3, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.wizard_acceptance_var).grid(row=4, column=0, sticky="ew")
+
+    def _wizard_build_step_run_workflows(self) -> None:
+        frame = self._wizard_add_step_frame()
+        ttk.Label(frame, text="[STEP 4] RUN WORKFLOWS", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        check_row = ttk.Frame(frame)
+        check_row.grid(row=1, column=0, sticky="w")
+        ttk.Checkbutton(check_row, text="Walk-forward validation", variable=self.wizard_run_validation_var).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(check_row, text="Optimization", variable=self.wizard_run_optimization_var).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(check_row, text="Stress tests", variable=self.wizard_run_stress_var).pack(side="left")
+        self._wizard_run_button = ttk.Button(frame, text="Run Selected Workflows", command=self._wizard_run_selected_workflows)
+        self._wizard_run_button.grid(row=2, column=0, sticky="w", pady=(8, 0))
+
+    def _wizard_build_step_review(self) -> None:
+        frame = self._wizard_add_step_frame()
+        ttk.Label(frame, text="[STEP 5] REVIEW + PROMOTE/REJECT", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(frame, text="Review notes").grid(row=1, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.wizard_review_notes_var).grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        decision_row = ttk.Frame(frame)
+        decision_row.grid(row=3, column=0, sticky="w")
+        ttk.Radiobutton(decision_row, text="Promote", value="promote", variable=self.wizard_promotion_decision_var).pack(side="left")
+        ttk.Radiobutton(decision_row, text="Reject", value="reject", variable=self.wizard_promotion_decision_var).pack(side="left", padx=(8, 0))
+
+    def _wizard_attach_state_traces(self) -> None:
+        tracked_vars = (
+            self.wizard_idea_name_var,
+            self.wizard_idea_thesis_var,
+            self.wizard_idea_owner_var,
+            self.wizard_data_universe_var,
+            self.wizard_period_start_var,
+            self.wizard_period_end_var,
+            self.wizard_test_plan_var,
+            self.wizard_acceptance_var,
+            self.wizard_run_validation_var,
+            self.wizard_run_optimization_var,
+            self.wizard_run_stress_var,
+            self.wizard_review_notes_var,
+            self.wizard_promotion_decision_var,
+        )
+        for var in tracked_vars:
+            var.trace_add("write", self._wizard_on_state_change)
+
+    def _wizard_on_state_change(self, *_: object) -> None:
+        self._wizard_persist_state()
+        self._wizard_refresh_nav_state()
+
+    def _wizard_go_back(self) -> None:
+        if self._wizard_step_index <= 0:
+            return
+        self._wizard_show_step(self._wizard_step_index - 1)
+
+    def _wizard_go_next(self) -> None:
+        is_valid, _ = self._wizard_validate_step(self._wizard_step_index)
+        if not is_valid:
+            return
+        if self._wizard_step_index < len(self._wizard_steps) - 1:
+            self._wizard_show_step(self._wizard_step_index + 1)
+            return
+        self._wizard_finalize_review()
+
+    def _wizard_show_step(self, step_index: int) -> None:
+        self._wizard_step_index = max(0, min(step_index, len(self._wizard_steps) - 1))
+        for index, frame in enumerate(self._wizard_step_frames):
+            if index == self._wizard_step_index:
+                frame.grid()
+            else:
+                frame.grid_remove()
+        self._wizard_persist_state()
+        self._wizard_refresh_nav_state()
+
+    def _wizard_validate_step(self, step_index: int) -> tuple[bool, str]:
+        if step_index == 0:
+            if not self.wizard_idea_name_var.get().strip() or not self.wizard_idea_thesis_var.get().strip():
+                return False, "Idea capture requires both idea name and core thesis."
+            return True, ""
+        if step_index == 1:
+            if not [item.strip() for item in self.wizard_data_universe_var.get().split(",") if item.strip()]:
+                return False, "Data universe must include at least one ticker."
+            start = parse_date(self.wizard_period_start_var.get().strip())
+            end = parse_date(self.wizard_period_end_var.get().strip())
+            if start is None or end is None:
+                return False, "Period requires valid start and end dates."
+            if start >= end:
+                return False, "Period start must be before period end."
+            return True, ""
+        if step_index == 2:
+            if not self.wizard_test_plan_var.get().strip() or not self.wizard_acceptance_var.get().strip():
+                return False, "Test plan requires a primary test and acceptance criteria."
+            return True, ""
+        if step_index == 3:
+            if not any(
+                (
+                    bool(self.wizard_run_validation_var.get()),
+                    bool(self.wizard_run_optimization_var.get()),
+                    bool(self.wizard_run_stress_var.get()),
+                )
+            ):
+                return False, "Select at least one workflow before running."
+            return True, ""
+        if step_index == 4:
+            if self.wizard_promotion_decision_var.get().strip().lower() not in {"promote", "reject"}:
+                return False, "Review step requires either Promote or Reject."
+            if not self.wizard_review_notes_var.get().strip():
+                return False, "Review step requires notes to justify the decision."
+            return True, ""
+        return True, ""
+
+    def _wizard_refresh_nav_state(self) -> None:
+        valid, error = self._wizard_validate_step(self._wizard_step_index)
+        step_name = self._wizard_steps[self._wizard_step_index].upper()
+        self._wizard_section_label.configure(text=f"Section {self._wizard_step_index + 1}/{len(self._wizard_steps)} — {step_name}")
+        self._wizard_validation_label.configure(text=error)
+        self._wizard_back_button.configure(state="normal" if self._wizard_step_index > 0 else "disabled")
+        next_label = "Finish" if self._wizard_step_index == len(self._wizard_steps) - 1 else "Next"
+        self._wizard_next_button.configure(text=next_label, state="normal" if valid else "disabled")
+        if hasattr(self, "_wizard_run_button"):
+            run_valid, _ = self._wizard_validate_step(3)
+            run_enabled = run_valid and not self._is_running
+            self._wizard_run_button.configure(state="normal" if run_enabled else "disabled")
+
+    def _wizard_run_selected_workflows(self) -> None:
+        valid, error = self._wizard_validate_step(3)
+        if not valid:
+            messagebox.showinfo("Invalid run configuration", error)
+            return
+        if self._is_running:
+            messagebox.showinfo("Run in progress", "Wait for the current Research Lab run to finish.")
+            return
+        context = self._build_common_context()
+        if context is None:
+            return
+        wizard_tickers = [item.strip() for item in self.wizard_data_universe_var.get().split(",") if item.strip()]
+        parsed_start = parse_date(self.wizard_period_start_var.get().strip())
+        parsed_end = parse_date(self.wizard_period_end_var.get().strip())
+        if wizard_tickers:
+            context["tickers"] = wizard_tickers
+        if parsed_start is not None and parsed_end is not None and parsed_start < parsed_end:
+            context["start_date"] = parsed_start
+            context["end_date"] = parsed_end
+
+        config = self._build_workflow_config()
+        if config is None:
+            return
+
+        selected: list[tuple[str, Callable[[dict[str, Any], ResearchWorkflowConfig], str]]] = []
+        if self.wizard_run_validation_var.get():
+            selected.append(("Walk-forward validation", self._run_walk_forward_workflow))
+        if self.wizard_run_optimization_var.get():
+            selected.append(("Parameter optimization", self._run_optimization_workflow))
+        if self.wizard_run_stress_var.get():
+            selected.append(("Stress/scenario tests", self._run_stress_workflow))
+
+        self._is_running = True
+        self._wizard_refresh_nav_state()
+        self._append_output("Starting wizard workflows...")
+
+        def worker() -> None:
+            outputs: list[str] = []
+            for label, runner in selected:
+                outputs.append(f"Starting: {label}")
+                try:
+                    outputs.append(runner(context, config))
+                except Exception as exc:
+                    outputs.append(f"{label} failed: {exc}")
+            self.after(0, lambda: self._finish_worker("\n".join(outputs)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _wizard_finalize_review(self) -> None:
+        decision = self.wizard_promotion_decision_var.get().strip().lower()
+        note = self.wizard_review_notes_var.get().strip()
+        self._append_output(
+            "Wizard review complete | "
+            f"idea={self.wizard_idea_name_var.get().strip() or 'n/a'} | "
+            f"decision={decision} | notes={note}"
+        )
+        self._wizard_persist_state()
+
+    def _wizard_state_payload(self) -> dict[str, Any]:
+        return {
+            "current_step": self._wizard_step_index,
+            "idea_name": self.wizard_idea_name_var.get().strip(),
+            "idea_thesis": self.wizard_idea_thesis_var.get().strip(),
+            "idea_owner": self.wizard_idea_owner_var.get().strip(),
+            "data_universe": self.wizard_data_universe_var.get().strip(),
+            "period_start": self.wizard_period_start_var.get().strip(),
+            "period_end": self.wizard_period_end_var.get().strip(),
+            "test_plan": self.wizard_test_plan_var.get().strip(),
+            "acceptance_criteria": self.wizard_acceptance_var.get().strip(),
+            "run_validation": bool(self.wizard_run_validation_var.get()),
+            "run_optimization": bool(self.wizard_run_optimization_var.get()),
+            "run_stress": bool(self.wizard_run_stress_var.get()),
+            "review_notes": self.wizard_review_notes_var.get().strip(),
+            "promotion_decision": self.wizard_promotion_decision_var.get().strip(),
+        }
+
+    def _wizard_persist_state(self) -> None:
+        self._research_lab_dir.mkdir(parents=True, exist_ok=True)
+        self._wizard_state_path.write_text(json.dumps(self._wizard_state_payload(), indent=2, sort_keys=True), encoding="utf-8")
+
+    def _wizard_load_state(self) -> None:
+        if not self._wizard_state_path.exists():
+            return
+        try:
+            payload = json.loads(self._wizard_state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return
+
+        self.wizard_idea_name_var.set(str(payload.get("idea_name", self.wizard_idea_name_var.get())))
+        self.wizard_idea_thesis_var.set(str(payload.get("idea_thesis", self.wizard_idea_thesis_var.get())))
+        self.wizard_idea_owner_var.set(str(payload.get("idea_owner", self.wizard_idea_owner_var.get())))
+        self.wizard_data_universe_var.set(str(payload.get("data_universe", self.wizard_data_universe_var.get())))
+        self.wizard_period_start_var.set(str(payload.get("period_start", self.wizard_period_start_var.get())))
+        self.wizard_period_end_var.set(str(payload.get("period_end", self.wizard_period_end_var.get())))
+        self.wizard_test_plan_var.set(str(payload.get("test_plan", self.wizard_test_plan_var.get())))
+        self.wizard_acceptance_var.set(str(payload.get("acceptance_criteria", self.wizard_acceptance_var.get())))
+        self.wizard_run_validation_var.set(bool(payload.get("run_validation", self.wizard_run_validation_var.get())))
+        self.wizard_run_optimization_var.set(bool(payload.get("run_optimization", self.wizard_run_optimization_var.get())))
+        self.wizard_run_stress_var.set(bool(payload.get("run_stress", self.wizard_run_stress_var.get())))
+        self.wizard_review_notes_var.set(str(payload.get("review_notes", self.wizard_review_notes_var.get())))
+        self.wizard_promotion_decision_var.set(str(payload.get("promotion_decision", self.wizard_promotion_decision_var.get())))
+        loaded_step = int(payload.get("current_step", 0))
+        self._wizard_step_index = max(0, min(loaded_step, len(self._wizard_steps) - 1))
+
     def _start_worker(self, target: Callable[[dict[str, Any], ResearchWorkflowConfig], str], label: str) -> None:
         if self._is_running:
             messagebox.showinfo("Run in progress", "Wait for the current Research Lab run to finish.")
@@ -267,6 +585,8 @@ class ResearchLabPage(ttk.Frame):
     def _finish_worker(self, output: str) -> None:
         self._is_running = False
         self._append_output(output)
+        if hasattr(self, "_wizard_next_button"):
+            self._wizard_refresh_nav_state()
 
     def _build_common_context(self) -> dict[str, Any] | None:
         tickers = list(self.controller.state.tickers)
