@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .factor_exposure import build_factor_exposure_model, decompose_alpha
+
 
 @dataclass(frozen=True)
 class AttributionPayload:
@@ -19,6 +21,8 @@ def build_attribution_payload(
     slippage_drag: np.ndarray,
     fee_drag: np.ndarray,
     borrow_drag: np.ndarray,
+    factor_exposures: np.ndarray | None = None,
+    factor_returns: np.ndarray | None = None,
 ) -> AttributionPayload:
     """Build Brinson-style and factor-model attribution variants.
 
@@ -76,20 +80,29 @@ def build_attribution_payload(
             borrow=borrow,
         )
     )
+    if factor_exposures is None or factor_returns is None:
+        factor_model = build_factor_exposure_model(prices=close)
+        inferred_exposures = factor_model.exposures_by_asset
+        inferred_returns = factor_model.factor_returns
+    else:
+        inferred_exposures = np.asarray(factor_exposures, dtype=float)
+        inferred_returns = np.asarray(factor_returns, dtype=float)
+
     ts_rows.extend(
         _build_factor_rows(
             variant="factor_cross_sectional",
             strategy_style="cross_sectional",
             timestamps=timestamps,
-            asset_returns=asset_returns,
             effective_weights=pos * weights,
             benchmark_weights=np.full_like(weights, 1.0 / max(1, n_assets), dtype=float),
-            gross_alpha=gross_alpha,
             net_alpha=net_alpha,
             cost_drag=cost_drag,
             slippage=slippage,
             fees=fees,
             borrow=borrow,
+            factor_exposures=inferred_exposures,
+            factor_returns=inferred_returns,
+            asset_returns=asset_returns,
         )
     )
     ts_rows.extend(
@@ -97,15 +110,16 @@ def build_attribution_payload(
             variant="factor_time_series",
             strategy_style="time_series",
             timestamps=timestamps,
-            asset_returns=asset_returns,
             effective_weights=pos * weights,
             benchmark_weights=np.zeros_like(weights),
-            gross_alpha=gross_alpha,
             net_alpha=net_alpha,
             cost_drag=cost_drag,
             slippage=slippage,
             fees=fees,
             borrow=borrow,
+            factor_exposures=inferred_exposures,
+            factor_returns=inferred_returns,
+            asset_returns=asset_returns,
         )
     )
 
@@ -163,21 +177,27 @@ def _build_factor_rows(
     variant: str,
     strategy_style: str,
     timestamps: np.ndarray,
-    asset_returns: np.ndarray,
     effective_weights: np.ndarray,
     benchmark_weights: np.ndarray,
-    gross_alpha: np.ndarray,
     net_alpha: np.ndarray,
     cost_drag: np.ndarray,
     slippage: np.ndarray,
     fees: np.ndarray,
     borrow: np.ndarray,
+    factor_exposures: np.ndarray,
+    factor_returns: np.ndarray,
+    asset_returns: np.ndarray,
 ) -> list[dict[str, object]]:
-    market_factor = np.mean(asset_returns, axis=1, keepdims=True)
-    factor_implied = np.repeat(market_factor, asset_returns.shape[1], axis=1)
     active = effective_weights - benchmark_weights
-    explained = np.sum(active * factor_implied, axis=1)
-    residual = gross_alpha - explained
+    factor_decomp = decompose_alpha(
+        weights=active,
+        asset_returns=asset_returns,
+        factor_exposures=factor_exposures,
+        factor_returns=factor_returns,
+    )
+    gross_alpha = factor_decomp["gross_alpha"]
+    explained = factor_decomp["factor_beta_contribution"]
+    residual = factor_decomp["residual_alpha"]
     return _rows(
         variant=variant,
         strategy_style=strategy_style,
@@ -249,4 +269,3 @@ def _build_summary(rows: list[dict[str, object]]) -> list[dict[str, object]]:
             }
         )
     return sorted(out, key=lambda row: str(row["variant"]))
-

@@ -23,6 +23,7 @@ from typing import Any, Callable
 import numpy as np
 
 from analysis.attribution import build_attribution_payload
+from analysis.factor_exposure import build_factor_exposure_model
 from analysis.reporting import (
     build_scenario_attribution_and_guardrails,
     build_backtest_robustness_report,
@@ -426,6 +427,7 @@ def run_time_series_momentum_backtest(
         max_abs_vega_bucket=None if portfolio_max_abs_vega_bucket is None else float(portfolio_max_abs_vega_bucket),
         max_abs_delta_per_underlying=None if portfolio_max_abs_delta_per_underlying is None else float(portfolio_max_abs_delta_per_underlying),
         sector_map=dict(portfolio_sector_map or {}),
+        use_residual_signals=True,
     )
 
     symbol_order = [
@@ -568,6 +570,7 @@ def run_time_series_momentum_backtest(
         key: float(value)
         for key, value in result.cost_breakdown.get("totals", {}).items()
     }
+    factor_model = build_factor_exposure_model(prices=prices)
     attribution_payload = build_attribution_payload(
         timestamps=np.asarray(timestamps),
         prices=prices,
@@ -575,6 +578,8 @@ def run_time_series_momentum_backtest(
         slippage_drag=_to_numpy_1d(result.cost_breakdown.get("slippage", np.zeros_like(returns))),
         fee_drag=_to_numpy_1d(result.cost_breakdown.get("fees", np.zeros_like(returns))),
         borrow_drag=_to_numpy_1d(result.cost_breakdown.get("borrow", np.zeros_like(returns))),
+        factor_exposures=factor_model.exposures_by_asset,
+        factor_returns=factor_model.factor_returns,
     )
 
     metrics = dict(result.metrics)
