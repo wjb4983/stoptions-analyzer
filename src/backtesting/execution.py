@@ -68,6 +68,24 @@ class ZeroFee:
         return 0.0
 
 
+class BrokerFeeModel:
+    """Broker fee model with notional bps, per-unit, and minimum ticket fee."""
+
+    def __init__(self, *, fee_bps: float = 0.0, fee_per_unit: float = 0.0, minimum_fee: float = 0.0) -> None:
+        if fee_bps < 0.0 or fee_per_unit < 0.0 or minimum_fee < 0.0:
+            raise ValueError("Broker fee parameters must be non-negative.")
+        self.fee_bps = float(fee_bps)
+        self.fee_per_unit = float(fee_per_unit)
+        self.minimum_fee = float(minimum_fee)
+
+    def calculate(self, price: float, size: float, liquidity_context: Any | None = None) -> float:
+        if size == 0.0:
+            return 0.0
+        notional = abs(float(price) * float(size))
+        fee = notional * (self.fee_bps / 10_000.0) + abs(float(size)) * self.fee_per_unit
+        return float(max(fee, self.minimum_fee))
+
+
 @dataclass(frozen=True)
 class ExecutionModel:
     """Composed execution contract used by backtest runners.
@@ -612,6 +630,9 @@ class PartialFillModel:
         fills: list[FillEvent] = []
 
         latency = max(int(latency_bars), 0)
+        resolved_order_type = str(order_type).strip().lower()
+        if resolved_order_type not in {"market", "limit", "participation"}:
+            raise ValueError("order_type must be one of: market, limit, participation")
         queue = float(np.clip(queue_rank_proxy, 0.0, 1.0))
 
         for idx in range(n_periods):
@@ -629,7 +650,19 @@ class PartialFillModel:
                         participation_cap = max(float(max_participation[idx, asset_idx]), 0.0)
                     else:
                         participation_cap = self.max_participation_per_bar
-                    fill_size = self.capped_fill_size(requested, bar_volume, participation_cap)
+                    if resolved_order_type == "market":
+                        fill_size = self.capped_fill_size(requested, bar_volume, participation_cap)
+                    elif resolved_order_type == "participation":
+                        participation_slice = float(np.clip(1.0 - queue, 0.1, 1.0))
+                        fill_size = self.capped_fill_size(
+                            requested,
+                            bar_volume,
+                            participation_cap * participation_slice,
+                        )
+                    else:  # limit
+                        marketable_fraction = float(np.clip(1.0 - queue, 0.0, 1.0))
+                        candidate_fill = self.capped_fill_size(requested, bar_volume, participation_cap)
+                        fill_size = float(candidate_fill * marketable_fraction)
                     pending[asset_idx] -= fill_size
                 executed[idx, asset_idx] = fill_size
                 residual[idx, asset_idx] = pending[asset_idx]
@@ -643,7 +676,7 @@ class PartialFillModel:
                         residual_size=float(pending[asset_idx]),
                         participation_rate=float(participation),
                         available_volume=float(bar_volume),
-                        order_type=str(order_type),
+                        order_type=resolved_order_type,
                         latency_bars=latency,
                         latency_ms=max(int(latency_ms), 0),
                         queue_rank_proxy=queue,

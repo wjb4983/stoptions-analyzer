@@ -27,10 +27,12 @@ def test_governance_metadata_includes_drift_monitoring_and_gate_check() -> None:
     )
     assert "drift_monitoring" in governance
     assert governance["gate_checks"]["drift_monitoring"] is True
+    assert "friction_adjusted_edge" in governance["promotion_required_checks"]
 
     checks = _evaluate_governance_gate_checks(
-        metrics={"signal_diagnostics_ready": True, "sharpe": 1.2, "rolling_sharpe_mean": 1.0, "turnover_total": 1.0},
+        metrics={"signal_diagnostics_ready": True, "sharpe": 1.2, "rolling_sharpe_mean": 1.0, "turnover_total": 1.0, "friction_adjusted_edge": 1.2},
         fold_rows=[{"fold": 1}, {"fold": 2}, {"fold": 3}],
         governance=governance,
     )
     assert checks["drift_monitoring"] is True
+    assert checks["friction_adjusted_edge"] is True
