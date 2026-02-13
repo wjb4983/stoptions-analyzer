@@ -866,6 +866,17 @@ class BacktestingPage(ttk.Frame):
         self.capacity_canvas = tk.Canvas(capacity_tab, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
         self.capacity_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
 
+        risk_tab = ttk.Frame(self.attribution_notebook)
+        risk_tab.columnconfigure(0, weight=1)
+        risk_tab.rowconfigure(1, weight=1)
+        self.attribution_notebook.add(risk_tab, text="Risk Control Dashboard")
+        self.risk_summary_var = tk.StringVar(value="Risk dashboard and intervention audit trail load per selected run.")
+        ttk.Label(risk_tab, textvariable=self.risk_summary_var, justify="left").grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
+        self.risk_dashboard_tree = ttk.Treeview(risk_tab, show="headings", height=8)
+        self.risk_dashboard_tree.grid(row=1, column=0, sticky="nsew", padx=6, pady=4)
+        self.risk_interventions_tree = ttk.Treeview(risk_tab, show="headings", height=8)
+        self.risk_interventions_tree.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 6))
+
         wf_tab = ttk.Frame(self.section_notebook)
         wf_tab.columnconfigure(0, weight=1)
         wf_tab.rowconfigure(1, weight=1)
@@ -1178,9 +1189,26 @@ class BacktestingPage(ttk.Frame):
         self._update_equity_overlap([run_dir])
         self._render_parameter_stability(run_dir)
         self._render_cost_attribution(run_dir)
+        self._render_risk_controls(run_dir)
         self._render_guardrails(run_dir)
         self._populate_run_compare_combos()
         self._refresh_experiment_browser()
+
+    def _render_risk_controls(self, run_dir: Path) -> None:
+        dashboard_rows = self._load_rows(run_dir, "risk_dashboard")
+        interventions = self._load_rows(run_dir, "risk_interventions")
+        self._set_tree_data(self.risk_dashboard_tree, dashboard_rows[:200])
+        self._set_tree_data(self.risk_interventions_tree, interventions[:200])
+
+        if dashboard_rows:
+            latest = dashboard_rows[-1]
+            regime = latest.get("regime_state", "unknown")
+            confidence = self._safe_float(latest.get("model_confidence", 0.0)) or 0.0
+            self.risk_summary_var.set(
+                f"Latest regime={regime} model_confidence={confidence:.3f} | interventions={len(interventions)}"
+            )
+        else:
+            self.risk_summary_var.set("No risk dashboard artifacts found for selected run.")
 
     def _load_historical_runs(self) -> None:
         run_dirs = self._scan_backtest_output_runs()
