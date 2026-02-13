@@ -6,6 +6,7 @@ import cProfile
 import pstats
 from dataclasses import dataclass
 from io import StringIO
+from time import perf_counter
 from statistics import NormalDist
 
 import numpy as np
@@ -18,6 +19,12 @@ from .vectorized import backtest_vectorized
 class ProfileSummary:
     mode: str
     output: str
+    elapsed_seconds: float
+
+
+DEFAULT_PROFILE_THRESHOLDS: dict[str, float] = {
+    "optimized_to_reference_max_ratio": 1.20,
+}
 
 
 def deflated_sharpe_ratio(
@@ -100,6 +107,7 @@ def profile_backtest_hotspots(n_periods: int = 20_000, n_assets: int = 128) -> l
     outputs: list[ProfileSummary] = []
     for mode in ("reference", "optimized"):
         pr = cProfile.Profile()
+        start = perf_counter()
         pr.enable()
         backtest_vectorized(
             prices,
@@ -111,9 +119,35 @@ def profile_backtest_hotspots(n_periods: int = 20_000, n_assets: int = 128) -> l
             execution_mode=mode,
         )
         pr.disable()
+        elapsed = perf_counter() - start
 
         buf = StringIO()
         stats = pstats.Stats(pr, stream=buf).sort_stats("cumtime")
         stats.print_stats(15)
-        outputs.append(ProfileSummary(mode=mode, output=buf.getvalue()))
+        outputs.append(ProfileSummary(mode=mode, output=buf.getvalue(), elapsed_seconds=float(elapsed)))
     return outputs
+
+
+def check_profile_regression(
+    summaries: list[ProfileSummary],
+    *,
+    thresholds: dict[str, float] | None = None,
+) -> dict[str, float | bool]:
+    """Validate profiled mode runtimes against configurable performance thresholds."""
+    limits = dict(DEFAULT_PROFILE_THRESHOLDS)
+    if thresholds:
+        limits.update({k: float(v) for k, v in thresholds.items()})
+
+    by_mode = {item.mode: item for item in summaries}
+    if "reference" not in by_mode or "optimized" not in by_mode:
+        raise ValueError("summaries must include both 'reference' and 'optimized' modes")
+
+    ref = max(by_mode["reference"].elapsed_seconds, 1e-12)
+    opt = by_mode["optimized"].elapsed_seconds
+    ratio = float(opt / ref)
+    max_ratio = float(limits["optimized_to_reference_max_ratio"])
+    return {
+        "optimized_to_reference_ratio": ratio,
+        "optimized_to_reference_max_ratio": max_ratio,
+        "pass": ratio <= max_ratio,
+    }

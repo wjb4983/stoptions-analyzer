@@ -16,19 +16,44 @@ class RegimeFeatureConfig:
 
 
 def _rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
-    out = np.zeros_like(values, dtype=float)
-    for idx in range(values.size):
-        start = max(0, idx - window + 1)
-        out[idx] = float(np.mean(values[start : idx + 1]))
+    arr = np.asarray(values, dtype=float)
+    out = np.zeros_like(arr, dtype=float)
+    if arr.size == 0:
+        return out
+
+    win = max(1, int(window))
+    csum = np.cumsum(arr, dtype=float)
+    counts = np.minimum(np.arange(1, arr.size + 1, dtype=int), win).astype(float)
+
+    out[:] = csum
+    if win < arr.size:
+        out[win:] = csum[win:] - csum[:-win]
+    out /= counts
     return out
 
 
 def _rolling_std(values: np.ndarray, window: int) -> np.ndarray:
-    out = np.zeros_like(values, dtype=float)
-    for idx in range(values.size):
-        start = max(0, idx - window + 1)
-        segment = values[start : idx + 1]
-        out[idx] = float(np.std(segment, ddof=1)) if segment.size > 1 else 0.0
+    arr = np.asarray(values, dtype=float)
+    out = np.zeros_like(arr, dtype=float)
+    if arr.size == 0:
+        return out
+
+    win = max(1, int(window))
+    csum = np.cumsum(arr, dtype=float)
+    csum_sq = np.cumsum(arr * arr, dtype=float)
+    counts = np.minimum(np.arange(1, arr.size + 1, dtype=int), win)
+
+    sum_x = csum.copy()
+    sum_x_sq = csum_sq.copy()
+    if win < arr.size:
+        sum_x[win:] = csum[win:] - csum[:-win]
+        sum_x_sq[win:] = csum_sq[win:] - csum_sq[:-win]
+
+    valid = counts > 1
+    numer = np.zeros_like(arr, dtype=float)
+    numer[valid] = sum_x_sq[valid] - (sum_x[valid] * sum_x[valid] / counts[valid].astype(float))
+    denom = np.maximum(counts.astype(float) - 1.0, 1.0)
+    out[valid] = np.sqrt(np.maximum(numer[valid] / denom[valid], 0.0))
     return out
 
 
