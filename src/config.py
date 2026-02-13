@@ -165,3 +165,20 @@ BACKTEST_STRATEGY_PRESETS = {
         },
     },
 }
+
+DEFAULT_MODEL_PARADIGM_CONFIG = {
+    "paradigms": [
+        {"name": "momentum", "enabled": True, "weight": 1.0},
+        {"name": "mean_reversion", "enabled": True, "weight": 1.0},
+        {"name": "volatility_carry", "enabled": True, "weight": 1.0},
+        {"name": "term_structure_slope", "enabled": True, "weight": 1.0},
+        {"name": "dispersion", "enabled": True, "weight": 1.0},
+        {"name": "stat_arb_pair_spread", "enabled": True, "weight": 1.0},
+        {"name": "factor_neutral_cross_sectional_rank", "enabled": True, "weight": 1.0},
+        {"name": "macro_regime_conditioned", "enabled": True, "weight": 1.0},
+        {"name": "event_driven", "enabled": True, "weight": 1.0},
+        {"name": "options_flow_driven", "enabled": True, "weight": 1.0},
+        {"name": "microstructure_imbalance", "enabled": True, "weight": 1.0},
+        {"name": "meta_label_classifier", "enabled": True, "weight": 1.0},
+    ]
+}
