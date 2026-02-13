@@ -25,6 +25,7 @@ from ui.backtesting_insights import (
     parse_tags,
     read_experiment_index,
     read_stress_scenarios,
+    apply_governance_decision,
 )
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
@@ -642,8 +643,18 @@ class BacktestingPage(ttk.Frame):
         self.experiment_tree = ttk.Treeview(browser_tab, show="headings", height=10)
         self.experiment_tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 4))
         self.experiment_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_experiment_tree_selected())
+
+        workflow_row = ttk.Frame(browser_tab)
+        workflow_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 4))
+        ttk.Label(workflow_row, text="Workflow reason").pack(side="left")
+        self.workflow_reason_var = tk.StringVar(value="")
+        ttk.Entry(workflow_row, textvariable=self.workflow_reason_var, width=64).pack(side="left", padx=(6, 10), fill="x", expand=True)
+        ttk.Button(workflow_row, text="Promote", command=lambda: self._apply_experiment_workflow("promote")).pack(side="left")
+        ttk.Button(workflow_row, text="Reject", command=lambda: self._apply_experiment_workflow("reject")).pack(side="left", padx=(6, 0))
+        ttk.Button(workflow_row, text="Waive", command=lambda: self._apply_experiment_workflow("waive")).pack(side="left", padx=(6, 0))
+
         self.experiment_detail_var = tk.StringVar(value="Select an experiment run to inspect tags, metrics, and reproducibility.")
-        ttk.Label(browser_tab, textvariable=self.experiment_detail_var, justify="left").grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 8))
+        ttk.Label(browser_tab, textvariable=self.experiment_detail_var, justify="left").grid(row=3, column=0, sticky="ew", padx=10, pady=(2, 8))
 
         compare_tab = ttk.Frame(self.section_notebook)
         compare_tab.columnconfigure(0, weight=1)
@@ -1136,6 +1147,12 @@ class BacktestingPage(ttk.Frame):
                     "tags": ", ".join(tags[:4]),
                     "best_sharpe": metrics.get("sharpe", row.get("primary_metric_value", "")),
                     "approval": str((row.get("governance") or {}).get("approval_status", "")),
+                    "promotion": str((row.get("governance") or {}).get("promotion_state", "")),
+                    "run_id": str(row.get("run_id", ""))[:12],
+                    "cfg_hash": str(row.get("config_hash", ""))[:12],
+                    "cfg_chk": str(row.get("config_checksum", ""))[:12],
+                    "snapshot_chk": str(row.get("data_snapshot_checksum", ""))[:12],
+                    "manifest_chk": str(row.get("manifest_checksum", ""))[:12],
                     "fingerprint": str(row.get("reproducibility_fingerprint", ""))[:12],
                 }
             )
@@ -1159,14 +1176,64 @@ class BacktestingPage(ttk.Frame):
         fp = ""
         if isinstance(manifest, dict):
             fp = str(manifest.get("reproducibility_fingerprint", ""))
+        run_id = str(manifest.get("run_id", "")) if isinstance(manifest, dict) else ""
+        cfg_hash = str(manifest.get("config_hash", "")) if isinstance(manifest, dict) else ""
+        cfg_chk = str(manifest.get("config_checksum", "")) if isinstance(manifest, dict) else ""
+        snap_chk = str(manifest.get("data_snapshot_checksum", "")) if isinstance(manifest, dict) else ""
+        man_chk = str(manifest.get("manifest_checksum", "")) if isinstance(manifest, dict) else ""
+        governance = manifest.get("governance", {}) if isinstance(manifest, dict) and isinstance(manifest.get("governance"), dict) else {}
         msg = [
             f"Run: {run_dir.name}",
+            f"Run ID: {run_id[:24] if run_id else 'n/a'}",
             f"Tags: {', '.join(tags) if tags else '-'}",
             f"Sharpe: {metrics.get('sharpe', 'n/a')}",
             f"CAGR: {metrics.get('cagr', 'n/a')}",
+            f"Promotion: {governance.get('promotion_state', 'n/a')}",
+            f"Approval: {governance.get('approval_status', 'n/a')}",
+            f"Config hash/checksum: {(cfg_hash[:12] if cfg_hash else 'n/a')} / {(cfg_chk[:12] if cfg_chk else 'n/a')}",
+            f"Snapshot checksum: {snap_chk[:24] if snap_chk else 'n/a'}",
+            f"Manifest checksum: {man_chk[:24] if man_chk else 'n/a'}",
             f"Fingerprint: {fp[:24] if fp else 'n/a'}",
         ]
         self.experiment_detail_var.set("\n".join(msg))
+
+    def _apply_experiment_workflow(self, action: str) -> None:
+        selected = self.experiment_tree.selection()
+        if not selected:
+            messagebox.showinfo("Workflow", "Select an experiment run first.")
+            return
+        reason = self.workflow_reason_var.get().strip()
+        if not reason:
+            messagebox.showinfo("Workflow", "Enter a reason for promote/reject/waive.")
+            return
+        values = self.experiment_tree.item(selected[0], "values")
+        if len(values) < 3:
+            messagebox.showerror("Workflow", "Invalid experiment selection.")
+            return
+        run_name = str(values[2])
+        run_id = ""
+        for row in read_experiment_index(BACKTEST_OUTPUT_DIR):
+            row_run = Path(str(row.get("run_dir", ""))).name
+            if row_run == run_name:
+                run_id = str(row.get("run_id", ""))
+                if run_id:
+                    break
+        if not run_id:
+            messagebox.showerror("Workflow", f"Could not resolve run ID for {run_name}.")
+            return
+        success = apply_governance_decision(
+            BACKTEST_OUTPUT_DIR,
+            run_id=run_id,
+            action=action,
+            reason=reason,
+            actor=self.gov_owner_var.get().strip() or "ui",
+        )
+        if not success:
+            messagebox.showerror("Workflow", f"Run ID {run_id} not found in experiment registry.")
+            return
+        self.workflow_reason_var.set("")
+        self._refresh_experiment_browser()
+        self.experiment_detail_var.set(f"Applied {action} to run {run_id[:12]} with reason logged.")
 
     def _export_selected_review_packet(self) -> None:
         selected = self.experiment_tree.selection()

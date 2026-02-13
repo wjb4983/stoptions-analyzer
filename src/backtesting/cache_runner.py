@@ -82,6 +82,7 @@ from backtesting.optimization import (
     TPESampler,
     optimize,
 )
+from backtesting.experiment_registry import append_experiment_entry
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1321,8 +1322,15 @@ def run_walk_forward_backtest(
             "primary_metric_value": float(wf_result.aggregate_metrics.get(score_metric, 0.0)),
             "manifest_path": str(run_dir / "manifest.json"),
             "reproducibility_fingerprint": manifest["reproducibility_fingerprint"],
+            "run_id": manifest["run_id"],
+            "config_hash": manifest["config_hash"],
+            "config_checksum": manifest["config_checksum"],
+            "data_snapshot_checksum": manifest["data_snapshot_checksum"],
+            "manifest_checksum": manifest["manifest_checksum"],
             "parameters": manifest["parameters"],
             "data_snapshot_identifiers": manifest["data_snapshot_identifiers"],
+            "metrics": {k: float(v) for k, v in wf_result.aggregate_metrics.items()},
+            "significance": {},
             "governance": governance_payload,
         }
     )
@@ -1511,8 +1519,15 @@ def run_strategy_optimization(
         "primary_metric_value": float(result.get("pareto_count", 0.0)),
         "manifest_path": str(run_dir / "manifest.json"),
         "reproducibility_fingerprint": manifest["reproducibility_fingerprint"],
+        "run_id": manifest["run_id"],
+        "config_hash": manifest["config_hash"],
+        "config_checksum": manifest["config_checksum"],
+        "data_snapshot_checksum": manifest["data_snapshot_checksum"],
+        "manifest_checksum": manifest["manifest_checksum"],
         "parameters": manifest["parameters"],
         "data_snapshot_identifiers": manifest["data_snapshot_identifiers"],
+        "metrics": best_metrics,
+        "significance": {},
         "governance": governance_payload,
     })
 
@@ -1837,8 +1852,15 @@ def _persist_sweep_outputs(
             "primary_metric_value": float(ranked_rows[0]["sharpe"]) if ranked_rows else 0.0,
             "manifest_path": str(run_dir / "manifest.json"),
             "reproducibility_fingerprint": manifest["reproducibility_fingerprint"],
+            "run_id": manifest["run_id"],
+            "config_hash": manifest["config_hash"],
+            "config_checksum": manifest["config_checksum"],
+            "data_snapshot_checksum": manifest["data_snapshot_checksum"],
+            "manifest_checksum": manifest["manifest_checksum"],
             "parameters": parameters,
             "data_snapshot_identifiers": manifest["data_snapshot_identifiers"],
+            "metrics": ranked_rows[0] if ranked_rows else {},
+            "significance": {"robustness": robustness_report} if robustness_report else {},
             "governance": governance_payload,
         }
     )
@@ -2773,8 +2795,15 @@ def _persist_backtest_outputs(
             "primary_metric_value": float(metrics.get("sharpe", 0.0)),
             "manifest_path": str(run_dir / "manifest.json"),
             "reproducibility_fingerprint": manifest["reproducibility_fingerprint"],
+            "run_id": manifest["run_id"],
+            "config_hash": manifest["config_hash"],
+            "config_checksum": manifest["config_checksum"],
+            "data_snapshot_checksum": manifest["data_snapshot_checksum"],
+            "manifest_checksum": manifest["manifest_checksum"],
             "parameters": parameters or {},
             "data_snapshot_identifiers": data_snapshot or {},
+            "metrics": metrics,
+            "significance": {"robustness": robustness_report} if robustness_report else {},
             "governance": governance_payload,
         }
     )
@@ -2896,6 +2925,18 @@ def _compute_config_hash(parameters: dict[str, Any]) -> str:
     return _stable_fingerprint(parameters or {})
 
 
+def _normalize_governance_for_fingerprint(governance: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(governance, dict):
+        return {}
+    payload = dict(governance)
+    payload.pop("audit_trail", None)
+    return payload
+
+
+def _compute_manifest_checksum(manifest: dict[str, Any]) -> str:
+    return _stable_fingerprint(manifest)
+
+
 def _build_metric_table_manifest(*, run_type: str, table_names: list[str]) -> dict[str, Any]:
     tables: list[dict[str, Any]] = []
     for name in table_names:
@@ -2958,7 +2999,7 @@ def _build_run_manifest(*, run_type: str, parameters: dict[str, Any], data_snaps
         "parameters": parameters,
         "random_seeds": random_seeds,
         "data_snapshot_ids": data_snapshot,
-        "governance": governance,
+        "governance": _normalize_governance_for_fingerprint(governance),
     }
     if extra_fingerprint_payload:
         fingerprint_payload.update(extra_fingerprint_payload)
@@ -2978,14 +3019,24 @@ def _build_run_manifest(*, run_type: str, parameters: dict[str, Any], data_snaps
         "random_seeds": random_seeds,
         "dependency_versions": dependency_versions,
         "environment": _collect_environment_metadata(),
-        "governance": governance,
+        "governance": _normalize_governance_for_fingerprint(governance),
         "metric_tables": metric_tables or {},
         "reproducibility_fingerprint": _stable_fingerprint(fingerprint_payload),
     }
+    manifest["run_id"] = _stable_fingerprint({
+        "run_type": run_type,
+        "created_at": manifest["created_at"],
+        "config_hash": config_hash,
+        "data_snapshot_ids": data_snapshot,
+        "code_commit_hash": code_commit,
+    })
+    manifest["config_checksum"] = config_hash
+    manifest["data_snapshot_checksum"] = _stable_fingerprint(data_snapshot)
     if lineage is not None:
         manifest["lineage"] = lineage
     if result_summary is not None:
         manifest["result_summary"] = result_summary
+    manifest["manifest_checksum"] = _compute_manifest_checksum(manifest)
     return manifest
 
 
@@ -3013,6 +3064,18 @@ def _load_run_manifest(manifest_path: Path, *, strict: bool = True) -> dict[str,
         config_hash = _compute_config_hash(dict(manifest.get("parameters", {})))
         if config_hash != str(manifest.get("config_hash")):
             raise ValueError("Manifest config hash does not match serialized parameters")
+        if str(manifest.get("config_checksum", "")) not in {"", config_hash}:
+            raise ValueError("Manifest config checksum does not match serialized parameters")
+        if "data_snapshot_checksum" in manifest:
+            snapshot_checksum = _stable_fingerprint(dict(manifest.get("data_snapshot_ids", {})))
+            if snapshot_checksum != str(manifest.get("data_snapshot_checksum", "")):
+                raise ValueError("Manifest data snapshot checksum mismatch")
+        if "manifest_checksum" in manifest:
+            expected_checksum = str(manifest.get("manifest_checksum", ""))
+            materialized = dict(manifest)
+            materialized.pop("manifest_checksum", None)
+            if expected_checksum != _compute_manifest_checksum(materialized):
+                raise ValueError("Manifest checksum mismatch")
         dep_versions = manifest.get("dependency_versions", {})
         if isinstance(dep_versions, dict):
             current = _collect_dependency_versions()
@@ -3205,34 +3268,7 @@ def _evaluate_governance_gate_checks(
     return checks
 
 def _append_experiment_index(entry: dict[str, Any]) -> None:
-    BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    jsonl_path = BACKTEST_OUTPUT_DIR / "experiment_index.jsonl"
-    with jsonl_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, sort_keys=True) + "\n")
-
-    csv_path = BACKTEST_OUTPUT_DIR / "experiment_index.csv"
-    row = {
-        "timestamp": entry.get("timestamp"),
-        "run_type": entry.get("run_type"),
-        "run_dir": entry.get("run_dir"),
-        "code_version": entry.get("code_version"),
-        "metric_schema_version": entry.get("metric_schema_version"),
-        "random_seed": entry.get("random_seed"),
-        "primary_metric": entry.get("primary_metric"),
-        "primary_metric_value": entry.get("primary_metric_value"),
-        "manifest_path": entry.get("manifest_path"),
-        "reproducibility_fingerprint": entry.get("reproducibility_fingerprint"),
-        "parameters_json": json.dumps(entry.get("parameters", {}), sort_keys=True),
-        "data_snapshot_json": json.dumps(entry.get("data_snapshot_identifiers", {}), sort_keys=True),
-        "governance_json": json.dumps(entry.get("governance", {}), sort_keys=True),
-    }
-    fieldnames = list(row.keys())
-    write_header = not csv_path.exists()
-    with csv_path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
+    append_experiment_entry(BACKTEST_OUTPUT_DIR, entry)
 
 
 
@@ -3819,4 +3855,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
