@@ -22,6 +22,7 @@ from typing import Any, Callable
 import numpy as np
 
 from analysis.reporting import (
+    build_scenario_attribution_and_guardrails,
     build_backtest_robustness_report,
     build_drawdown_rows,
     build_sweep_robustness_report,
@@ -496,6 +497,20 @@ def run_time_series_momentum_backtest(
         fills=fill_rows,
     )
 
+    scenario_definitions = _build_stress_scenario_definitions(
+        timestamps=timestamps,
+        returns=returns,
+    )
+    scenario_results = _run_stress_scenario_wrappers(
+        returns=returns,
+        prices=prices,
+        scenario_definitions=scenario_definitions,
+    )
+    scenario_payload = build_scenario_attribution_and_guardrails(
+        baseline_metrics=metrics,
+        scenario_results=scenario_results,
+    )
+
     account_state = result.cost_breakdown.get("account_state", {})
     merged_risk_diagnostics = dict(portfolio_result.diagnostics)
     for key in (
@@ -523,6 +538,7 @@ def run_time_series_momentum_backtest(
         data_snapshot=_build_data_snapshot_identifiers(arrays=arrays, cache_root=cache_root, timeframe=timeframe),
         random_seed=None,
         robustness_report=robustness_report,
+        scenario_payload=scenario_payload,
         regime_labels=regime_labels,
         regime_pnl_attribution=regime_pnl_attribution,
         governance=governance_payload,
@@ -2247,6 +2263,123 @@ def _fills_csv(rows: list[dict[str, object]]) -> str:
     ]
     return "\n".join([header, *body]) + "\n"
 
+def _build_stress_scenario_definitions(*, timestamps: np.ndarray, returns: np.ndarray) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    n_obs = int(np.asarray(returns).size)
+    if n_obs <= 0:
+        return rows
+
+    window = max(1, min(n_obs, int(max(5, n_obs * 0.2))))
+    rows.append({"name": "historical_recent_window", "type": "historical_window", "start": max(0, n_obs - window), "end": n_obs})
+    rows.append({"name": "historical_first_window", "type": "historical_window", "start": 0, "end": window})
+
+    rows.extend(
+        [
+            {
+                "name": "synthetic_returns_crash",
+                "type": "synthetic_shock",
+                "transforms": {"returns_multiplier": 1.8, "returns_shift": -0.0025},
+            },
+            {
+                "name": "synthetic_spread_widening",
+                "type": "synthetic_shock",
+                "transforms": {"spread_multiplier": 2.0, "returns_multiplier": 0.9},
+            },
+            {
+                "name": "synthetic_liquidity_drought",
+                "type": "synthetic_shock",
+                "transforms": {"liquidity_multiplier": 0.5, "returns_multiplier": 0.85},
+            },
+            {
+                "name": "synthetic_borrow_unavailable",
+                "type": "synthetic_shock",
+                "transforms": {"borrow_availability": 0.2, "returns_shift": -0.001},
+            },
+            {
+                "name": "synthetic_correlation_breakdown",
+                "type": "synthetic_shock",
+                "transforms": {"correlation_breakdown": 1.0, "returns_multiplier": 0.8},
+            },
+        ]
+    )
+    return rows
+
+
+def _compute_scenario_metrics(returns: np.ndarray) -> dict[str, float]:
+    arr = np.asarray(returns, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return {"total_return": 0.0, "max_drawdown": 0.0, "sharpe": 0.0}
+    equity = np.cumprod(1.0 + arr)
+    peak = np.maximum.accumulate(equity)
+    drawdown = equity / np.where(peak == 0.0, 1.0, peak) - 1.0
+    mean = float(np.mean(arr))
+    vol = float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0
+    sharpe = (mean / vol) * np.sqrt(252.0) if vol > 1e-12 else 0.0
+    return {
+        "total_return": float(equity[-1] - 1.0),
+        "max_drawdown": float(np.min(drawdown)) if drawdown.size else 0.0,
+        "sharpe": float(sharpe),
+    }
+
+
+def _apply_scenario_transforms(*, base_returns: np.ndarray, prices: np.ndarray, transforms: dict[str, Any]) -> np.ndarray:
+    shocked = np.asarray(base_returns, dtype=float).copy()
+    returns_multiplier = float(transforms.get("returns_multiplier", 1.0))
+    returns_shift = float(transforms.get("returns_shift", 0.0))
+    shocked = shocked * returns_multiplier + returns_shift
+
+    spread_mult = float(transforms.get("spread_multiplier", 1.0))
+    liquidity_mult = float(transforms.get("liquidity_multiplier", 1.0))
+    borrow_avail = float(transforms.get("borrow_availability", 1.0))
+    corr_break = float(transforms.get("correlation_breakdown", 0.0))
+
+    friction_penalty = 0.0001 * max(0.0, spread_mult - 1.0)
+    liquidity_penalty = 0.0001 * max(0.0, 1.0 - liquidity_mult)
+    borrow_penalty = 0.0002 * max(0.0, 1.0 - borrow_avail)
+    shocked = shocked - (friction_penalty + liquidity_penalty + borrow_penalty)
+
+    if corr_break > 0.0 and np.asarray(prices).ndim == 2 and prices.shape[1] > 1:
+        asset_rets = np.diff(np.asarray(prices, dtype=float), axis=0) / np.where(prices[:-1] == 0.0, 1.0, prices[:-1])
+        dispersion = np.std(asset_rets, axis=1)
+        if dispersion.size:
+            scale = np.mean(dispersion) if np.mean(dispersion) > 0 else 1.0
+            dispersion_effect = np.zeros_like(shocked)
+            dispersion_effect[1 : 1 + min(dispersion.size, shocked.size - 1)] = (dispersion / scale - 1.0) * 0.0005 * corr_break
+            shocked = shocked + dispersion_effect
+
+    return shocked
+
+
+def _run_stress_scenario_wrappers(*, returns: np.ndarray, prices: np.ndarray, scenario_definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    base_returns = np.asarray(returns, dtype=float).reshape(-1)
+    rows: list[dict[str, Any]] = []
+    for scenario in scenario_definitions:
+        name = str(scenario.get("name", "unnamed"))
+        kind = str(scenario.get("type", "synthetic_shock"))
+        if kind == "historical_window":
+            start = int(scenario.get("start", 0))
+            end = int(scenario.get("end", base_returns.size))
+            shocked = base_returns[max(0, start) : max(0, end)]
+        else:
+            transforms = scenario.get("transforms", {})
+            shocked = _apply_scenario_transforms(
+                base_returns=base_returns,
+                prices=prices,
+                transforms=transforms if isinstance(transforms, dict) else {},
+            )
+        metrics = _compute_scenario_metrics(shocked)
+        rows.append(
+            {
+                "name": name,
+                "type": kind,
+                "observation_count": int(shocked.size),
+                "pnl_total": float(np.sum(shocked)),
+                "metrics": metrics,
+            }
+        )
+    return rows
+
+
 def _persist_backtest_outputs(
     *,
     timestamps: np.ndarray,
@@ -2261,6 +2394,7 @@ def _persist_backtest_outputs(
     data_snapshot: dict[str, Any] | None = None,
     random_seed: int | None = None,
     robustness_report: dict[str, Any] | None = None,
+    scenario_payload: dict[str, Any] | None = None,
     regime_labels: np.ndarray | None = None,
     regime_pnl_attribution: list[dict[str, float | str | int]] | None = None,
     governance: dict[str, Any] | None = None,
@@ -2353,6 +2487,8 @@ def _persist_backtest_outputs(
 
     if robustness_report is not None:
         _write_robustness_report(run_dir=run_dir, robustness_report=robustness_report)
+    if scenario_payload is not None:
+        (run_dir / "stress_scenarios.json").write_text(json.dumps(scenario_payload, indent=2))
 
     if dataset_contracts is not None:
         audit_payload = {
