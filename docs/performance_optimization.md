@@ -47,3 +47,10 @@ Rationale:
 - Small floating-point drift may appear in cumulative calculations (e.g., equity curve), so a relative tolerance is also enforced.
 
 See `tests/test_optimized_parity.py` for the executable parity policy.
+
+
+## Columnar storage and serialization boundary benchmarking
+
+- `FeatureStore.point_in_time_join` now uses a vectorized as-of lookup path (`numpy.searchsorted`) grouped by entity, and keeps an in-memory cache keyed by observation/signature for repeated feature computations.
+- `FeatureStore.export_snapshot_columnar` supports Parquet/Arrow export when `pyarrow` is available, preserving point-in-time snapshots in columnar format for downstream backtest/research workloads.
+- `src.backtesting.perf.benchmark_serialization_boundaries` measures representative NPZ vs JSON vs Parquet write/read timings and payload sizes to identify I/O and serialization hotspots before optimizing pipeline boundaries.

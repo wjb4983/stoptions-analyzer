@@ -2,7 +2,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
+import importlib.util
+
+import numpy as np
+
+
+_pyarrow_spec = importlib.util.find_spec("pyarrow")
+if _pyarrow_spec:
+    import pyarrow as pa
+    import pyarrow.feather as feather
+    import pyarrow.parquet as pq
+else:
+    pa = None
+    feather = None
+    pq = None
 
 
 class FeatureLeakageError(ValueError):
@@ -28,9 +43,17 @@ class FeatureSnapshot:
     records: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class _PreparedSnapshot:
+    entities: dict[Any, tuple[np.ndarray, np.ndarray]]
+
+
 class FeatureStore:
-    def __init__(self) -> None:
+    def __init__(self, *, point_in_time_cache_size: int = 16) -> None:
         self._snapshots: dict[str, list[FeatureSnapshot]] = {}
+        self._prepared: dict[tuple[str, int], _PreparedSnapshot] = {}
+        self._point_in_time_cache: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+        self._point_in_time_cache_size = max(1, int(point_in_time_cache_size))
 
     def register_snapshot(
         self,
@@ -58,6 +81,8 @@ class FeatureStore:
             records=tuple(_normalize_record(r, entity_key, timestamp_key, value_key) for r in records),
         )
         versions.append(snapshot)
+        self._prepared[(feature_name, snapshot.version)] = _prepare_snapshot(snapshot)
+        self._point_in_time_cache.clear()
         return snapshot
 
     def get_snapshot(self, feature_name: str, version: int | None = None) -> FeatureSnapshot:
@@ -81,7 +106,6 @@ class FeatureStore:
         strict: bool = True,
     ) -> list[dict[str, Any]]:
         feature_versions = feature_versions or {}
-        enriched: list[dict[str, Any]] = []
 
         snapshots = {
             feature_name: self.get_snapshot(feature_name, version)
@@ -92,38 +116,93 @@ class FeatureStore:
                 if versions:
                     snapshots[feature_name] = versions[-1]
 
-        for obs in observations:
-            row = dict(obs)
-            obs_ts = _to_datetime(obs[observation_timestamp_key])
-            entity = obs[observation_entity_key]
+        cache_key = _build_point_in_time_cache_key(
+            observations=observations,
+            snapshots=snapshots,
+            observation_entity_key=observation_entity_key,
+            observation_timestamp_key=observation_timestamp_key,
+            strict=strict,
+        )
+        cached = self._point_in_time_cache.get(cache_key)
+        if cached is not None:
+            return [dict(row) for row in cached]
 
-            for feature_name, snapshot in snapshots.items():
-                cutoff = obs_ts - snapshot.metadata.lag
-                candidate = _latest_record_for_entity(
-                    records=snapshot.records,
-                    entity_key=snapshot.entity_key,
-                    timestamp_key=snapshot.timestamp_key,
-                    value_key=snapshot.value_key,
-                    entity=entity,
-                    max_timestamp=cutoff,
-                )
+        enriched: list[dict[str, Any]] = [dict(obs) for obs in observations]
+        obs_entities = [obs[observation_entity_key] for obs in observations]
+        obs_ts_ns = np.asarray(
+            [_to_datetime(obs[observation_timestamp_key]).timestamp() * 1_000_000_000 for obs in observations],
+            dtype=np.int64,
+        )
 
-                if strict and candidate is not None and candidate["timestamp"] > cutoff:
+        if not snapshots:
+            self._cache_point_in_time_join(cache_key, enriched)
+            return enriched
+
+        for feature_name, snapshot in snapshots.items():
+            prepared = self._prepared.get((feature_name, snapshot.version))
+            if prepared is None:
+                prepared = _prepare_snapshot(snapshot)
+                self._prepared[(feature_name, snapshot.version)] = prepared
+            lag_ns = int(snapshot.metadata.lag.total_seconds() * 1_000_000_000)
+            values, asofs = _vectorized_asof_lookup(
+                prepared=prepared,
+                entities=obs_entities,
+                cutoffs_ns=obs_ts_ns - lag_ns,
+            )
+
+            for idx, row in enumerate(enriched):
+                if strict and asofs[idx] is not None and asofs[idx] > _ns_to_datetime(obs_ts_ns[idx] - lag_ns):
                     raise FeatureLeakageError(
-                        f"Leakage detected for '{feature_name}' entity={entity}: "
-                        f"candidate timestamp {candidate['timestamp'].isoformat()} exceeds cutoff {cutoff.isoformat()}"
+                        f"Leakage detected for '{feature_name}' entity={obs_entities[idx]}: "
+                        f"candidate timestamp {asofs[idx].isoformat()} exceeds cutoff "
+                        f"{_ns_to_datetime(obs_ts_ns[idx] - lag_ns).isoformat()}"
                     )
-
-                row[feature_name] = None if candidate is None else candidate["value"]
-                row[f"{feature_name}__asof"] = None if candidate is None else candidate["timestamp"]
+                row[feature_name] = values[idx]
+                row[f"{feature_name}__asof"] = asofs[idx]
                 row[f"{feature_name}__version"] = snapshot.version
                 row[f"{feature_name}__source"] = snapshot.metadata.source
                 row[f"{feature_name}__lag_seconds"] = int(snapshot.metadata.lag.total_seconds())
                 row[f"{feature_name}__refresh_cadence_seconds"] = int(snapshot.metadata.refresh_cadence.total_seconds())
 
-            enriched.append(row)
-
+        self._cache_point_in_time_join(cache_key, enriched)
         return enriched
+
+    def export_snapshot_columnar(
+        self,
+        *,
+        feature_name: str,
+        version: int | None = None,
+        output_path: str | Path,
+        format: str = "parquet",
+    ) -> Path:
+        if pa is None:
+            raise RuntimeError("pyarrow is required for Parquet/Arrow exports")
+
+        snapshot = self.get_snapshot(feature_name, version)
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        table = pa.Table.from_pylist(list(snapshot.records))
+        fmt = format.lower().strip()
+        if fmt == "parquet":
+            pq.write_table(table, path)
+        elif fmt in {"arrow", "feather"}:
+            feather.write_feather(table, path)
+        else:
+            raise ValueError("format must be one of: parquet, arrow, feather")
+        return path
+
+
+    def point_in_time_cache_info(self) -> dict[str, int]:
+        return {
+            "entries": len(self._point_in_time_cache),
+            "capacity": self._point_in_time_cache_size,
+        }
+
+    def _cache_point_in_time_join(self, key: tuple[Any, ...], rows: list[dict[str, Any]]) -> None:
+        self._point_in_time_cache[key] = [dict(item) for item in rows]
+        if len(self._point_in_time_cache) > self._point_in_time_cache_size:
+            oldest = next(iter(self._point_in_time_cache))
+            self._point_in_time_cache.pop(oldest, None)
 
 
 def generate_daily_feature_report(
@@ -201,3 +280,65 @@ def _latest_record_for_entity(
         return None
     chosen = max(candidates, key=lambda r: r[timestamp_key])
     return {"timestamp": chosen[timestamp_key], "value": chosen[value_key]}
+
+
+def _prepare_snapshot(snapshot: FeatureSnapshot) -> _PreparedSnapshot:
+    by_entity: dict[Any, list[tuple[int, Any]]] = {}
+    for record in snapshot.records:
+        entity = record[snapshot.entity_key]
+        ts = _to_datetime(record[snapshot.timestamp_key])
+        ns = int(ts.timestamp() * 1_000_000_000)
+        by_entity.setdefault(entity, []).append((ns, record[snapshot.value_key]))
+
+    prepared: dict[Any, tuple[np.ndarray, np.ndarray]] = {}
+    for entity, pairs in by_entity.items():
+        pairs.sort(key=lambda item: item[0])
+        ts = np.asarray([item[0] for item in pairs], dtype=np.int64)
+        values = np.asarray([item[1] for item in pairs], dtype=object)
+        prepared[entity] = (ts, values)
+    return _PreparedSnapshot(entities=prepared)
+
+
+def _vectorized_asof_lookup(*, prepared: _PreparedSnapshot, entities: list[Any], cutoffs_ns: np.ndarray) -> tuple[list[Any], list[datetime | None]]:
+    values: list[Any] = [None] * len(entities)
+    asofs: list[datetime | None] = [None] * len(entities)
+
+    idx_by_entity: dict[Any, list[int]] = {}
+    for idx, entity in enumerate(entities):
+        idx_by_entity.setdefault(entity, []).append(idx)
+
+    for entity, idxs in idx_by_entity.items():
+        payload = prepared.entities.get(entity)
+        if payload is None:
+            continue
+        entity_ts, entity_values = payload
+        entity_cutoffs = cutoffs_ns[np.asarray(idxs, dtype=int)]
+        pos = np.searchsorted(entity_ts, entity_cutoffs, side="right") - 1
+        valid = pos >= 0
+        for local, row_idx in enumerate(idxs):
+            if not valid[local]:
+                continue
+            pick = int(pos[local])
+            values[row_idx] = entity_values[pick].item() if hasattr(entity_values[pick], "item") else entity_values[pick]
+            asofs[row_idx] = _ns_to_datetime(int(entity_ts[pick]))
+    return values, asofs
+
+
+def _build_point_in_time_cache_key(
+    *,
+    observations: list[dict[str, Any]],
+    snapshots: dict[str, FeatureSnapshot],
+    observation_entity_key: str,
+    observation_timestamp_key: str,
+    strict: bool,
+) -> tuple[Any, ...]:
+    obs_sig = tuple(
+        (obs.get(observation_entity_key), _to_datetime(obs[observation_timestamp_key]).isoformat())
+        for obs in observations
+    )
+    snap_sig = tuple(sorted((name, snap.version) for name, snap in snapshots.items()))
+    return (observation_entity_key, observation_timestamp_key, strict, obs_sig, snap_sig)
+
+
+def _ns_to_datetime(value: int) -> datetime:
+    return datetime.utcfromtimestamp(value / 1_000_000_000)
