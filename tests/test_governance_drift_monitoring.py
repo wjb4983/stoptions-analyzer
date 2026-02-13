@@ -15,6 +15,41 @@ def test_evaluate_drift_monitoring_detects_breach() -> None:
     assert len(payload["alert_summaries"]) == 3
 
 
+def test_evaluate_drift_monitoring_feature_label_residual_and_policy() -> None:
+    payload = evaluate_drift_monitoring(
+        expected={
+            "features": {
+                "ret_1d": {"mean": 0.0, "std": 1.0, "psi": 0.01},
+                "vol_20d": {"mean": 0.2, "std": 0.1, "psi": 0.03},
+            },
+            "label": {"error_rate": 0.10, "psi": 0.04, "kld": 0.02},
+            "residual": {"mean": 0.0, "std": 1.0, "autocorr_lag1": 0.05},
+        },
+        observed={
+            "features": {
+                "ret_1d": {"mean": 0.9, "std": 1.9, "psi": 0.5},
+                "vol_20d": {"mean": 0.21, "std": 0.11, "psi": 0.04},
+            },
+            "label": {"error_rate": 0.20, "psi": 0.30, "kld": 0.20},
+            "residual": {"mean": 0.5, "std": 1.5, "autocorr_lag1": 0.4},
+            "performance_tracking": {
+                "pre_retrain": {"accuracy": 0.55, "rmse": 0.32, "sharpe": 0.6},
+                "post_retrain": {"accuracy": 0.72, "rmse": 0.25, "sharpe": 0.9},
+                "alerts": {"triggered": 20, "false_alarms": 2},
+            },
+        },
+        thresholds={"max_false_alarm_rate": 0.25},
+    )
+
+    assert payload["detectors"]["feature"]["features_evaluated"] == 2
+    assert payload["detectors"]["label"]["within_tolerance"] is False
+    assert payload["detectors"]["residual"]["within_tolerance"] is False
+    assert payload["policy_engine"]["recommended_action"] in {"retrain", "fallback"}
+    assert payload["performance_tracking"]["delta"]["accuracy"] > 0.0
+    assert payload["performance_tracking"]["alerts"]["within_tolerance"] is True
+    assert "route_to" in payload["dashboards"]
+
+
 def test_governance_metadata_includes_drift_monitoring_and_gate_check() -> None:
     governance = _build_governance_metadata(
         {
@@ -28,6 +63,7 @@ def test_governance_metadata_includes_drift_monitoring_and_gate_check() -> None:
     assert "drift_monitoring" in governance
     assert governance["gate_checks"]["drift_monitoring"] is True
     assert "friction_adjusted_edge" in governance["promotion_required_checks"]
+    assert "max_feature_mean_shift" in governance["gate_thresholds"]
 
     checks = _evaluate_governance_gate_checks(
         metrics={"signal_diagnostics_ready": True, "sharpe": 1.2, "rolling_sharpe_mean": 1.0, "turnover_total": 1.0, "friction_adjusted_edge": 1.2},
