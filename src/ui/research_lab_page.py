@@ -14,7 +14,13 @@ from backtesting.cache_runner import (
     run_strategy_optimization,
     run_walk_forward_backtest,
 )
-from config import BACKTEST_OUTPUT_DIR, DEFAULT_BACKTEST_SETTINGS
+from config import (
+    BACKTEST_OUTPUT_DIR,
+    CONFIG_DIR,
+    DEFAULT_BACKTEST_SETTINGS,
+    DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES,
+    HYPOTHESIS_RUBRIC_TEMPLATES_PATH,
+)
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
 
@@ -41,6 +47,9 @@ class ResearchLabPage(ttk.Frame):
         self._signal_options = ("ts_momentum", "ma_trend", "breakout")
         self._exit_signal_options = ("none", "momentum_flip", "trailing_stop", "max_hold")
         self._wizard_state_path = self._research_lab_dir / "wizard_state.json"
+        self._hypothesis_rubric_templates_path = HYPOTHESIS_RUBRIC_TEMPLATES_PATH
+        self._rubric_templates = self._load_rubric_templates()
+
 
         ttk.Label(self, text="Research Lab", font=("Arial", 18, "bold")).pack(pady=(12, 8))
         ttk.Label(
@@ -172,6 +181,16 @@ class ResearchLabPage(ttk.Frame):
         self.stress_overlay_spread_multiplier_var = tk.StringVar(value="2.5")
         self.stress_overlay_liquidity_multiplier_var = tk.StringVar(value="0.4")
 
+        profile_options = tuple(self._rubric_templates["profiles"].keys())
+        default_profile = str(self._rubric_templates.get("default_profile") or profile_options[0]) if profile_options else "intraday_alpha"
+        self.hypothesis_rubric_profile_var = tk.StringVar(value=default_profile)
+        default_scores = self._resolve_profile_defaults(default_profile)
+        self.hypothesis_novelty_var = tk.StringVar(value=f"{default_scores['novelty']:.2f}")
+        self.hypothesis_plausibility_var = tk.StringVar(value=f"{default_scores['plausibility']:.2f}")
+        self.hypothesis_implementation_complexity_var = tk.StringVar(value=f"{default_scores['implementation_complexity']:.2f}")
+        self.hypothesis_expected_capacity_var = tk.StringVar(value=f"{default_scores['expected_capacity']:.2f}")
+        self.hypothesis_robustness_var = tk.StringVar(value=f"{default_scores['robustness']:.2f}")
+
         row = 0
         ttk.Label(controls, text="Entry signals (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
         ttk.Entry(controls, textvariable=self.entry_signals_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
@@ -241,6 +260,30 @@ class ResearchLabPage(ttk.Frame):
         ttk.Entry(stress_row4, textvariable=self.stress_overlay_spread_multiplier_var, width=8).pack(side="left")
         ttk.Label(stress_row4, text=" / ").pack(side="left")
         ttk.Entry(stress_row4, textvariable=self.stress_overlay_liquidity_multiplier_var, width=8).pack(side="left")
+
+        row += 1
+        ttk.Label(controls, text="Hypothesis rubric profile").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        ttk.Combobox(
+            controls,
+            textvariable=self.hypothesis_rubric_profile_var,
+            values=profile_options,
+            state="readonly",
+            width=24,
+        ).grid(row=row, column=1, sticky="w", padx=8, pady=5)
+
+        row += 1
+        ttk.Label(controls, text="Hypothesis scores N/P/C/CAP/R").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        hypothesis_row = ttk.Frame(controls)
+        hypothesis_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(hypothesis_row, textvariable=self.hypothesis_novelty_var, width=6).pack(side="left")
+        ttk.Label(hypothesis_row, text=" / ").pack(side="left")
+        ttk.Entry(hypothesis_row, textvariable=self.hypothesis_plausibility_var, width=6).pack(side="left")
+        ttk.Label(hypothesis_row, text=" / ").pack(side="left")
+        ttk.Entry(hypothesis_row, textvariable=self.hypothesis_implementation_complexity_var, width=6).pack(side="left")
+        ttk.Label(hypothesis_row, text=" / ").pack(side="left")
+        ttk.Entry(hypothesis_row, textvariable=self.hypothesis_expected_capacity_var, width=6).pack(side="left")
+        ttk.Label(hypothesis_row, text=" / ").pack(side="left")
+        ttk.Entry(hypothesis_row, textvariable=self.hypothesis_robustness_var, width=6).pack(side="left")
 
 
     def _build_wizard_mode(self) -> None:
@@ -619,7 +662,53 @@ class ResearchLabPage(ttk.Frame):
             "lookback": lookback,
             "skip": skip,
             "costs_bps": costs_bps,
+            "rubric_profile": self.hypothesis_rubric_profile_var.get().strip() or "intraday_alpha",
+            "hypothesis_novelty": float(parse_float(self.hypothesis_novelty_var.get()) or 3.0),
+            "hypothesis_plausibility": float(parse_float(self.hypothesis_plausibility_var.get()) or 3.0),
+            "hypothesis_implementation_complexity": float(
+                parse_float(self.hypothesis_implementation_complexity_var.get()) or 3.0
+            ),
+            "hypothesis_expected_capacity": float(parse_float(self.hypothesis_expected_capacity_var.get()) or 3.0),
+            "hypothesis_robustness": float(parse_float(self.hypothesis_robustness_var.get()) or 3.0),
         }
+
+    def _load_rubric_templates(self) -> dict[str, Any]:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        if not self._hypothesis_rubric_templates_path.exists():
+            self._hypothesis_rubric_templates_path.write_text(
+                json.dumps(DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            return dict(DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES)
+
+        try:
+            payload = json.loads(self._hypothesis_rubric_templates_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return dict(DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES)
+
+        if not isinstance(payload, dict) or "profiles" not in payload:
+            return dict(DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES)
+        return payload
+
+    def _resolve_profile_defaults(self, profile_name: str) -> dict[str, float]:
+        profile = self._resolve_rubric_profile(profile_name)
+        defaults = profile.get("defaults", {})
+        return {
+            "novelty": float(defaults.get("novelty", 3.0)),
+            "plausibility": float(defaults.get("plausibility", 3.0)),
+            "implementation_complexity": float(defaults.get("implementation_complexity", 3.0)),
+            "expected_capacity": float(defaults.get("expected_capacity", 3.0)),
+            "robustness": float(defaults.get("robustness", 3.0)),
+        }
+
+    def _resolve_rubric_profile(self, profile_name: str) -> dict[str, Any]:
+        profiles = self._rubric_templates.get("profiles", {})
+        if profile_name in profiles and isinstance(profiles[profile_name], dict):
+            return profiles[profile_name]
+        fallback = str(self._rubric_templates.get("default_profile", "intraday_alpha"))
+        if fallback in profiles and isinstance(profiles[fallback], dict):
+            return profiles[fallback]
+        return DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES["profiles"]["intraday_alpha"]
 
     def run_walk_forward(self) -> None:
         self._start_worker(self._run_walk_forward_workflow, "Walk-forward validation")
@@ -775,11 +864,11 @@ class ResearchLabPage(ttk.Frame):
             stress_controls=dict(config.stress_controls),
         )
 
-    def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any]) -> str:
+    def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
         self._research_lab_dir.mkdir(parents=True, exist_ok=True)
         hypothesis_id = f"hyp_{date.today().strftime('%Y%m%d')}_{len(context['tickers'])}t"
         idea_record = self._build_idea_record(hypothesis_id=hypothesis_id, context=context)
-        scored = self._score_hypothesis(idea_record)
+        scored = self._score_hypothesis(idea_record, context)
         promoted = scored["decision"] == "accept"
         experiment_path = self._write_experiment_skeleton(scored, context) if promoted else None
         self._append_funnel_event(scored)
@@ -844,27 +933,45 @@ class ResearchLabPage(ttk.Frame):
             },
         }
 
-    def _score_hypothesis(self, record: dict[str, Any]) -> dict[str, Any]:
-        rubric = {
-            "novelty": 3.2,
-            "plausibility": 4.0,
-            "implementation_complexity": 2.5,
-            "expected_capacity": 3.3,
-            "robustness": 3.7,
+    def _score_hypothesis(self, record: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        profile_name = str(context.get("rubric_profile", "intraday_alpha"))
+        profile = self._resolve_rubric_profile(profile_name)
+        user_scores = {
+            "novelty": float(context.get("hypothesis_novelty", profile["defaults"]["novelty"])),
+            "plausibility": float(context.get("hypothesis_plausibility", profile["defaults"]["plausibility"])),
+            "implementation_complexity": float(
+                context.get("hypothesis_implementation_complexity", profile["defaults"]["implementation_complexity"])
+            ),
+            "expected_capacity": float(context.get("hypothesis_expected_capacity", profile["defaults"]["expected_capacity"])),
+            "robustness": float(context.get("hypothesis_robustness", profile["defaults"]["robustness"])),
         }
-        complexity_adjusted = 6.0 - float(rubric["implementation_complexity"])
+
+        complexity_adjusted = max(0.0, 6.0 - user_scores["implementation_complexity"])
+        weights = profile["weights"]
         total = (
-            float(rubric["novelty"]) * 0.2
-            + float(rubric["plausibility"]) * 0.3
-            + complexity_adjusted * 0.15
-            + float(rubric["expected_capacity"]) * 0.2
-            + float(rubric["robustness"]) * 0.15
+            user_scores["novelty"] * float(weights["novelty"])
+            + user_scores["plausibility"] * float(weights["plausibility"])
+            + complexity_adjusted * float(weights["complexity_adjusted"])
+            + user_scores["expected_capacity"] * float(weights["expected_capacity"])
+            + user_scores["robustness"] * float(weights["robustness"])
         )
 
-        accepted = total >= 3.2 and float(rubric["plausibility"]) >= 3.0 and float(rubric["robustness"]) >= 3.0
+        thresholds = profile["thresholds"]
+        accepted = (
+            total >= float(thresholds["min_total"])
+            and user_scores["plausibility"] >= float(thresholds["min_plausibility"])
+            and user_scores["robustness"] >= float(thresholds["min_robustness"])
+        )
         decision = "accept" if accepted else "reject"
         reason = "Clears minimum weighted rubric thresholds" if accepted else "Fails weighted rubric threshold"
-        record["rubric"] = {**rubric, "total_score": total}
+        record["rubric"] = {
+            **user_scores,
+            "profile": profile_name,
+            "weights": dict(weights),
+            "thresholds": dict(thresholds),
+            "complexity_adjusted": complexity_adjusted,
+            "total_score": total,
+        }
         record["decision"] = decision
         record["decision_reason"] = reason
         record["promotion_or_rejection"] = {
