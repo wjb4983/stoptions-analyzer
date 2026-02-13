@@ -34,3 +34,15 @@ Artifacts written in `reports/`:
 
 - `slippage_calibration_snapshots.json`: dated parameter snapshots with `stable` flags.
 - `calibration_report.json`: fit error and stability diagnostics for calibration quality.
+
+## Benchmark scorecard bundle
+
+Run the benchmark bundle with fixed datasets and expected ranges:
+
+```bash
+python reports/benchmark_bundle.py
+```
+
+This writes a single artifact per run:
+
+- `benchmark_scorecard.json`: robust OOS, statistical significance, execution realism, stress resilience, and reproducibility checks with a promotion gate that fails when any critical dimension fails.
