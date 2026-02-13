@@ -83,6 +83,7 @@ from backtesting.optimization import (
     optimize,
 )
 from backtesting.experiment_registry import append_experiment_entry
+from backtesting.monitoring import evaluate_drift_monitoring
 
 
 LOGGER = logging.getLogger(__name__)
@@ -96,9 +97,9 @@ METRIC_TABLE_SCHEMA_VERSIONS: dict[str, str] = {
 PROMOTION_STATES = ("research", "paper", "shadow", "production")
 PROMOTION_REQUIRED_CHECKS: dict[str, list[str]] = {
     "research": ["dataset_lock", "signal_diagnostics"],
-    "paper": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold"],
-    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity"],
-    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "approval"],
+    "paper": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "drift_monitoring"],
+    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring"],
+    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "approval"],
 }
 
 
@@ -3339,7 +3340,16 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "min_stability_score": _float("min_stability_score", 0.55),
         "max_turnover_total": _float("max_turnover_total", 4.0),
         "min_capacity_score": _float("min_capacity_score", 0.5),
+        "max_signal_agreement_drift": _float("max_signal_agreement_drift", 0.10),
+        "max_fill_slippage_drift_bps": _float("max_fill_slippage_drift_bps", 5.0),
+        "max_pnl_attribution_divergence": _float("max_pnl_attribution_divergence", 0.15),
     }
+
+    drift_monitoring = evaluate_drift_monitoring(
+        expected=source.get("expected_outcomes") if isinstance(source.get("expected_outcomes"), dict) else {},
+        observed=source.get("observed_outcomes") if isinstance(source.get("observed_outcomes"), dict) else {},
+        thresholds=gate_thresholds,
+    )
 
     gate_checks = {
         "dataset_lock": bool(source.get("dataset_snapshot_lock", "").strip()),
@@ -3348,6 +3358,7 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "turnover_capacity": bool(checks.get("turnover_capacity", False)),
         "approval": bool(checks.get("approval", False)),
         "signal_diagnostics": bool(checks.get("signal_diagnostics", False)),
+        "drift_monitoring": bool(drift_monitoring.get("within_tolerance", False)),
     }
 
     missing_required = [name for name in required_checks if not gate_checks.get(name, False)]
@@ -3362,6 +3373,7 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "promotion_required_checks": required_checks,
         "gate_thresholds": gate_thresholds,
         "gate_checks": gate_checks,
+        "drift_monitoring": drift_monitoring,
         "missing_required_checks": missing_required,
         "is_promotion_ready": not missing_required,
         "audit_trail": [
@@ -3398,6 +3410,8 @@ def _evaluate_governance_gate_checks(
     capacity_score = max(0.0, 1.0 - (turnover_total / max(max_turnover, 1e-9)))
 
     signal_diag_ready = bool(metrics.get("signal_diagnostics_ready", False))
+    drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
+    drift_within_tolerance = bool(drift_monitoring.get("within_tolerance", False))
 
     checks = {
         "dataset_lock": bool(governance.get("dataset_snapshot_lock")),
@@ -3406,6 +3420,7 @@ def _evaluate_governance_gate_checks(
         "stability_threshold": stability_score >= min_stability,
         "turnover_capacity": turnover_total <= max_turnover and capacity_score >= min_capacity,
         "approval": str(governance.get("approval_status", "pending")).lower() in {"approved", "waived"},
+        "drift_monitoring": drift_within_tolerance,
     }
     return checks
 
