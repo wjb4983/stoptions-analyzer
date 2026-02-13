@@ -1,0 +1,36 @@
+method: propensity_score_matching
+hypothesis_id: ""
+dataset_snapshot_lock: ""
+owner: ""
+
+setup:
+  treatment_definition: ""
+  covariates:
+    - lag_return
+    - lag_volatility
+    - liquidity
+    - size
+    - beta
+  matching:
+    ratio: 1
+    caliper: 0.05
+    replacement: false
+
+estimation:
+  propensity_model: logistic
+  outcome_model: ate_on_treated
+
+balance_checks:
+  standardized_mean_diff_threshold: 0.10
+  ks_test_pvalue_threshold: 0.05
+
+robustness:
+  sensitivity_analysis: true
+  placebo_outcome_tests: true
+
+report_fields:
+  effect: 0.0
+  effect_tstat: 0.0
+  pretrend_pvalue: 1.0
+  placebo_pvalue: 1.0
+  relative_attenuation: 0.0

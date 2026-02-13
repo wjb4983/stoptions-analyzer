@@ -36,3 +36,79 @@ def test_governance_metadata_includes_drift_monitoring_and_gate_check() -> None:
     )
     assert checks["drift_monitoring"] is True
     assert checks["friction_adjusted_edge"] is True
+
+
+
+def test_governance_metadata_requires_causal_robustness_for_paper() -> None:
+    governance = _build_governance_metadata(
+        {
+            "promotion_state": "paper",
+            "dataset_snapshot_lock": "snapshot:v2",
+            "causal_validation": {
+                "methods": [
+                    {
+                        "method": "difference_in_differences",
+                        "effect_tstat": 2.6,
+                        "pretrend_pvalue": 0.31,
+                        "placebo_pvalue": 0.22,
+                        "relative_attenuation": 0.21,
+                    },
+                    {
+                        "method": "synthetic_control",
+                        "effect_tstat": 2.1,
+                        "pretrend_pvalue": 0.28,
+                        "placebo_pvalue": 0.17,
+                        "relative_attenuation": 0.25,
+                    },
+                    {
+                        "method": "propensity_score_matching",
+                        "effect_tstat": 2.2,
+                        "pretrend_pvalue": 0.19,
+                        "placebo_pvalue": 0.09,
+                        "relative_attenuation": 0.30,
+                    },
+                ]
+            },
+        }
+    )
+    assert "causal_robustness" in governance["promotion_required_checks"]
+    assert governance["causal_robustness"]["pass"] is True
+    checks = _evaluate_governance_gate_checks(
+        metrics={"signal_diagnostics_ready": True, "sharpe": 0.8, "rolling_sharpe_mean": 0.7, "turnover_total": 1.2, "friction_adjusted_edge": 0.7},
+        fold_rows=[{"fold": 1}, {"fold": 2}, {"fold": 3}],
+        governance=governance,
+    )
+    assert checks["causal_robustness"] is True
+
+
+
+def test_governance_causal_robustness_fails_on_missing_method_and_placebo() -> None:
+    governance = _build_governance_metadata(
+        {
+            "promotion_state": "paper",
+            "dataset_snapshot_lock": "snapshot:v3",
+            "causal_validation": {
+                "methods": [
+                    {
+                        "method": "difference_in_differences",
+                        "effect_tstat": 2.4,
+                        "pretrend_pvalue": 0.25,
+                        "placebo_pvalue": 0.03,
+                        "relative_attenuation": 0.20,
+                    },
+                    {
+                        "method": "synthetic_control",
+                        "effect_tstat": 2.0,
+                        "pretrend_pvalue": 0.14,
+                        "placebo_pvalue": 0.08,
+                        "relative_attenuation": 0.19,
+                    },
+                ]
+            },
+        }
+    )
+    assert governance["causal_robustness"]["pass"] is False
+    assert "propensity_score_matching" in governance["causal_robustness"]["missing_methods"]
+    method_rows = governance["causal_robustness"]["method_results"]
+    did = [row for row in method_rows if row["method"] == "difference_in_differences"][0]
+    assert did["pass"] is False

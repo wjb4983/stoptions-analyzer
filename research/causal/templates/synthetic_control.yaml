@@ -1,0 +1,34 @@
+method: synthetic_control
+hypothesis_id: ""
+dataset_snapshot_lock: ""
+owner: ""
+
+setup:
+  treated_unit: ""
+  donor_pool:
+    include: []
+    exclude: []
+  matching_horizon_bars: 120
+  intervention_time: ""
+
+estimation:
+  objective: minimize_pre_intervention_rmse
+  predictors:
+    - returns_lags
+    - realized_vol
+    - turnover
+
+robustness:
+  leave_one_out_donors: true
+  in_time_placebo_shifts:
+    - -40
+    - -20
+    - 20
+  in_space_placebo_units: true
+
+report_fields:
+  effect: 0.0
+  effect_tstat: 0.0
+  pretrend_pvalue: 1.0
+  placebo_pvalue: 1.0
+  relative_attenuation: 0.0

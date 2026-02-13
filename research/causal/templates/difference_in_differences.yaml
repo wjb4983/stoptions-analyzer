@@ -1,0 +1,38 @@
+method: difference_in_differences
+hypothesis_id: ""
+dataset_snapshot_lock: ""
+owner: ""
+
+setup:
+  event_type: earnings|macro|policy|flow
+  treatment_definition: ""
+  control_definition: ""
+  panel_frequency: daily
+  pre_event_window_bars: 60
+  post_event_window_bars: 20
+  fixed_effects:
+    - asset
+    - date
+  cluster_errors_by:
+    - asset
+
+estimation:
+  model: "y_it ~ treat_i * post_t + controls + FE_asset + FE_date"
+  controls:
+    - liquidity_proxy
+    - volatility_proxy
+    - beta_proxy
+
+robustness:
+  event_study_leads_lags: true
+  heterogeneous_effect_slices:
+    - sector
+    - size_bucket
+  winsorize_pct: 0.01
+
+report_fields:
+  effect: 0.0
+  effect_tstat: 0.0
+  pretrend_pvalue: 1.0
+  placebo_pvalue: 1.0
+  relative_attenuation: 0.0
