@@ -61,6 +61,17 @@ PYTHONPATH=src python -m backtesting.cache_runner sweep \
   --top-n 10
 ```
 
+
+### Execution modeling notes (MVP vs implemented)
+
+The backtesting MVP execution assumptions and current implementation details are documented in `docs/backtest_mvp.md`, including:
+
+- partial-fill support with participation caps and residual carry,
+- latency inputs (`latency_bars`, `latency_ms`),
+- queue-rank effects (`queue_rank_proxy`),
+- a model-risk/assumptions table linked to execution and event-driven adapter classes, and
+- deterministic vs stochastic execution-setting examples.
+
 Sweep outputs are written under `src/data/backtest_outputs/tsmom_sweep_*` and include:
 - `leaderboard.csv` / `leaderboard.json`
 - `per_combo_summary.csv` / `per_combo_summary.json`
