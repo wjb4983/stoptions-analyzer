@@ -339,3 +339,26 @@ def test_covariance_ledoit_wolf_and_oas_estimators_recorded() -> None:
     assert all(est == "ledoit_wolf" for est in lw_estimators[2:])
     assert oas_estimators[:2] == ["sample", "sample"]
     assert all(est == "oas" for est in oas_estimators[2:])
+
+
+def test_residualized_signals_available_when_enabled() -> None:
+    prices = np.array(
+        [
+            [100.0, 80.0, 50.0],
+            [101.0, 79.0, 51.0],
+            [102.0, 78.0, 52.0],
+        ]
+    )
+    raw = np.array(
+        [
+            [1.0, 0.5, -0.5],
+            [1.1, 0.4, -0.6],
+            [1.2, 0.3, -0.7],
+        ]
+    )
+    cfg = PortfolioConstructionConfig(method="equal_weight", use_residual_signals=True)
+    result = construct_target_weights(raw_signals=raw, prices=prices, symbol_order=["A", "B", "C"], config=cfg)
+    residualized = result.diagnostics["residualized_signals"]
+    assert isinstance(residualized, np.ndarray)
+    assert residualized.shape == raw.shape
+    assert not np.allclose(residualized, raw)

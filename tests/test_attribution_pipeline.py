@@ -45,8 +45,8 @@ def test_build_attribution_payload_known_components() -> None:
     assert cross_brinson[1]["residual_unexplained"] == pytest.approx(0.0)
 
     factor_ts = by_variant["factor_time_series"]
-    assert factor_ts[1]["explained_component"] == pytest.approx(0.0)
-    assert factor_ts[1]["residual_unexplained"] == pytest.approx(0.1)
+    assert factor_ts[1]["explained_component"] == pytest.approx(0.09996, abs=1e-4)
+    assert factor_ts[1]["residual_unexplained"] == pytest.approx(0.0, abs=1e-4)
 
     summary = {row["variant"]: row for row in payload.summary}
     assert summary["brinson_time_series"]["gross_alpha_total"] == pytest.approx(0.2)

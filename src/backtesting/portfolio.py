@@ -5,6 +5,8 @@ from typing import Literal
 
 import numpy as np
 
+from analysis.factor_exposure import build_factor_exposure_model, residualize_alpha_signals
+
 
 PortfolioMethod = Literal["equal_weight", "vol_target", "inverse_vol", "capped_optimization", "hrp", "herc"]
 CovarianceEstimator = Literal["sample", "ewma", "shrinkage", "ledoit_wolf", "oas", "robust"]
@@ -54,6 +56,7 @@ class PortfolioConstructionConfig:
     exposure_penalty: float = 0.0
     transaction_cost_penalty: float = 0.0
     implementation_shortfall_penalty: float = 0.0
+    use_residual_signals: bool = False
     scenario_risk_penalty: float = 0.0
     tail_scenarios: np.ndarray | None = None
     cvar_confidence: float = 0.95
@@ -109,6 +112,12 @@ def construct_target_weights(
     underlier_map = underlying_by_symbol or {}
 
     factor_exposures = _factor_exposure_for_horizon(config.factor_exposures, periods=periods, assets=assets)
+    residual_signals = np.array(signals, dtype=float, copy=True)
+    if bool(config.use_residual_signals):
+        if factor_exposures is None:
+            factor_model = build_factor_exposure_model(prices=px)
+            factor_exposures = factor_model.exposures_by_asset
+        residual_signals = residualize_alpha_signals(raw_signals=signals, factor_exposures=factor_exposures)
     factor_covariances = _factor_covariance_for_horizon(config.factor_covariances, periods=periods)
     tail_scenarios = _tail_scenarios_for_horizon(config.tail_scenarios, periods=periods, assets=assets)
     regimes = _regime_for_horizon(config.regime_labels, periods=periods)
@@ -131,7 +140,7 @@ def construct_target_weights(
     max_underlying_delta_exposure = np.zeros(periods, dtype=float)
 
     for idx in range(periods):
-        row = np.nan_to_num(signals[idx], nan=0.0, posinf=0.0, neginf=0.0)
+        row = np.nan_to_num(residual_signals[idx], nan=0.0, posinf=0.0, neginf=0.0)
         tradable = np.isfinite(px[idx]) & (px[idx] > 0.0)
         row[~tradable] = 0.0
 
@@ -280,6 +289,7 @@ def construct_target_weights(
         "tail_expected_shortfall": tail_expected_shortfall,
         "tail_constraint_active": tail_constraint_active,
         "net_gamma_exposure": net_gamma_exposure,
+        "residualized_signals": residual_signals,
         "max_vega_bucket_exposure": max_vega_bucket_exposure,
         "max_underlying_delta_exposure": max_underlying_delta_exposure,
     }
