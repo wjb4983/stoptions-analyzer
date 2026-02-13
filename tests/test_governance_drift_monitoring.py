@@ -112,3 +112,11 @@ def test_governance_causal_robustness_fails_on_missing_method_and_placebo() -> N
     method_rows = governance["causal_robustness"]["method_results"]
     did = [row for row in method_rows if row["method"] == "difference_in_differences"][0]
     assert did["pass"] is False
+
+
+def test_governance_metadata_requires_experiment_id_for_shadow_and_production() -> None:
+    shadow = _build_governance_metadata({"promotion_state": "shadow", "dataset_snapshot_lock": "snap"})
+    production = _build_governance_metadata({"promotion_state": "production", "dataset_snapshot_lock": "snap", "experiment_id": "EXP-123"})
+    assert "experiment_id" in shadow["promotion_required_checks"]
+    assert shadow["gate_checks"]["experiment_id"] is False
+    assert production["gate_checks"]["experiment_id"] is True

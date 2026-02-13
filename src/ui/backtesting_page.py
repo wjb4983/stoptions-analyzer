@@ -531,6 +531,11 @@ class BacktestingPage(ttk.Frame):
         ttk.Entry(governance_frame, textvariable=self.gov_hypothesis_id_var).grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
 
         g_row += 1
+        ttk.Label(governance_frame, text="Experiment ID (required for deployment)").grid(row=g_row, column=0, sticky="w", padx=8, pady=4)
+        self.gov_experiment_id_var = tk.StringVar(value="")
+        ttk.Entry(governance_frame, textvariable=self.gov_experiment_id_var).grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
+
+        g_row += 1
         ttk.Label(governance_frame, text="Owner").grid(row=g_row, column=0, sticky="w", padx=8, pady=4)
         self.gov_owner_var = tk.StringVar(value="")
         ttk.Entry(governance_frame, textvariable=self.gov_owner_var).grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
@@ -718,12 +723,27 @@ class BacktestingPage(ttk.Frame):
         self.section_notebook.add(browser_tab, text="Experiment Browser")
         ttk.Button(browser_tab, text="Refresh Browser", command=self._refresh_experiment_browser).grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
         ttk.Button(browser_tab, text="Export Notebook Bundle", command=self._export_selected_review_packet).grid(row=0, column=0, sticky="e", padx=10, pady=(8, 4))
+        filter_row = ttk.Frame(browser_tab)
+        filter_row.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
+        ttk.Label(filter_row, text="Min Sharpe").pack(side="left")
+        self.browser_min_sharpe_var = tk.StringVar(value="")
+        ttk.Entry(filter_row, textvariable=self.browser_min_sharpe_var, width=8).pack(side="left", padx=(6, 10))
+        ttk.Label(filter_row, text="Approval").pack(side="left")
+        self.browser_approval_filter_var = tk.StringVar(value="all")
+        ttk.Combobox(filter_row, textvariable=self.browser_approval_filter_var, state="readonly", values=["all", *GOVERNANCE_APPROVAL_STATES], width=12).pack(side="left", padx=(6, 10))
+        ttk.Label(filter_row, text="Tag contains").pack(side="left")
+        self.browser_tag_filter_var = tk.StringVar(value="")
+        ttk.Entry(filter_row, textvariable=self.browser_tag_filter_var, width=16).pack(side="left", padx=(6, 10))
+        ttk.Label(filter_row, text="Rank by").pack(side="left")
+        self.browser_rank_metric_var = tk.StringVar(value="sharpe")
+        ttk.Combobox(filter_row, textvariable=self.browser_rank_metric_var, state="readonly", values=["sharpe", "cagr", "sortino"], width=10).pack(side="left", padx=(6, 10))
+        ttk.Button(filter_row, text="Apply", command=self._refresh_experiment_browser).pack(side="left")
         self.experiment_tree = ttk.Treeview(browser_tab, show="headings", height=10)
-        self.experiment_tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 4))
+        self.experiment_tree.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 4))
         self.experiment_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_experiment_tree_selected())
 
         workflow_row = ttk.Frame(browser_tab)
-        workflow_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 4))
+        workflow_row.grid(row=3, column=0, sticky="ew", padx=10, pady=(2, 4))
         ttk.Label(workflow_row, text="Workflow reason").pack(side="left")
         self.workflow_reason_var = tk.StringVar(value="")
         ttk.Entry(workflow_row, textvariable=self.workflow_reason_var, width=64).pack(side="left", padx=(6, 10), fill="x", expand=True)
@@ -732,7 +752,7 @@ class BacktestingPage(ttk.Frame):
         ttk.Button(workflow_row, text="Waive", command=lambda: self._apply_experiment_workflow("waive")).pack(side="left", padx=(6, 0))
 
         self.experiment_detail_var = tk.StringVar(value="Select an experiment run to inspect tags, metrics, and reproducibility.")
-        ttk.Label(browser_tab, textvariable=self.experiment_detail_var, justify="left").grid(row=3, column=0, sticky="ew", padx=10, pady=(2, 8))
+        ttk.Label(browser_tab, textvariable=self.experiment_detail_var, justify="left").grid(row=4, column=0, sticky="ew", padx=10, pady=(2, 8))
 
         compare_tab = ttk.Frame(self.section_notebook)
         compare_tab.columnconfigure(0, weight=1)
@@ -1212,20 +1232,39 @@ class BacktestingPage(ttk.Frame):
     def _refresh_experiment_browser(self) -> None:
         rows = read_experiment_index(BACKTEST_OUTPUT_DIR)
         rendered: list[dict[str, object]] = []
+        min_sharpe = parse_float(self.browser_min_sharpe_var.get()) if hasattr(self, "browser_min_sharpe_var") else None
+        approval_filter = (self.browser_approval_filter_var.get().strip().lower() if hasattr(self, "browser_approval_filter_var") else "all")
+        tag_filter = (self.browser_tag_filter_var.get().strip().lower() if hasattr(self, "browser_tag_filter_var") else "")
+        rank_metric = (self.browser_rank_metric_var.get().strip() if hasattr(self, "browser_rank_metric_var") else "sharpe") or "sharpe"
         for row in reversed(rows[-500:]):
             run_dir = Path(str(row.get("run_dir", "")))
             manifest = self._read_json(run_dir / "manifest.json")
             metrics = self._load_metric_map(run_dir)
             tags = parse_tags(manifest if isinstance(manifest, dict) else None)
+            sharpe = self._safe_float(metrics.get("sharpe", row.get("primary_metric_value", "")))
+            approval = str((row.get("governance") or {}).get("approval_status", "")).strip().lower()
+            if min_sharpe is not None and sharpe is not None and sharpe < float(min_sharpe):
+                continue
+            if approval_filter != "all" and approval != approval_filter:
+                continue
+            if tag_filter and not any(tag_filter in str(tag).lower() for tag in tags):
+                continue
+            rank_value = self._safe_float(metrics.get(rank_metric, row.get("primary_metric_value", 0.0))) or -1e9
+            governance = (row.get("governance") or {}) if isinstance(row.get("governance"), dict) else {}
             rendered.append(
                 {
+                    "rank_metric": rank_metric,
+                    "rank_value": rank_value,
                     "timestamp": row.get("timestamp", ""),
                     "run_type": row.get("run_type", ""),
                     "run": run_dir.name,
                     "tags": ", ".join(tags[:4]),
-                    "best_sharpe": metrics.get("sharpe", row.get("primary_metric_value", "")),
-                    "approval": str((row.get("governance") or {}).get("approval_status", "")),
-                    "promotion": str((row.get("governance") or {}).get("promotion_state", "")),
+                    "best_sharpe": sharpe if sharpe is not None else "",
+                    "approval": approval,
+                    "promotion": str(governance.get("promotion_state", "")),
+                    "experiment_id": str(governance.get("experiment_id", ""))[:20],
+                    "model_artifacts": len(row.get("model_artifacts", []) or []),
+                    "plot_artifacts": len(row.get("plot_artifacts", []) or []),
                     "run_id": str(row.get("run_id", ""))[:12],
                     "cfg_hash": str(row.get("config_hash", ""))[:12],
                     "cfg_chk": str(row.get("config_checksum", ""))[:12],
@@ -1234,6 +1273,11 @@ class BacktestingPage(ttk.Frame):
                     "fingerprint": str(row.get("reproducibility_fingerprint", ""))[:12],
                 }
             )
+        rendered.sort(key=lambda item: float(item.get("rank_value", -1e9)), reverse=True)
+        for idx, item in enumerate(rendered, start=1):
+            item["rank"] = idx
+            item.pop("rank_value", None)
+            item.pop("rank_metric", None)
         self._set_tree_data(self.experiment_tree, rendered)
 
     def _on_experiment_tree_selected(self) -> None:
@@ -1260,6 +1304,8 @@ class BacktestingPage(ttk.Frame):
         snap_chk = str(manifest.get("data_snapshot_checksum", "")) if isinstance(manifest, dict) else ""
         man_chk = str(manifest.get("manifest_checksum", "")) if isinstance(manifest, dict) else ""
         governance = manifest.get("governance", {}) if isinstance(manifest, dict) and isinstance(manifest.get("governance"), dict) else {}
+        repro_meta = manifest.get("reproducibility_metadata", {}) if isinstance(manifest, dict) and isinstance(manifest.get("reproducibility_metadata"), dict) else {}
+        feature_hashes = repro_meta.get("feature_hashes", {}) if isinstance(repro_meta.get("feature_hashes"), dict) else {}
         drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
         drift_alerts = drift_monitoring.get("alert_summaries", []) if isinstance(drift_monitoring.get("alert_summaries"), list) else []
         msg = [
@@ -1270,12 +1316,14 @@ class BacktestingPage(ttk.Frame):
             f"CAGR: {metrics.get('cagr', 'n/a')}",
             f"Promotion: {governance.get('promotion_state', 'n/a')}",
             f"Approval: {governance.get('approval_status', 'n/a')}",
+            f"Experiment ID: {str(governance.get('experiment_id', '')).strip() or 'n/a'}",
             f"Drift monitor: {'OK' if drift_monitoring.get('within_tolerance', False) else 'BREACH'}",
             f"Drift alerts: {len(drift_alerts)}",
             f"Config hash/checksum: {(cfg_hash[:12] if cfg_hash else 'n/a')} / {(cfg_chk[:12] if cfg_chk else 'n/a')}",
             f"Snapshot checksum: {snap_chk[:24] if snap_chk else 'n/a'}",
             f"Manifest checksum: {man_chk[:24] if man_chk else 'n/a'}",
             f"Fingerprint: {fp[:24] if fp else 'n/a'}",
+            f"Feature hashes tracked: {len(feature_hashes)}",
         ]
         self.experiment_detail_var.set("\n".join(msg))
 
@@ -1312,6 +1360,9 @@ class BacktestingPage(ttk.Frame):
                     drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
                     if not bool(drift_monitoring.get("within_tolerance", False)):
                         messagebox.showerror("Workflow", "Promotion blocked: drift monitoring exceeds configured tolerances.")
+                        return
+                    if not str(governance.get("experiment_id", "")).strip():
+                        messagebox.showerror("Workflow", "Promotion blocked: experiment ID is required for deployment approvals.")
                         return
         success = apply_governance_decision(
             BACKTEST_OUTPUT_DIR,
@@ -2024,6 +2075,7 @@ class BacktestingPage(ttk.Frame):
         self.notes_text.delete("1.0", tk.END)
         self.notes_text.insert("1.0", str(settings.get("notes", "")))
         self.gov_hypothesis_id_var.set(str(settings.get("governance_hypothesis_id", "")))
+        self.gov_experiment_id_var.set(str(settings.get("governance_experiment_id", "")))
         self.gov_owner_var.set(str(settings.get("governance_owner", "")))
         self.gov_dataset_lock_var.set(str(settings.get("governance_dataset_snapshot_lock", "")))
         self.gov_acceptance_text.delete("1.0", tk.END)
@@ -2144,6 +2196,7 @@ class BacktestingPage(ttk.Frame):
             "backtest_data_root": self.backtest_root_var.get().strip(),
             "notes": self.notes_text.get("1.0", tk.END).strip(),
             "governance_hypothesis_id": self.gov_hypothesis_id_var.get().strip(),
+            "governance_experiment_id": self.gov_experiment_id_var.get().strip(),
             "governance_owner": self.gov_owner_var.get().strip(),
             "governance_dataset_snapshot_lock": self.gov_dataset_lock_var.get().strip(),
             "governance_acceptance_criteria": self.gov_acceptance_text.get("1.0", tk.END).strip(),
@@ -2262,6 +2315,7 @@ class BacktestingPage(ttk.Frame):
 
         governance_payload = {
             "hypothesis_id": self.gov_hypothesis_id_var.get().strip(),
+            "experiment_id": self.gov_experiment_id_var.get().strip(),
             "owner": self.gov_owner_var.get().strip(),
             "dataset_snapshot_lock": self.gov_dataset_lock_var.get().strip(),
             "acceptance_criteria": self.gov_acceptance_text.get("1.0", tk.END).strip(),
