@@ -41,6 +41,7 @@ from backtesting.execution import (
     select_slippage_calibration_snapshot,
 )
 from backtesting.vectorized import backtest_vectorized
+from backtesting.perf import deflated_sharpe_ratio, probabilistic_sharpe_ratio
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR
 from data_access.api_client import MassiveApiClient
 from data_access.cache import _safe_ticker_name
@@ -1619,6 +1620,50 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _apply_sweep_statistical_annotations(
+    *,
+    ranked_rows: list[dict[str, Any]],
+    robustness_report: dict[str, Any],
+) -> None:
+    if not ranked_rows:
+        return
+
+    multiple_testing = robustness_report.get("multiple_testing", {})
+    raw_pvalues = multiple_testing.get("raw_pvalues", []) if isinstance(multiple_testing, dict) else []
+    adjusted_pvalues = multiple_testing.get("bh_adjusted_pvalues", []) if isinstance(multiple_testing, dict) else []
+
+    sharpes = np.array([float(row.get("sharpe", 0.0)) for row in ranked_rows], dtype=float)
+    centered = sharpes - float(np.mean(sharpes))
+    m2 = float(np.mean(centered**2)) if sharpes.size > 1 else 0.0
+    skew = float(np.mean(centered**3) / (m2 ** 1.5)) if sharpes.size > 2 and m2 > 0 else 0.0
+    kurt = float(np.mean(centered**4) / (m2**2)) if sharpes.size > 3 and m2 > 0 else 3.0
+
+    n_returns = max(3, int(sharpes.size))
+    for idx, row in enumerate(ranked_rows):
+        sharpe = float(row.get("sharpe", 0.0))
+        row["deflated_sharpe_ratio"] = deflated_sharpe_ratio(
+            observed_sharpe=sharpe,
+            n_returns=n_returns,
+            skew=skew,
+            kurtosis=kurt,
+            n_trials=max(1, len(ranked_rows)),
+        )
+        row["probabilistic_sharpe_ratio"] = probabilistic_sharpe_ratio(
+            observed_sharpe=sharpe,
+            benchmark_sharpe=0.0,
+            n_returns=n_returns,
+            skew=skew,
+            kurtosis=kurt,
+        )
+        raw_p = float(raw_pvalues[idx]) if idx < len(raw_pvalues) else 1.0
+        adj_p = float(adjusted_pvalues[idx]) if idx < len(adjusted_pvalues) else 1.0
+        row["nominal_pvalue"] = raw_p
+        row["bh_adjusted_pvalue"] = adj_p
+        row["is_significant_nominal_5pct"] = raw_p <= 0.05
+        row["is_significant_fdr_5pct"] = adj_p <= 0.05
+
+
+
 def _persist_sweep_outputs(
     *,
     ranked_rows: list[dict[str, Any]],
@@ -1654,6 +1699,9 @@ def _persist_sweep_outputs(
         "missing_required_checks": list(governance_payload["missing_required_checks"]),
     })
 
+    robustness_report = build_sweep_robustness_report(ranked_rows=ranked_rows)
+    _apply_sweep_statistical_annotations(ranked_rows=ranked_rows, robustness_report=robustness_report)
+
     leaderboard_csv = run_dir / "leaderboard.csv"
     fieldnames = list(ranked_rows[0].keys()) if ranked_rows else []
     with leaderboard_csv.open("w", newline="") as handle:
@@ -1679,7 +1727,6 @@ def _persist_sweep_outputs(
     )
 
     top_rows = ranked_rows[: max(0, top_n)]
-    robustness_report = build_sweep_robustness_report(ranked_rows=ranked_rows)
     _write_robustness_report(run_dir=run_dir, robustness_report=robustness_report)
 
     report_lines = ["Top sweep combinations", "======================", ""]
@@ -1697,10 +1744,13 @@ def _persist_sweep_outputs(
         "Robustness Diagnostics",
         "----------------------",
         f"deflated_sharpe_ratio={float(robustness_report.get('deflated_sharpe_ratio', 0.0)):.6f}",
+        f"probabilistic_sharpe_ratio={float(robustness_report.get('probabilistic_sharpe_ratio', 0.0)):.6f}",
         f"pbo_probability={float(pbo_style.get('probability_of_overfitting', 0.0)):.6f}",
         f"pbo_median_logit={float(pbo_style.get('median_logit', 0.0)):.6f}",
         f"white_reality_check_pvalue={float(white.get('p_value', 1.0)):.6f}",
         f"spa_pvalue={float(spa.get('p_value', 1.0)):.6f}",
+        f"min_nominal_pvalue={float((robustness_report.get('multiple_testing', {}) or {}).get('min_raw_pvalue', 1.0)):.6f}",
+        f"min_bh_adjusted_pvalue={float((robustness_report.get('multiple_testing', {}) or {}).get('min_bh_adjusted_pvalue', 1.0)):.6f}",
     ])
     (run_dir / "top_n_report.txt").write_text("\n".join(report_lines))
 
