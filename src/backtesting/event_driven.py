@@ -8,7 +8,7 @@ that open.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Literal, Optional, Protocol
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Protocol
 
 from .execution import ExecutionContext, FeeModel, PartialFillModel, SlippageModel, ZeroFee, ZeroSlippage
 
@@ -434,6 +434,7 @@ class VectorizedExecutionAdapter:
         prices: Any,
         available_volume: Any,
         queue_rank_proxy: Any,
+        max_participation_per_bar: Any | Callable[[int, int], float],
         order_type: str,
         latency_bars: int,
         latency_ms: int,
@@ -442,6 +443,15 @@ class VectorizedExecutionAdapter:
         time_in_force: str = "gtc",
         urgency: str = "normal",
     ) -> tuple[Any, Any, list[Any], list[OrderLifecycleEvent]]:
+        participation_schedule = max_participation_per_bar
+
+        def _resolve_participation(bar_index: int, asset_index: int) -> float:
+            if callable(participation_schedule):
+                value = participation_schedule(bar_index, asset_index)
+            else:
+                value = participation_schedule[bar_index, asset_index]
+            return max(float(value), 0.0)
+
         trades, residual, fill_events = self.fill_model.run(
             requested_trades,
             available_volume,
@@ -449,6 +459,7 @@ class VectorizedExecutionAdapter:
             latency_bars=latency_bars,
             latency_ms=latency_ms,
             queue_rank_proxy=float(queue_rank_proxy[0, 0]),
+            max_participation=_resolve_participation,
         )
 
         lifecycle = OrderLifecycleBook()
@@ -468,8 +479,11 @@ class VectorizedExecutionAdapter:
                 latency_ms=latency_ms,
                 queue_rank_proxy=float(queue_rank_proxy[bar_index, asset_index]),
                 available_bar_volume=float(available_volume[bar_index, asset_index]),
-                max_participation_per_bar=self.fill_model.max_participation_per_bar,
-                realized_participation=0.0,
+                max_participation_per_bar=_resolve_participation(bar_index, asset_index),
+                realized_participation=(
+                    abs(float(trades[bar_index, asset_index]))
+                    / max(float(available_volume[bar_index, asset_index]), 1e-12)
+                ),
                 submit_timestamp=timestamps[bar_index],
                 time_in_force=time_in_force,
                 urgency=urgency,

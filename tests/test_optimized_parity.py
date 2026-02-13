@@ -67,3 +67,67 @@ def test_backtest_reference_vs_optimized_parity() -> None:
     assert np.allclose(ref.turnover, opt.turnover, rtol=REL_TOL, atol=ABS_TOL)
     assert np.allclose(ref.equity_curve, opt.equity_curve, rtol=REL_TOL, atol=ABS_TOL)
     assert np.allclose(ref.cost_breakdown["total"], opt.cost_breakdown["total"], rtol=REL_TOL, atol=ABS_TOL)
+
+
+def test_backtest_parity_with_constant_participation_matrix() -> None:
+    rng = np.random.default_rng(13)
+    n_periods, n_assets = 300, 4
+    returns = rng.normal(0.0001, 0.01, size=(n_periods, n_assets))
+    prices = 100.0 * np.cumprod(1.0 + returns, axis=0)
+    signals = np.sign(rng.normal(size=(n_periods, n_assets)))
+    volume = np.full((n_periods, n_assets), 10.0)
+    constant_cap = np.full((n_periods, n_assets), 0.2)
+
+    kwargs = dict(
+        prices=prices,
+        signals=signals,
+        slippage_model=BpsSlippage(5.0),
+        fee_model=FixedCommission(0.0001),
+        borrow_cost_model=ShortBorrowCost(0.01),
+        available_bar_volume=volume,
+        max_participation_per_bar=constant_cap,
+        initial_equity=1.0,
+    )
+
+    ref = backtest_vectorized(**kwargs, execution_mode="reference")
+    opt = backtest_vectorized(**kwargs, execution_mode="optimized")
+
+    assert np.allclose(ref.trades, opt.trades, rtol=REL_TOL, atol=ABS_TOL)
+    assert np.allclose(ref.returns, opt.returns, rtol=REL_TOL, atol=ABS_TOL)
+    assert np.allclose(ref.equity_curve, opt.equity_curve, rtol=REL_TOL, atol=ABS_TOL)
+
+
+def test_dynamic_participation_schedule_changes_execution_path() -> None:
+    n_periods, n_assets = 8, 2
+    prices = np.full((n_periods, n_assets), 100.0)
+    signals = np.ones((n_periods, n_assets))
+    available_volume = np.full((n_periods, n_assets), 10.0)
+    constant_cap = np.full((n_periods, n_assets), 0.2)
+    dynamic_cap = np.full((n_periods, n_assets), 0.2)
+    dynamic_cap[1::2, 0] = 0.05
+
+    common = dict(
+        prices=prices,
+        signals=signals,
+        available_bar_volume=available_volume,
+        initial_equity=1.0,
+    )
+
+    constant_result = backtest_vectorized(
+        **common,
+        max_participation_per_bar=constant_cap,
+        execution_mode="optimized",
+    )
+    dynamic_result = backtest_vectorized(
+        **common,
+        max_participation_per_bar=dynamic_cap,
+        execution_mode="optimized",
+    )
+
+    const_asset0_fills = np.array([entry["filled_size"] for entry in constant_result.fills if entry["asset_index"] == 0], dtype=float)
+    dyn_asset0_fills = np.array([entry["filled_size"] for entry in dynamic_result.fills if entry["asset_index"] == 0], dtype=float)
+    const_asset1_fills = np.array([entry["filled_size"] for entry in constant_result.fills if entry["asset_index"] == 1], dtype=float)
+    dyn_asset1_fills = np.array([entry["filled_size"] for entry in dynamic_result.fills if entry["asset_index"] == 1], dtype=float)
+
+    assert not np.allclose(const_asset0_fills, dyn_asset0_fills, rtol=REL_TOL, atol=ABS_TOL)
+    assert np.allclose(const_asset1_fills, dyn_asset1_fills, rtol=REL_TOL, atol=ABS_TOL)
