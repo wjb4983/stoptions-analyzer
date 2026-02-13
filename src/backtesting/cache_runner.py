@@ -3471,6 +3471,17 @@ def _persist_backtest_outputs(
         symbol_order=symbol_order,
         diagnostics=risk_diagnostics,
     )
+    _write_risk_monitoring_artifacts(
+        run_dir=run_dir,
+        timestamps=time_strings,
+        symbol_order=symbol_order,
+        trades=trades,
+        returns=returns,
+        diagnostics=risk_diagnostics,
+        regime_labels=regime_labels,
+        regime_probabilities=regime_probabilities,
+        regime_states=regime_states,
+    )
     if regime_labels is not None:
         _write_regime_labels_csv_json(
             run_dir=run_dir,
@@ -4363,6 +4374,130 @@ def _write_risk_diagnostics_csv_json(
         writer.writeheader()
         writer.writerows(symbol_rows)
     (run_dir / "turnover_by_symbol.json").write_text(json.dumps(symbol_rows, indent=2))
+
+
+def _write_risk_monitoring_artifacts(
+    *,
+    run_dir: Path,
+    timestamps: list[str],
+    symbol_order: list[str],
+    trades: np.ndarray,
+    returns: np.ndarray,
+    diagnostics: dict[str, np.ndarray],
+    regime_labels: np.ndarray | None = None,
+    regime_probabilities: np.ndarray | None = None,
+    regime_states: np.ndarray | None = None,
+) -> None:
+    periods = len(timestamps)
+    gross = np.asarray(diagnostics.get("gross_exposure", np.zeros(periods)), dtype=float)
+    concentration = np.asarray(diagnostics.get("concentration", np.zeros(periods)), dtype=float)
+    turnover = np.asarray(diagnostics.get("turnover", np.zeros(periods)), dtype=float)
+    leverage = np.asarray(diagnostics.get("leverage_usage", np.zeros(periods)), dtype=float)
+    excess_liquidity = np.asarray(diagnostics.get("excess_liquidity", np.zeros(periods)), dtype=float)
+
+    returns_arr = np.asarray(returns, dtype=float)
+    tail_cut = float(np.quantile(returns_arr, 0.05)) if returns_arr.size else 0.0
+    var_95 = abs(min(0.0, tail_cut))
+    cvar_samples = returns_arr[returns_arr <= tail_cut]
+    cvar_95 = abs(float(np.mean(cvar_samples))) if cvar_samples.size else var_95
+
+    running_equity = np.cumprod(1.0 + returns_arr) if returns_arr.size else np.array([], dtype=float)
+    safe_peak = np.maximum.accumulate(np.where(running_equity == 0.0, 1.0, running_equity)) if running_equity.size else np.array([], dtype=float)
+    drawdown = running_equity / np.where(safe_peak == 0.0, 1.0, safe_peak) - 1.0 if running_equity.size else np.array([], dtype=float)
+
+    row_corr = np.corrcoef(np.nan_to_num(np.asarray(trades, dtype=float), nan=0.0), rowvar=True) if periods > 1 else np.eye(periods)
+    corr_spikes: np.ndarray
+    if row_corr.ndim == 2 and row_corr.shape[0] == periods:
+        abs_corr = np.abs(row_corr)
+        np.fill_diagonal(abs_corr, 0.0)
+        corr_spikes = np.max(abs_corr, axis=1)
+    else:
+        corr_spikes = np.zeros(periods, dtype=float)
+
+    regime_arr = np.asarray(regime_labels, dtype=object) if regime_labels is not None else np.array([], dtype=object)
+    probs = np.asarray(regime_probabilities, dtype=float) if regime_probabilities is not None else np.zeros((periods, 0), dtype=float)
+    states = np.asarray(regime_states, dtype=object) if regime_states is not None else np.array([], dtype=object)
+    valid_probs = probs.ndim == 2 and probs.shape[0] == periods and states.size == probs.shape[1]
+
+    threshold = {
+        "gross_exposure": 1.2,
+        "concentration": 0.35,
+        "var_95": 0.03,
+        "cvar_95": 0.05,
+        "drawdown": -0.10,
+        "correlation_spike": 0.85,
+        "liquidity_risk": 0.75,
+        "model_confidence": 0.55,
+    }
+
+    dashboard_rows: list[dict[str, object]] = []
+    intervention_rows: list[dict[str, object]] = []
+    open_positions = np.cumsum(np.nan_to_num(np.asarray(trades, dtype=float), nan=0.0), axis=0) if periods else np.zeros((0, len(symbol_order)))
+    for idx, ts in enumerate(timestamps):
+        regime_state = str(regime_arr[idx]) if idx < regime_arr.size else "unknown"
+        confidence = float(np.max(probs[idx])) if valid_probs else 0.5
+        liq_proxy = min(2.0, float(turnover[idx]) * 4.0 + float(leverage[idx])) if idx < turnover.size and idx < leverage.size else 0.0
+        if idx < excess_liquidity.size and excess_liquidity[idx] < 0.0:
+            liq_proxy = max(liq_proxy, 1.0)
+        row = {
+            "timestamp": ts,
+            "gross_exposure": float(gross[idx]) if idx < gross.size else 0.0,
+            "concentration": float(concentration[idx]) if idx < concentration.size else 0.0,
+            "var_95": var_95,
+            "cvar_95": cvar_95,
+            "drawdown": float(drawdown[idx]) if idx < drawdown.size else 0.0,
+            "correlation_spike": float(corr_spikes[idx]) if idx < corr_spikes.size else 0.0,
+            "liquidity_risk": liq_proxy,
+            "model_confidence": confidence,
+            "regime_state": regime_state,
+        }
+        dashboard_rows.append(row)
+
+        position_row = open_positions[idx] if idx < open_positions.shape[0] else np.zeros(len(symbol_order), dtype=float)
+        top_symbol = ""
+        top_notional = 0.0
+        if position_row.size:
+            best = int(np.argmax(np.abs(position_row)))
+            top_symbol = symbol_order[best]
+            top_notional = float(position_row[best])
+
+        checks = {
+            "gross_exposure": row["gross_exposure"] > threshold["gross_exposure"],
+            "concentration": row["concentration"] > threshold["concentration"],
+            "drawdown": row["drawdown"] < threshold["drawdown"],
+            "correlation_spike": row["correlation_spike"] > threshold["correlation_spike"],
+            "liquidity_risk": row["liquidity_risk"] > threshold["liquidity_risk"],
+            "model_confidence": row["model_confidence"] < threshold["model_confidence"],
+            "tail_risk": (row["var_95"] > threshold["var_95"]) or (row["cvar_95"] > threshold["cvar_95"]),
+        }
+        triggered = [name for name, active in checks.items() if active]
+        if triggered:
+            action = "kill_switch" if any(name in {"drawdown", "liquidity_risk", "tail_risk"} for name in triggered) else "alert"
+            intervention_rows.append(
+                {
+                    "timestamp": ts,
+                    "action": action,
+                    "triggers": ",".join(triggered),
+                    "reason": f"threshold breach: {', '.join(triggered)}",
+                    "regime_state": regime_state,
+                    "model_confidence": confidence,
+                    "top_position": top_symbol,
+                    "top_position_size": top_notional,
+                }
+            )
+
+    (run_dir / "risk_dashboard.json").write_text(json.dumps(dashboard_rows, indent=2))
+    with (run_dir / "risk_dashboard.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(dashboard_rows[0].keys()) if dashboard_rows else ["timestamp"])
+        writer.writeheader()
+        writer.writerows(dashboard_rows)
+
+    (run_dir / "risk_interventions.json").write_text(json.dumps(intervention_rows, indent=2))
+    with (run_dir / "risk_interventions.csv").open("w", newline="") as handle:
+        cols = list(intervention_rows[0].keys()) if intervention_rows else ["timestamp", "action", "triggers", "reason"]
+        writer = csv.DictWriter(handle, fieldnames=cols)
+        writer.writeheader()
+        writer.writerows(intervention_rows)
 
 
 def _write_regime_labels_csv_json(

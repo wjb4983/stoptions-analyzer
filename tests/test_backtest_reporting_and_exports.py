@@ -126,6 +126,10 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "trades.json",
         "risk_diagnostics.csv",
         "risk_diagnostics.json",
+        "risk_dashboard.csv",
+        "risk_dashboard.json",
+        "risk_interventions.csv",
+        "risk_interventions.json",
         "turnover_by_symbol.csv",
         "turnover_by_symbol.json",
         "metrics.csv",
@@ -150,6 +154,16 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "regimes.json",
     ]:
         assert (run_dir / name).exists(), name
+
+    dashboard_rows = json.loads((run_dir / "risk_dashboard.json").read_text())
+    assert len(dashboard_rows) == len(timestamps)
+    assert "var_95" in dashboard_rows[0]
+    assert "cvar_95" in dashboard_rows[0]
+    assert "model_confidence" in dashboard_rows[0]
+    assert "regime_state" in dashboard_rows[0]
+
+    interventions = json.loads((run_dir / "risk_interventions.json").read_text())
+    assert isinstance(interventions, list)
 
     regimes_rows = json.loads((run_dir / "regimes.json").read_text())
     assert len(regimes_rows) == len(timestamps)
