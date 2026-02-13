@@ -139,9 +139,16 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["metric_schema_version"] == cache_runner.CANONICAL_METRIC_SCHEMA_VERSION
     assert manifest["code_version"]
+    assert manifest["code_commit_hash"]
+    assert manifest["manifest_schema_version"] == cache_runner.RUN_MANIFEST_SCHEMA_VERSION
+    assert manifest["config_hash"]
     assert "parameters" in manifest
     assert "data_snapshot_identifiers" in manifest
+    assert "data_snapshot_ids" in manifest
+    assert "dependency_versions" in manifest
+    assert "random_seeds" in manifest
     assert "environment" in manifest
+    assert (run_dir / "metric_tables_manifest.json").exists()
 
     index_rows = (output_root / "experiment_index.jsonl").read_text().strip().splitlines()
     assert len(index_rows) == 1
@@ -375,3 +382,54 @@ def test_persist_sweep_outputs_writes_robustness_report(tmp_path: Path) -> None:
     assert "spa_pvalue" in top_report
     assert (run_dir / "audit_inputs.json").exists()
     assert (run_dir / "audit_outputs.json").exists()
+
+
+def test_manifest_completeness_includes_replay_fields(tmp_path: Path) -> None:
+    metric_tables = cache_runner._build_metric_table_manifest(run_type="backtest", table_names=["metrics"])
+    manifest = cache_runner._build_run_manifest(
+        run_type="backtest",
+        parameters={"tickers": ["AAA"], "start_date": "2024-01-01", "end_date": "2024-01-02"},
+        data_snapshot={"dataset_fingerprint": "abc"},
+        random_seed=7,
+        governance={},
+        metric_tables=metric_tables,
+    )
+    for key in [
+        "manifest_schema_version",
+        "code_commit_hash",
+        "config_hash",
+        "data_snapshot_ids",
+        "random_seeds",
+        "dependency_versions",
+        "metric_tables",
+    ]:
+        assert key in manifest
+
+
+def test_load_run_manifest_strict_validates_determinism_metadata(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cache_runner, "_resolve_git_commit", lambda: "abc123")
+    monkeypatch.setattr(cache_runner, "_collect_dependency_versions", lambda: {"numpy": "1.0", "pandas": "2.0", "scipy": "3.0"})
+
+    params = {"tickers": ["AAA"], "start_date": "2024-01-01", "end_date": "2024-01-01"}
+    manifest = {
+        "manifest_schema_version": cache_runner.RUN_MANIFEST_SCHEMA_VERSION,
+        "run_type": "backtest",
+        "code_commit_hash": "abc123",
+        "config_hash": cache_runner._compute_config_hash(params),
+        "parameters": params,
+        "data_snapshot_ids": {"dataset_fingerprint": "fp"},
+        "random_seeds": {"run_seed": 1},
+        "dependency_versions": {"numpy": "1.0", "pandas": "2.0", "scipy": "3.0"},
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+    loaded = cache_runner._load_run_manifest(path, strict=True)
+    assert loaded["config_hash"] == manifest["config_hash"]
+
+    manifest["config_hash"] = "wrong"
+    path.write_text(json.dumps(manifest))
+    try:
+        cache_runner._load_run_manifest(path, strict=True)
+        assert False, "expected strict loader to fail"
+    except ValueError as exc:
+        assert "config hash" in str(exc).lower()
