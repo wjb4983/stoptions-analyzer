@@ -74,6 +74,7 @@ def _build_feature_dict(n: int = 32) -> dict[str, np.ndarray]:
         "base_signal": np.sign(idx),
         "base_confidence": np.abs(idx),
         "risk_filter_score": 0.5 + idx * 0.1,
+        "regime": np.where(idx > 0.2, "risk_on", np.where(idx < -0.2, "risk_off", "neutral")),
     }
 
 
@@ -105,6 +106,10 @@ def test_config_activation_weighted_and_stacking_ensemble() -> None:
     assert voted.probability.shape == labels.shape
     assert voted.confidence_scores.shape == labels.shape
     assert set(voted.feature_importances.keys()) == {"momentum", "mean_reversion"}
+    assert set(voted.model_weights.keys()) == {"momentum", "mean_reversion"}
+    assert np.isclose(sum(voted.model_weights.values()), 1.0)
+    assert set(voted.model_contributions.keys()) == {"momentum", "mean_reversion"}
+    assert ensembler.contribution_by_regime()
     for model_importances in voted.feature_importances.values():
         assert model_importances
 
@@ -113,3 +118,4 @@ def test_config_activation_weighted_and_stacking_ensemble() -> None:
     assert stacked.signal.shape == labels.shape
     assert np.all(stacked.probability >= 0.0)
     assert np.all(stacked.probability <= 1.0)
+    assert set(stacked.model_weights.keys()) == {"momentum", "mean_reversion"}
