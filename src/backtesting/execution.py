@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 import numpy as np
 
@@ -598,6 +598,7 @@ class PartialFillModel:
         latency_bars: int = 0,
         latency_ms: int = 0,
         queue_rank_proxy: float = 0.5,
+        max_participation: np.ndarray | Callable[[int, int], float] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, list[FillEvent]]:
         trades = np.asarray(requested_trades, dtype=float)
         volume = np.asarray(available_volume, dtype=float)
@@ -622,7 +623,13 @@ class PartialFillModel:
                 bar_volume = max(float(volume[idx, asset_idx]), 0.0)
                 fill_size = 0.0
                 if requested != 0.0:
-                    fill_size = self.capped_fill_size(requested, bar_volume)
+                    if callable(max_participation):
+                        participation_cap = max(float(max_participation(idx, asset_idx)), 0.0)
+                    elif max_participation is not None:
+                        participation_cap = max(float(max_participation[idx, asset_idx]), 0.0)
+                    else:
+                        participation_cap = self.max_participation_per_bar
+                    fill_size = self.capped_fill_size(requested, bar_volume, participation_cap)
                     pending[asset_idx] -= fill_size
                 executed[idx, asset_idx] = fill_size
                 residual[idx, asset_idx] = pending[asset_idx]

@@ -132,7 +132,7 @@ def backtest_vectorized(
     latency_ms: Any | None = 0,
     queue_rank_proxy: Any | None = 0.5,
     available_bar_volume: Any | None = None,
-    max_participation_per_bar: float | None = None,
+    max_participation_per_bar: Any | None = None,
     weights: Any | None = None,
     initial_equity: float = 1.0,
     execution_mode: ExecutionMode = "optimized",
@@ -246,6 +246,7 @@ def backtest_vectorized(
         prices=price_values,
         available_volume=liquidity["available_bar_volume"],
         queue_rank_proxy=liquidity["queue_rank_proxy"],
+        max_participation_per_bar=liquidity["max_participation_per_bar"],
         order_type=order_type,
         latency_bars=int(np.round(liquidity["latency_bars"][0, 0])),
         latency_ms=int(np.round(liquidity["latency_ms"][0, 0])),
@@ -582,7 +583,7 @@ def _build_liquidity_context(
     spread_bps: Any | None,
     queue_rank_proxy: Any | None,
     available_bar_volume: Any | None,
-    max_participation_per_bar: float | None,
+    max_participation_per_bar: Any | None,
     latency_bars: Any | None,
     latency_ms: Any | None,
 ) -> dict[str, np.ndarray]:
@@ -602,8 +603,7 @@ def _build_liquidity_context(
     queue_arr = _coerce_liquidity_array(queue_rank_proxy, prices.shape, default=0.5)
     available_volume_arr = _coerce_liquidity_array(available_bar_volume, prices.shape, default=np.nan)
     available_volume_arr = np.where(np.isnan(available_volume_arr), volumes_arr, available_volume_arr)
-    max_participation = 1.0 if max_participation_per_bar is None else float(max_participation_per_bar)
-    max_participation_arr = np.full(prices.shape, max_participation, dtype=float)
+    max_participation_arr = _coerce_liquidity_array(max_participation_per_bar, prices.shape, default=1.0)
     latency_bars_arr = _coerce_liquidity_array(latency_bars, prices.shape, default=0.0)
     latency_ms_arr = _coerce_liquidity_array(latency_ms, prices.shape, default=0.0)
     return {
