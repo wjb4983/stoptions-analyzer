@@ -47,6 +47,7 @@ else:
 
 
 ExecutionMode = Literal["reference", "optimized"]
+HoldingReturnBasis = Literal["close_to_close", "open_to_open"]
 
 
 class VectorizedBacktestRunner(Protocol):
@@ -120,6 +121,9 @@ def backtest_vectorized(
     prices: Any,
     signals: Any,
     *,
+    open_prices: Any | None = None,
+    close_prices: Any | None = None,
+    holding_return_basis: HoldingReturnBasis = "close_to_close",
     slippage_model: SlippageModel | None = None,
     fee_model: FeeModel | None = None,
     borrow_cost_model: Any | None = None,
@@ -178,7 +182,11 @@ def backtest_vectorized(
 
     Args:
         prices: 1D array-like close-price series (float, quote currency per unit).
+            Backward-compatible alias for ``close_prices``.
         signals: 1D array-like desired exposure/position signal for each bar.
+        open_prices: Optional open-price series used for trade execution at bar ``t``.
+        close_prices: Optional close-price series used for signal anchoring at bar ``t``.
+        holding_return_basis: Price basis used for holding-period returns.
         slippage_model: Optional execution slippage model.
         fee_model: Optional transaction fee model.
         initial_equity: Starting portfolio equity in quote currency.
@@ -187,26 +195,38 @@ def backtest_vectorized(
         ``BacktestResult`` containing aligned time series and summary metrics.
     """
 
-    price_values, index = _to_array(prices)
+    close_input = close_prices if close_prices is not None else prices
+    open_input = open_prices if open_prices is not None else close_input
+
+    close_values, index = _to_array(close_input)
+    open_values, open_index = _to_array(open_input)
+    if index is None:
+        index = open_index
     signal_values, _ = _to_array(signals)
 
-    price_values = _ensure_2d(price_values)
+    close_values = _ensure_2d(close_values)
+    open_values = _ensure_2d(open_values)
     signal_values = _ensure_2d(signal_values)
 
-    if price_values.shape[0] != signal_values.shape[0]:
+    if close_values.shape != open_values.shape:
+        raise ValueError("open_prices and close_prices must have the same shape.")
+    if close_values.shape[0] != signal_values.shape[0]:
         raise ValueError("Prices and signals must have the same length.")
-    if price_values.shape[1] != signal_values.shape[1]:
+    if close_values.shape[1] != signal_values.shape[1]:
         raise ValueError("Prices and signals must have the same number of assets.")
+    if holding_return_basis not in {"close_to_close", "open_to_open"}:
+        raise ValueError("holding_return_basis must be one of: close_to_close, open_to_open.")
 
-    n_periods, n_assets = price_values.shape
+    n_periods, n_assets = close_values.shape
     portfolio_weights = _normalize_weights(weights, n_assets)
 
     positions = _shift(signal_values, 1)
     positions = _apply_split_transforms(positions, corporate_action_splits)
     requested_trades = positions - _shift(positions, 1)
 
-    gross_asset_returns = np.zeros_like(price_values, dtype=float)
-    gross_asset_returns[1:] = price_values[1:] / price_values[:-1] - 1.0
+    holding_price_values = close_values if holding_return_basis == "close_to_close" else open_values
+    gross_asset_returns = np.zeros_like(holding_price_values, dtype=float)
+    gross_asset_returns[1:] = holding_price_values[1:] / holding_price_values[:-1] - 1.0
 
     execution_model = slippage_model or ZeroSlippage()
     fees = fee_model or ZeroFee()
@@ -226,7 +246,7 @@ def backtest_vectorized(
         )
 
     liquidity = _build_liquidity_context(
-        prices=price_values,
+        prices=open_values,
         volumes=volumes,
         adv=adv,
         volatility=volatility,
@@ -243,7 +263,7 @@ def backtest_vectorized(
     resolved_timestamps = [None if index is None else str(index[idx]) for idx in range(n_periods)]
     trades, residual_orders, fill_events, lifecycle_events = adapter.execute(
         requested_trades=requested_trades,
-        prices=price_values,
+        prices=open_values,
         available_volume=liquidity["available_bar_volume"],
         queue_rank_proxy=liquidity["queue_rank_proxy"],
         max_participation_per_bar=liquidity["max_participation_per_bar"],
@@ -257,7 +277,7 @@ def backtest_vectorized(
     )
 
     slippage_cost = _estimate_slippage(
-        price_values,
+        open_values,
         trades,
         execution_model,
         portfolio_weights,
@@ -265,7 +285,7 @@ def backtest_vectorized(
         liquidity=liquidity,
     )
     fee_cost = _estimate_fees(
-        price_values,
+        open_values,
         trades,
         fees,
         portfolio_weights,
@@ -290,7 +310,7 @@ def backtest_vectorized(
 
     dividend_returns = _estimate_dividend_return(
         positions=positions,
-        prices=price_values,
+        prices=close_values,
         dividends=corporate_action_dividends,
         portfolio_weights=portfolio_weights,
     )
@@ -307,7 +327,7 @@ def backtest_vectorized(
     )
     lifecycle = _apply_derivatives_lifecycle(
         positions=positions,
-        prices=price_values,
+        prices=close_values,
         returns=gross_asset_returns,
         portfolio_weights=portfolio_weights,
         dates=np.asarray(dates) if dates is not None else None,
@@ -387,6 +407,12 @@ def backtest_vectorized(
             "borrow": float(np.sum(borrow_cost)),
             "lifecycle": float(np.sum(lifecycle["portfolio_return"])),
             "total": float(np.sum(slippage_cost + fee_cost + borrow_cost - lifecycle["portfolio_return"])),
+        },
+        "execution_price_diagnostics": {
+            "holding_return_basis": holding_return_basis,
+            "execution_prices": _to_aligned_output(open_values, index),
+            "signal_anchor_close_prices": _to_aligned_output(close_values, index),
+            "holding_return_prices": _to_aligned_output(holding_price_values, index),
         },
     }
 

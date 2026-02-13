@@ -9,6 +9,14 @@ from src.backtesting.strategies.ensemble import weighted_voting
 from src.backtesting.vectorized import backtest_vectorized
 
 
+class NotionalFee:
+    def __init__(self, rate: float) -> None:
+        self.rate = float(rate)
+
+    def calculate(self, price: float, size: float, liquidity_context: object | None = None) -> float:
+        return abs(float(size)) * float(price) * self.rate
+
+
 def test_vectorized_positions_shift_signals_forward() -> None:
     prices = np.array([100.0, 101.0, 102.0, 103.0])
     signals = np.array([0.0, 1.0, -1.0, 0.5])
@@ -99,3 +107,60 @@ def test_ensemble_combiner_is_point_in_time() -> None:
     combined_changed = weighted_voting(changed, np.array([0.7, 0.3]))
 
     assert np.allclose(combined[:-1], combined_changed[:-1])
+
+
+def test_vectorized_execution_costs_use_open_notional_with_gap() -> None:
+    close_prices = np.array([100.0, 100.0, 100.0, 100.0])
+    no_gap_open = np.array([100.0, 100.0, 100.0, 100.0])
+    gap_open = np.array([100.0, 100.0, 150.0, 100.0])
+    signals = np.array([0.0, 1.0, 1.0, 1.0])
+
+    no_gap = backtest_vectorized(
+        prices=close_prices,
+        close_prices=close_prices,
+        open_prices=no_gap_open,
+        signals=signals,
+        fee_model=NotionalFee(0.001),
+        holding_return_basis="close_to_close",
+    )
+    with_gap = backtest_vectorized(
+        prices=close_prices,
+        close_prices=close_prices,
+        open_prices=gap_open,
+        signals=signals,
+        fee_model=NotionalFee(0.001),
+        holding_return_basis="close_to_close",
+    )
+
+    assert with_gap.cost_breakdown["fees"][2] > no_gap.cost_breakdown["fees"][2]
+    assert with_gap.returns[2] < no_gap.returns[2]
+
+
+def test_vectorized_holding_return_basis_and_execution_diagnostics() -> None:
+    close_prices = np.array([100.0, 100.0, 100.0, 100.0])
+    open_prices = np.array([100.0, 130.0, 130.0, 130.0])
+    signals = np.array([1.0, 1.0, 1.0, 1.0])
+
+    close_basis = backtest_vectorized(
+        prices=close_prices,
+        close_prices=close_prices,
+        open_prices=open_prices,
+        signals=signals,
+        holding_return_basis="close_to_close",
+    )
+    open_basis = backtest_vectorized(
+        prices=close_prices,
+        close_prices=close_prices,
+        open_prices=open_prices,
+        signals=signals,
+        holding_return_basis="open_to_open",
+    )
+
+    assert np.isclose(close_basis.returns[1], 0.0)
+    assert open_basis.returns[1] > 0.0
+
+    diag = open_basis.cost_breakdown["execution_price_diagnostics"]
+    assert diag["holding_return_basis"] == "open_to_open"
+    assert np.allclose(np.asarray(diag["execution_prices"]), open_prices)
+    assert np.allclose(np.asarray(diag["signal_anchor_close_prices"]), close_prices)
+    assert np.allclose(np.asarray(diag["holding_return_prices"]), open_prices)
