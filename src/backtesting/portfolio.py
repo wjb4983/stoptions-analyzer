@@ -68,6 +68,19 @@ class PortfolioConstructionResult:
     diagnostics: dict[str, np.ndarray | list[dict[str, float | int | bool | str]]]
 
 
+@dataclass(frozen=True)
+class StressReplayResult:
+    scenario: str
+    portfolio_returns: np.ndarray
+    equity_curve: np.ndarray
+    max_drawdown: float
+    cvar_95: float
+    liquidity_breach_count: int
+    attribution_by_asset: np.ndarray
+    worst_bar: int
+    worst_bar_contribution_by_asset: np.ndarray
+
+
 def construct_target_weights(
     *,
     raw_signals: np.ndarray,
@@ -271,6 +284,70 @@ def construct_target_weights(
         "max_underlying_delta_exposure": max_underlying_delta_exposure,
     }
     return PortfolioConstructionResult(target_weights=weights, diagnostics=diagnostics)
+
+
+def replay_weights_under_stress(
+    *,
+    base_weights: np.ndarray,
+    stressed_asset_returns: np.ndarray,
+    stressed_available_volume: np.ndarray | None = None,
+    stressed_spread_bps: np.ndarray | None = None,
+    liquidity_turnover_threshold: float = 0.10,
+    scenario_name: str = "stress_scenario",
+) -> StressReplayResult:
+    """Replay fixed strategy weights through a stressed return path."""
+
+    weights = np.asarray(base_weights, dtype=float)
+    asset_returns = np.asarray(stressed_asset_returns, dtype=float)
+    if weights.shape != asset_returns.shape:
+        raise ValueError("base_weights and stressed_asset_returns must have same shape")
+
+    portfolio_returns = np.sum(weights * asset_returns, axis=1)
+    equity_curve = np.cumprod(1.0 + portfolio_returns)
+    running_peak = np.maximum.accumulate(equity_curve)
+    drawdown = equity_curve / np.where(running_peak == 0.0, 1.0, running_peak) - 1.0
+    max_drawdown = float(np.min(drawdown)) if drawdown.size else 0.0
+
+    losses = -portfolio_returns
+    if losses.size:
+        threshold = float(np.quantile(losses, 0.95))
+        tail = losses[losses >= threshold]
+        cvar_95 = float(np.mean(tail)) if tail.size else float(max(0.0, threshold))
+    else:
+        cvar_95 = 0.0
+
+    turnover_proxy = np.sum(np.abs(np.diff(weights, axis=0, prepend=weights[0:1])), axis=1)
+    liquidity_multiplier = np.ones_like(turnover_proxy)
+    if stressed_available_volume is not None:
+        avail = np.asarray(stressed_available_volume, dtype=float)
+        if avail.shape != weights.shape:
+            raise ValueError("stressed_available_volume must match base_weights shape")
+        mean_avail = np.mean(np.clip(avail, 1e-12, None), axis=1)
+        liquidity_multiplier *= 1.0 / np.sqrt(mean_avail)
+    if stressed_spread_bps is not None:
+        spread = np.asarray(stressed_spread_bps, dtype=float)
+        if spread.shape != weights.shape:
+            raise ValueError("stressed_spread_bps must match base_weights shape")
+        liquidity_multiplier *= 1.0 + (np.mean(np.clip(spread, 0.0, None), axis=1) / 10_000.0)
+    liquidity_load = turnover_proxy * liquidity_multiplier
+    liquidity_breach_count = int(np.sum(liquidity_load > float(liquidity_turnover_threshold)))
+
+    attribution_by_asset = np.sum(weights * asset_returns, axis=0)
+    per_bar_contrib = weights * asset_returns
+    worst_bar = int(np.argmin(portfolio_returns)) if portfolio_returns.size else 0
+    worst_bar_contrib = per_bar_contrib[worst_bar] if per_bar_contrib.size else np.zeros(weights.shape[1], dtype=float)
+
+    return StressReplayResult(
+        scenario=str(scenario_name),
+        portfolio_returns=portfolio_returns,
+        equity_curve=equity_curve,
+        max_drawdown=max_drawdown,
+        cvar_95=cvar_95,
+        liquidity_breach_count=liquidity_breach_count,
+        attribution_by_asset=attribution_by_asset,
+        worst_bar=worst_bar,
+        worst_bar_contribution_by_asset=np.asarray(worst_bar_contrib, dtype=float),
+    )
 
 
 def _build_base_weights(
