@@ -7,7 +7,7 @@ from .alpha_model import (
     apply_meta_labeling,
     probability_calibrated_position_size,
 )
-from .greek_targets import GreekNeutralTargetRequest, build_greek_neutral_targets
+from .greek_targets import GreekNeutralTargetRequest, build_greek_neutral_targets, compute_aggregate_greek_exposures
 from .xsmom import (
     CrossSectionalMomentumConfig,
     assign_rank_buckets,
@@ -34,6 +34,7 @@ __all__ = [
     "compute_risk_normalized_weights",
     "GreekNeutralTargetRequest",
     "build_greek_neutral_targets",
+    "compute_aggregate_greek_exposures",
 ]
 
 

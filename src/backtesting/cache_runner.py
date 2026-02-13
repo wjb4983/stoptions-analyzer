@@ -226,6 +226,9 @@ def run_time_series_momentum_backtest(
     portfolio_max_gross_exposure: float = 1.0,
     portfolio_min_net_exposure: float = -1.0,
     portfolio_max_net_exposure: float = 1.0,
+    portfolio_max_net_gamma: float | None = None,
+    portfolio_max_abs_vega_bucket: float | None = None,
+    portfolio_max_abs_delta_per_underlying: float | None = None,
     portfolio_sector_map: dict[str, str] | None = None,
     regime_parameter_map: dict[str, dict[str, object]] | None = None,
     regime_risk_map: dict[str, dict[str, float]] | None = None,
@@ -371,6 +374,9 @@ def run_time_series_momentum_backtest(
         max_gross_exposure=float(portfolio_max_gross_exposure),
         min_net_exposure=float(portfolio_min_net_exposure),
         max_net_exposure=float(portfolio_max_net_exposure),
+        max_net_gamma=None if portfolio_max_net_gamma is None else float(portfolio_max_net_gamma),
+        max_abs_vega_bucket=None if portfolio_max_abs_vega_bucket is None else float(portfolio_max_abs_vega_bucket),
+        max_abs_delta_per_underlying=None if portfolio_max_abs_delta_per_underlying is None else float(portfolio_max_abs_delta_per_underlying),
         sector_map=dict(portfolio_sector_map or {}),
     )
 
@@ -386,6 +392,10 @@ def run_time_series_momentum_backtest(
         prices=prices,
         symbol_order=symbol_order,
         config=portfolio_cfg,
+        underlying_by_symbol={
+            symbol: getattr(arrays.metadata, "underlying_by_symbol", {}).get(symbol, symbol)
+            for symbol in symbol_order
+        },
     )
 
     borrow_rate_series = None
@@ -492,6 +502,9 @@ def run_time_series_momentum_backtest(
         "portfolio_max_gross_exposure": portfolio_max_gross_exposure,
         "portfolio_min_net_exposure": portfolio_min_net_exposure,
         "portfolio_max_net_exposure": portfolio_max_net_exposure,
+        "portfolio_max_net_gamma": portfolio_max_net_gamma,
+        "portfolio_max_abs_vega_bucket": portfolio_max_abs_vega_bucket,
+        "portfolio_max_abs_delta_per_underlying": portfolio_max_abs_delta_per_underlying,
         "portfolio_sector_map": dict(portfolio_sector_map or {}),
         "regime_parameter_map": dict(regime_parameter_map or {}),
         "regime_risk_map": dict(regime_risk_map or {}),
@@ -1847,6 +1860,9 @@ def run_multi_signal_backtest(
     portfolio_max_gross_exposure: float = 1.0,
     portfolio_min_net_exposure: float = -1.0,
     portfolio_max_net_exposure: float = 1.0,
+    portfolio_max_net_gamma: float | None = None,
+    portfolio_max_abs_vega_bucket: float | None = None,
+    portfolio_max_abs_delta_per_underlying: float | None = None,
     portfolio_sector_map: dict[str, str] | None = None,
     governance_metadata: dict[str, Any] | None = None,
 ) -> str:
@@ -2884,6 +2900,9 @@ def replay_manifest_run(*, manifest_path: Path, cache_root: Path | None = None, 
         portfolio_max_gross_exposure=float(params.get("portfolio_max_gross_exposure", 1.0)),
         portfolio_min_net_exposure=float(params.get("portfolio_min_net_exposure", -1.0)),
         portfolio_max_net_exposure=float(params.get("portfolio_max_net_exposure", 1.0)),
+        portfolio_max_net_gamma=float(params.get("portfolio_max_net_gamma")) if params.get("portfolio_max_net_gamma") not in (None, "") else None,
+        portfolio_max_abs_vega_bucket=float(params.get("portfolio_max_abs_vega_bucket")) if params.get("portfolio_max_abs_vega_bucket") not in (None, "") else None,
+        portfolio_max_abs_delta_per_underlying=float(params.get("portfolio_max_abs_delta_per_underlying")) if params.get("portfolio_max_abs_delta_per_underlying") not in (None, "") else None,
     )
     run_dir = _extract_saved_output_dir(output)
     _assert_metric_table_compatibility(run_dir)
@@ -3143,6 +3162,9 @@ def _write_risk_diagnostics_csv_json(
     buying_power = np.asarray(diagnostics.get("buying_power", np.zeros(len(timestamps))), dtype=float)
     forced_liquidation = np.asarray(diagnostics.get("forced_liquidation", np.zeros(len(timestamps))), dtype=float)
     deleveraging_scale = np.asarray(diagnostics.get("deleveraging_scale", np.ones(len(timestamps))), dtype=float)
+    net_gamma = np.asarray(diagnostics.get("net_gamma_exposure", np.zeros(len(timestamps))), dtype=float)
+    max_vega_bucket = np.asarray(diagnostics.get("max_vega_bucket_exposure", np.zeros(len(timestamps))), dtype=float)
+    max_underlying_delta = np.asarray(diagnostics.get("max_underlying_delta_exposure", np.zeros(len(timestamps))), dtype=float)
     turnover_by_symbol = np.asarray(
         diagnostics.get("turnover_by_symbol", np.zeros((len(timestamps), len(symbol_order)))),
         dtype=float,
@@ -3164,6 +3186,9 @@ def _write_risk_diagnostics_csv_json(
             "buying_power": float(buying_power[idx]) if idx < buying_power.size else 0.0,
             "forced_liquidation": float(forced_liquidation[idx]) if idx < forced_liquidation.size else 0.0,
             "deleveraging_scale": float(deleveraging_scale[idx]) if idx < deleveraging_scale.size else 1.0,
+            "net_gamma_exposure": float(net_gamma[idx]) if idx < net_gamma.size else 0.0,
+            "max_vega_bucket_exposure": float(max_vega_bucket[idx]) if idx < max_vega_bucket.size else 0.0,
+            "max_underlying_delta_exposure": float(max_underlying_delta[idx]) if idx < max_underlying_delta.size else 0.0,
         }
         rows.append(row)
 
@@ -3185,6 +3210,9 @@ def _write_risk_diagnostics_csv_json(
                 "buying_power",
                 "forced_liquidation",
                 "deleveraging_scale",
+                "net_gamma_exposure",
+                "max_vega_bucket_exposure",
+                "max_underlying_delta_exposure",
             ],
         )
         writer.writeheader()
@@ -3415,6 +3443,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--portfolio-max-gross-exposure", type=float, default=1.0)
     run_parser.add_argument("--portfolio-min-net-exposure", type=float, default=-1.0)
     run_parser.add_argument("--portfolio-max-net-exposure", type=float, default=1.0)
+    run_parser.add_argument("--portfolio-max-net-gamma", type=float, default=None)
+    run_parser.add_argument("--portfolio-max-abs-vega-bucket", type=float, default=None)
+    run_parser.add_argument("--portfolio-max-abs-delta-per-underlying", type=float, default=None)
 
     sweep_parser = subparsers.add_parser("sweep", help="Run parameter sweep across signal/core grids.")
     _add_common_args(sweep_parser)
@@ -3590,6 +3621,9 @@ def main() -> None:
             portfolio_max_gross_exposure=float(args.portfolio_max_gross_exposure),
             portfolio_min_net_exposure=float(args.portfolio_min_net_exposure),
             portfolio_max_net_exposure=float(args.portfolio_max_net_exposure),
+            portfolio_max_net_gamma=float(args.portfolio_max_net_gamma) if args.portfolio_max_net_gamma is not None else None,
+            portfolio_max_abs_vega_bucket=float(args.portfolio_max_abs_vega_bucket) if args.portfolio_max_abs_vega_bucket is not None else None,
+            portfolio_max_abs_delta_per_underlying=float(args.portfolio_max_abs_delta_per_underlying) if args.portfolio_max_abs_delta_per_underlying is not None else None,
         )
     print(output)
 

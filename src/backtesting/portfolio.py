@@ -21,6 +21,10 @@ class PortfolioConstructionConfig:
     min_gross_exposure: float = 0.0
     min_net_exposure: float = -1.0
     max_net_exposure: float = 1.0
+    max_net_gamma: float | None = None
+    max_abs_vega_bucket: float | None = None
+    max_abs_delta_per_underlying: float | None = None
+    vega_bucket_map: dict[str, str] | None = None
     sector_map: dict[str, str] | None = None
     country_map: dict[str, str] | None = None
     sector_caps: dict[str, float] | None = None
@@ -68,6 +72,10 @@ def construct_target_weights(
     prices: np.ndarray,
     symbol_order: list[str],
     config: PortfolioConstructionConfig,
+    greek_gamma: np.ndarray | None = None,
+    greek_vega: np.ndarray | None = None,
+    greek_delta: np.ndarray | None = None,
+    underlying_by_symbol: dict[str, str] | None = None,
 ) -> PortfolioConstructionResult:
     signals = np.asarray(raw_signals, dtype=float)
     px = np.asarray(prices, dtype=float)
@@ -79,6 +87,11 @@ def construct_target_weights(
     turnover_by_symbol = np.zeros_like(signals, dtype=float)
     prev = np.zeros(assets, dtype=float)
     sector_map = config.sector_map or {}
+
+    gamma_arr = _exposure_array_for_horizon(greek_gamma, periods=periods, assets=assets)
+    vega_arr = _exposure_array_for_horizon(greek_vega, periods=periods, assets=assets)
+    delta_arr = _exposure_array_for_horizon(greek_delta, periods=periods, assets=assets)
+    underlier_map = underlying_by_symbol or {}
 
     factor_exposures = _factor_exposure_for_horizon(config.factor_exposures, periods=periods, assets=assets)
     factor_covariances = _factor_covariance_for_horizon(config.factor_covariances, periods=periods)
@@ -98,6 +111,9 @@ def construct_target_weights(
     factor_risk_contrib = np.zeros(periods, dtype=float)
     tail_expected_shortfall = np.zeros(periods, dtype=float)
     tail_constraint_active = np.zeros(periods, dtype=float)
+    net_gamma_exposure = np.zeros(periods, dtype=float)
+    max_vega_bucket_exposure = np.zeros(periods, dtype=float)
+    max_underlying_delta_exposure = np.zeros(periods, dtype=float)
 
     for idx in range(periods):
         row = np.nan_to_num(signals[idx], nan=0.0, posinf=0.0, neginf=0.0)
@@ -138,6 +154,10 @@ def construct_target_weights(
                 factor_exposure=fac,
                 beta_vector=beta_vector,
                 scenario_returns=scenarios,
+                gamma_exposure=(gamma_arr[idx] if gamma_arr is not None else None),
+                vega_exposure=(vega_arr[idx] if vega_arr is not None else None),
+                delta_exposure=(delta_arr[idx] if delta_arr is not None else None),
+                underlying_by_symbol=underlier_map,
             )
             diag_row["covariance_estimator"] = cov_estimator
             constrained = optimized
@@ -157,6 +177,10 @@ def construct_target_weights(
                 factor_exposure=(factor_exposures[idx] if factor_exposures is not None else None),
                 beta_vector=beta_vector,
                 scenario_returns=(tail_scenarios[idx] if tail_scenarios is not None else None),
+                gamma_exposure=(gamma_arr[idx] if gamma_arr is not None else None),
+                vega_exposure=(vega_arr[idx] if vega_arr is not None else None),
+                delta_exposure=(delta_arr[idx] if delta_arr is not None else None),
+                underlying_by_symbol=underlier_map,
             )
         constrained[~tradable] = 0.0
         weights[idx] = constrained
@@ -176,6 +200,23 @@ def construct_target_weights(
         rc_long, rc_short = _risk_contribution_by_sleeve(constrained, cov_diag)
         long_risk_contrib[idx] = rc_long
         short_risk_contrib[idx] = rc_short
+        gamma_row = gamma_arr[idx] if gamma_arr is not None else None
+        vega_row = vega_arr[idx] if vega_arr is not None else None
+        delta_row = delta_arr[idx] if delta_arr is not None else None
+        net_gamma_exposure[idx] = float(np.dot(constrained, gamma_row)) if gamma_row is not None else 0.0
+        max_vega_bucket_exposure[idx] = _max_abs_vega_bucket_exposure(
+            constrained,
+            vega_exposure=vega_row,
+            symbol_order=symbol_order,
+            bucket_map=(config.vega_bucket_map or {}),
+        )
+        max_underlying_delta_exposure[idx] = _max_abs_underlying_delta_exposure(
+            constrained,
+            delta_exposure=delta_row,
+            symbol_order=symbol_order,
+            underlying_by_symbol=underlier_map,
+        )
+
         if config.method != "capped_optimization":
             factor_risk_contrib[idx] = _factor_risk_contribution(constrained, cov_diag, fac, fac_cov)
             scenarios = tail_scenarios[idx] if tail_scenarios is not None else None
@@ -217,6 +258,9 @@ def construct_target_weights(
         "factor_risk_contribution": factor_risk_contrib,
         "tail_expected_shortfall": tail_expected_shortfall,
         "tail_constraint_active": tail_constraint_active,
+        "net_gamma_exposure": net_gamma_exposure,
+        "max_vega_bucket_exposure": max_vega_bucket_exposure,
+        "max_underlying_delta_exposure": max_underlying_delta_exposure,
     }
     return PortfolioConstructionResult(target_weights=weights, diagnostics=diagnostics)
 
@@ -280,6 +324,10 @@ def _optimize_information_ratio(
     factor_exposure: np.ndarray | None,
     beta_vector: np.ndarray | None,
     scenario_returns: np.ndarray | None,
+    gamma_exposure: np.ndarray | None,
+    vega_exposure: np.ndarray | None,
+    delta_exposure: np.ndarray | None,
+    underlying_by_symbol: dict[str, str],
 ) -> tuple[np.ndarray, dict[str, float | int | bool | str]]:
     w = np.array(initial, dtype=float, copy=True)
     mu = np.nan_to_num(expected_returns, nan=0.0)
@@ -321,6 +369,10 @@ def _optimize_information_ratio(
             factor_exposure=factor_exposure,
             beta_vector=beta_vector,
             scenario_returns=scenario_returns,
+            gamma_exposure=gamma_exposure,
+            vega_exposure=vega_exposure,
+            delta_exposure=delta_exposure,
+            underlying_by_symbol=underlying_by_symbol,
         )
         w[~tradable] = 0.0
 
@@ -336,6 +388,10 @@ def _optimize_information_ratio(
         factor_exposure=factor_exposure,
         beta_vector=beta_vector,
         scenario_returns=scenario_returns,
+        gamma_exposure=gamma_exposure,
+        vega_exposure=vega_exposure,
+        delta_exposure=delta_exposure,
+        underlying_by_symbol=underlying_by_symbol,
     )
     es = _expected_shortfall_from_scenarios(w, scenario_returns=scenario_returns, confidence=float(config.cvar_confidence))
     diag = {
@@ -366,6 +422,10 @@ def _apply_constraints(
     factor_exposure: np.ndarray | None,
     beta_vector: np.ndarray | None,
     scenario_returns: np.ndarray | None,
+    gamma_exposure: np.ndarray | None,
+    vega_exposure: np.ndarray | None,
+    delta_exposure: np.ndarray | None,
+    underlying_by_symbol: dict[str, str],
 ) -> np.ndarray:
     out = np.array(weights, dtype=float, copy=True)
 
@@ -397,6 +457,15 @@ def _apply_constraints(
 
     out = _enforce_net_and_gross(out, config=config)
     out = _enforce_tail_risk_constraint(out, scenario_returns=scenario_returns, config=config)
+    out = _enforce_option_risk_constraints(
+        out,
+        gamma_exposure=gamma_exposure,
+        vega_exposure=vega_exposure,
+        delta_exposure=delta_exposure,
+        symbol_order=symbol_order,
+        underlying_by_symbol=underlying_by_symbol,
+        config=config,
+    )
 
     tc_penalty = float(config.transaction_cost_penalty)
     if tc_penalty > 0:
@@ -498,6 +567,10 @@ def _constraint_violation(
     factor_exposure: np.ndarray | None,
     beta_vector: np.ndarray | None,
     scenario_returns: np.ndarray | None,
+    gamma_exposure: np.ndarray | None,
+    vega_exposure: np.ndarray | None,
+    delta_exposure: np.ndarray | None,
+    underlying_by_symbol: dict[str, str],
 ) -> float:
     v = 0.0
     v = max(v, float(np.max(np.abs(w)) - float(config.max_symbol_weight)))
@@ -531,6 +604,13 @@ def _constraint_violation(
     if config.max_expected_shortfall is not None:
         es = _expected_shortfall_from_scenarios(w, scenario_returns=scenario_returns, confidence=float(config.cvar_confidence))
         v = max(v, es - float(config.max_expected_shortfall))
+
+    if config.max_net_gamma is not None and gamma_exposure is not None:
+        v = max(v, abs(float(np.dot(w, gamma_exposure))) - float(config.max_net_gamma))
+    if config.max_abs_vega_bucket is not None and vega_exposure is not None:
+        v = max(v, _max_abs_vega_bucket_exposure(w, vega_exposure=vega_exposure, symbol_order=symbol_order, bucket_map=(config.vega_bucket_map or {})) - float(config.max_abs_vega_bucket))
+    if config.max_abs_delta_per_underlying is not None and delta_exposure is not None:
+        v = max(v, _max_abs_underlying_delta_exposure(w, delta_exposure=delta_exposure, symbol_order=symbol_order, underlying_by_symbol=underlying_by_symbol) - float(config.max_abs_delta_per_underlying))
     return max(0.0, float(v))
 
 
@@ -616,6 +696,76 @@ def _enforce_tail_risk_constraint(
     scale = max(0.0, min(1.0, limit / max(es, 1e-12)))
     return np.asarray(weights, dtype=float) * scale
 
+
+
+def _enforce_option_risk_constraints(
+    weights: np.ndarray,
+    *,
+    gamma_exposure: np.ndarray | None,
+    vega_exposure: np.ndarray | None,
+    delta_exposure: np.ndarray | None,
+    symbol_order: list[str],
+    underlying_by_symbol: dict[str, str],
+    config: PortfolioConstructionConfig,
+) -> np.ndarray:
+    out = np.asarray(weights, dtype=float).copy()
+    if config.max_net_gamma is not None and gamma_exposure is not None:
+        net_gamma = float(np.dot(out, gamma_exposure))
+        limit = max(1e-12, float(config.max_net_gamma))
+        if abs(net_gamma) > limit:
+            out *= limit / abs(net_gamma)
+    if config.max_abs_vega_bucket is not None and vega_exposure is not None:
+        peak = _max_abs_vega_bucket_exposure(out, vega_exposure=vega_exposure, symbol_order=symbol_order, bucket_map=(config.vega_bucket_map or {}))
+        limit = max(1e-12, float(config.max_abs_vega_bucket))
+        if peak > limit:
+            out *= limit / peak
+    if config.max_abs_delta_per_underlying is not None and delta_exposure is not None:
+        peak = _max_abs_underlying_delta_exposure(out, delta_exposure=delta_exposure, symbol_order=symbol_order, underlying_by_symbol=underlying_by_symbol)
+        limit = max(1e-12, float(config.max_abs_delta_per_underlying))
+        if peak > limit:
+            out *= limit / peak
+    return out
+
+
+def _max_abs_vega_bucket_exposure(
+    weights: np.ndarray,
+    *,
+    vega_exposure: np.ndarray | None,
+    symbol_order: list[str],
+    bucket_map: dict[str, str],
+) -> float:
+    if vega_exposure is None:
+        return 0.0
+    buckets: dict[str, float] = {}
+    for idx, symbol in enumerate(symbol_order):
+        bucket = bucket_map.get(symbol, symbol)
+        buckets[bucket] = buckets.get(bucket, 0.0) + float(weights[idx] * vega_exposure[idx])
+    return max((abs(v) for v in buckets.values()), default=0.0)
+
+
+def _max_abs_underlying_delta_exposure(
+    weights: np.ndarray,
+    *,
+    delta_exposure: np.ndarray | None,
+    symbol_order: list[str],
+    underlying_by_symbol: dict[str, str],
+) -> float:
+    if delta_exposure is None:
+        return 0.0
+    underliers: dict[str, float] = {}
+    for idx, symbol in enumerate(symbol_order):
+        under = underlying_by_symbol.get(symbol, symbol)
+        underliers[under] = underliers.get(under, 0.0) + float(weights[idx] * delta_exposure[idx])
+    return max((abs(v) for v in underliers.values()), default=0.0)
+
+
+def _exposure_array_for_horizon(values: np.ndarray | None, *, periods: int, assets: int) -> np.ndarray | None:
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=float)
+    if arr.shape != (periods, assets):
+        return None
+    return arr
 
 def _expected_shortfall_from_scenarios(
     weights: np.ndarray,
