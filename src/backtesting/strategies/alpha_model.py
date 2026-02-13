@@ -5,6 +5,8 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from analysis.diagnostics import compute_signal_diagnostics, validate_signal_diagnostics
+
 
 @dataclass(frozen=True)
 class FeatureBatch:
@@ -63,6 +65,29 @@ class MetaLabelingResult:
     confidence: np.ndarray
     gated_signal: np.ndarray
     gate_mask: np.ndarray
+
+
+@dataclass(frozen=True)
+class SignalDiagnosticsResult:
+    diagnostics: dict[str, Any]
+    diagnostics_ready: bool
+
+
+def build_signal_diagnostics(
+    *,
+    signal_by_ticker: dict[str, float],
+    weights_by_ticker: dict[str, float],
+    prices_by_ticker: dict[str, list[float] | list[dict[str, float]] | tuple[float, ...]],
+) -> SignalDiagnosticsResult:
+    diagnostics = compute_signal_diagnostics(
+        scores=signal_by_ticker,
+        weights=weights_by_ticker,
+        prices_by_ticker=prices_by_ticker,
+    )
+    return SignalDiagnosticsResult(
+        diagnostics=diagnostics,
+        diagnostics_ready=validate_signal_diagnostics(diagnostics),
+    )
 
 
 def apply_meta_labeling(

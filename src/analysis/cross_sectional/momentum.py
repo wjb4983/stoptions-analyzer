@@ -11,6 +11,7 @@ from ..common import (
     multi_horizon_return,
     quantile_bucket_sizes,
 )
+from ..diagnostics import compute_signal_diagnostics
 from .base import CrossSectionalResult
 
 
@@ -147,6 +148,11 @@ def compute_cross_sectional_momentum(
             "use_volatility_scaling": settings.use_volatility_scaling,
             "use_residual": settings.use_residual,
             "use_multi_horizon": settings.use_multi_horizon,
+            "diagnostics": compute_signal_diagnostics(
+                scores=scores,
+                weights=weights,
+                prices_by_ticker=prices_by_ticker,
+            ),
         },
         metrics=metrics,
         skipped=skipped,

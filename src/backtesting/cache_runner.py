@@ -95,10 +95,10 @@ METRIC_TABLE_SCHEMA_VERSIONS: dict[str, str] = {
 }
 PROMOTION_STATES = ("research", "paper", "shadow", "production")
 PROMOTION_REQUIRED_CHECKS: dict[str, list[str]] = {
-    "research": ["dataset_lock"],
-    "paper": ["dataset_lock", "oos_periods", "stability_threshold"],
-    "shadow": ["dataset_lock", "oos_periods", "stability_threshold", "turnover_capacity"],
-    "production": ["dataset_lock", "oos_periods", "stability_threshold", "turnover_capacity", "approval"],
+    "research": ["dataset_lock", "signal_diagnostics"],
+    "paper": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold"],
+    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity"],
+    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "approval"],
 }
 
 
@@ -3306,6 +3306,7 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "stability_threshold": bool(checks.get("stability_threshold", False)),
         "turnover_capacity": bool(checks.get("turnover_capacity", False)),
         "approval": bool(checks.get("approval", False)),
+        "signal_diagnostics": bool(checks.get("signal_diagnostics", False)),
     }
 
     missing_required = [name for name in required_checks if not gate_checks.get(name, False)]
@@ -3355,8 +3356,11 @@ def _evaluate_governance_gate_checks(
     turnover_total = float(metrics.get("turnover_total", 0.0))
     capacity_score = max(0.0, 1.0 - (turnover_total / max(max_turnover, 1e-9)))
 
+    signal_diag_ready = bool(metrics.get("signal_diagnostics_ready", False))
+
     checks = {
         "dataset_lock": bool(governance.get("dataset_snapshot_lock")),
+        "signal_diagnostics": signal_diag_ready,
         "oos_periods": oos_periods >= max(1, min_oos),
         "stability_threshold": stability_score >= min_stability,
         "turnover_capacity": turnover_total <= max_turnover and capacity_score >= min_capacity,
