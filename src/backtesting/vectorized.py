@@ -126,8 +126,8 @@ def backtest_vectorized(
     volatility: Any | None = None,
     spread_bps: Any | None = None,
     order_type: str = "market",
-    latency_bars: int = 0,
-    latency_ms: int = 0,
+    latency_bars: Any | None = 0,
+    latency_ms: Any | None = 0,
     queue_rank_proxy: Any | None = 0.5,
     available_bar_volume: Any | None = None,
     max_participation_per_bar: float | None = None,
@@ -231,6 +231,8 @@ def backtest_vectorized(
         queue_rank_proxy=queue_rank_proxy,
         available_bar_volume=available_bar_volume,
         max_participation_per_bar=max_participation_per_bar,
+        latency_bars=latency_bars,
+        latency_ms=latency_ms,
     )
 
     adapter = VectorizedExecutionAdapter(max_participation_per_bar=liquidity["max_participation_per_bar"][0, 0])
@@ -242,8 +244,8 @@ def backtest_vectorized(
         available_volume=liquidity["available_bar_volume"],
         queue_rank_proxy=liquidity["queue_rank_proxy"],
         order_type=order_type,
-        latency_bars=latency_bars,
-        latency_ms=latency_ms,
+        latency_bars=int(np.round(liquidity["latency_bars"][0, 0])),
+        latency_ms=int(np.round(liquidity["latency_ms"][0, 0])),
         symbols=resolved_symbols,
         timestamps=resolved_timestamps,
         time_in_force=time_in_force,
@@ -575,6 +577,8 @@ def _build_liquidity_context(
     queue_rank_proxy: Any | None,
     available_bar_volume: Any | None,
     max_participation_per_bar: float | None,
+    latency_bars: Any | None,
+    latency_ms: Any | None,
 ) -> dict[str, np.ndarray]:
     n_periods, n_assets = prices.shape
     volumes_arr = _coerce_liquidity_array(volumes, prices.shape, default=1.0)
@@ -594,6 +598,8 @@ def _build_liquidity_context(
     available_volume_arr = np.where(np.isnan(available_volume_arr), volumes_arr, available_volume_arr)
     max_participation = 1.0 if max_participation_per_bar is None else float(max_participation_per_bar)
     max_participation_arr = np.full(prices.shape, max_participation, dtype=float)
+    latency_bars_arr = _coerce_liquidity_array(latency_bars, prices.shape, default=0.0)
+    latency_ms_arr = _coerce_liquidity_array(latency_ms, prices.shape, default=0.0)
     return {
         "volume": volumes_arr,
         "adv": adv_arr,
@@ -602,6 +608,8 @@ def _build_liquidity_context(
         "queue_rank_proxy": queue_arr,
         "available_bar_volume": available_volume_arr,
         "max_participation_per_bar": max_participation_arr,
+        "latency_bars": latency_bars_arr,
+        "latency_ms": latency_ms_arr,
     }
 
 
@@ -659,8 +667,8 @@ def _build_bar_context(
         volatility=float(liquidity["volatility"][idx, asset_idx]),
         spread_bps=float(liquidity["spread_bps"][idx, asset_idx]),
         order_type="market",
-        latency_bars=0,
-        latency_ms=0,
+        latency_bars=int(np.round(liquidity["latency_bars"][idx, asset_idx])),
+        latency_ms=int(np.round(liquidity["latency_ms"][idx, asset_idx])),
         queue_rank_proxy=float(liquidity["queue_rank_proxy"][idx, asset_idx]),
         available_bar_volume=float(liquidity["available_bar_volume"][idx, asset_idx]),
         max_participation_per_bar=float(liquidity["max_participation_per_bar"][idx, asset_idx]),

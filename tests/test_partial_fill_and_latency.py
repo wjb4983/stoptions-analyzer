@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.backtesting.execution import PartialFillModel
+from src.backtesting.event_driven import EventDrivenBacktester, Order
+from src.backtesting.execution import LatencyQueueDriftSlippage, PartialFillModel
 from src.backtesting.vectorized import backtest_vectorized, replay_from_event_logs
 
 
@@ -48,12 +49,12 @@ def test_vectorized_backtest_exposes_fill_artifacts() -> None:
 
 
 def test_order_lifecycle_persists_across_bars_until_filled() -> None:
-    prices = np.array([100.0, 100.0, 100.0, 100.0], dtype=float)
-    signals = np.array([0.0, 1.0, 1.0, 1.0], dtype=float)
+    prices = np.array([100.0, 100.0, 100.0, 100.0, 100.0, 100.0], dtype=float)
+    signals = np.array([0.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float)
     result = backtest_vectorized(
         prices,
         signals,
-        available_bar_volume=np.array([1.0, 1.0, 1.0, 1.0]),
+        available_bar_volume=np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
         max_participation_per_bar=0.25,
         time_in_force="gtc",
         urgency="high",
@@ -82,3 +83,51 @@ def test_order_lifecycle_cancel_replace_and_replay_determinism() -> None:
     assert "submit" in event_types
     replayed = replay_from_event_logs(result.execution_events)
     assert replayed == replay_from_event_logs(list(reversed(result.execution_events)))
+
+
+def test_vectorized_latency_drift_slippage_uses_latency_context() -> None:
+    prices = np.array([100.0, 100.0, 100.0, 100.0, 100.0, 100.0], dtype=float)
+    signals = np.array([0.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float)
+    model = LatencyQueueDriftSlippage(drift_bps_per_bar=4.0, queue_drift_bps=2.0)
+
+    fast = backtest_vectorized(
+        prices,
+        signals,
+        slippage_model=model,
+        available_bar_volume=np.ones_like(prices),
+        max_participation_per_bar=1.0,
+        latency_bars=0,
+        latency_ms=0,
+    )
+    slow = backtest_vectorized(
+        prices,
+        signals,
+        slippage_model=model,
+        available_bar_volume=np.ones_like(prices),
+        max_participation_per_bar=1.0,
+        latency_bars=2,
+        latency_ms=0,
+    )
+
+    assert slow.cost_breakdown["totals"]["slippage"] > fast.cost_breakdown["totals"]["slippage"]
+
+
+def test_event_driven_backtester_accepts_latency_aware_slippage_context() -> None:
+    class OneShot:
+        def __init__(self) -> None:
+            self.sent = False
+
+        def on_bar(self, bar, portfolio):
+            if self.sent:
+                return []
+            self.sent = True
+            return [Order(symbol="A", quantity=1.0, side="buy")]
+
+    model = LatencyQueueDriftSlippage(drift_bps_per_bar=2.0, queue_drift_bps=3.0)
+    bars = [
+        {"open": 100.0, "timestamp": "t0"},
+        {"open": 100.0, "timestamp": "t1", "latency_bars": 2, "queue_rank_proxy": 1.0, "latency_ms": 0},
+    ]
+    result = EventDrivenBacktester(initial_cash=1_000.0, slippage_model=model).run(bars, OneShot())
+    assert result.fills
+    assert result.fills[0].price > 100.0

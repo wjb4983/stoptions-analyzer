@@ -7,8 +7,11 @@ import numpy as np
 from src.backtesting.execution import (
     AssetClassCarryCost,
     CarryModel,
+    CompositeSlippage,
+    LatencyQueueDriftSlippage,
     ParticipationImpactSlippage,
     SpreadSlippage,
+    SquareRootImpactSlippage,
     VolatilityScaledSlippage,
     build_child_order_trajectory,
     calibrate_impact_coefficient_bps,
@@ -283,3 +286,28 @@ def test_arrival_price_schedule_front_loads_execution() -> None:
     twap = build_child_order_trajectory(parent_size=100.0, horizon_bars=6, scheduler="twap")
     assert arrival.schedule_weights[0] > twap.schedule_weights[0]
     assert arrival.schedule_weights[-1] < twap.schedule_weights[-1]
+
+
+def test_square_root_impact_slippage_increases_with_participation() -> None:
+    model = SquareRootImpactSlippage(impact_bps=25.0)
+    low = model.apply(100.0, 1.0, {"realized_participation": 0.04})
+    high = model.apply(100.0, 1.0, {"realized_participation": 0.64})
+    assert high > low
+
+
+def test_latency_queue_drift_penalizes_delay_and_queue_rank() -> None:
+    model = LatencyQueueDriftSlippage(drift_bps_per_bar=2.0, queue_drift_bps=3.0)
+    fast = model.apply(100.0, 1.0, {"latency_bars": 0, "latency_ms": 0, "queue_rank_proxy": 0.0})
+    slow = model.apply(100.0, 1.0, {"latency_bars": 2, "latency_ms": 0, "queue_rank_proxy": 1.0})
+    assert slow > fast
+
+
+def test_composite_slippage_stacks_spread_impact_and_latency() -> None:
+    model = CompositeSlippage([
+        SpreadSlippage(spread_bps=10.0),
+        SquareRootImpactSlippage(impact_bps=25.0),
+        LatencyQueueDriftSlippage(drift_bps_per_bar=2.0, queue_drift_bps=1.0),
+    ])
+    base = model.apply(100.0, 1.0, {"realized_participation": 0.01, "latency_bars": 0, "queue_rank_proxy": 0.0})
+    stressed = model.apply(100.0, 1.0, {"realized_participation": 0.49, "latency_bars": 2, "queue_rank_proxy": 1.0})
+    assert stressed > base
