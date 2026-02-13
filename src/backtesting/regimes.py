@@ -5,6 +5,8 @@ from typing import Any
 
 import numpy as np
 
+from regime import RegimeClassifierConfig, RegimeFeatureInputs, build_regime_feature_pipeline, classify_regimes
+
 
 @dataclass(frozen=True)
 class RegimeFeatureConfig:
@@ -28,6 +30,8 @@ class RegimeFeatureConfig:
         "correlation_stress",
         "breadth_persistence",
     )
+    hmm_iterations: int = 12
+    cluster_iterations: int = 20
 
 
 def _rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
@@ -128,11 +132,31 @@ def compute_regime_labels(
         feature_names = ["trend_spread", "market_vol", "term_vol_spread", "cross_sectional_dispersion"]
 
     feature_matrix = np.column_stack([feature_map[name] for name in feature_names]) if px.shape[0] else np.zeros((0, len(feature_names)), dtype=float)
-    posterior, state_names = _fit_probabilistic_regime_model(
-        features=feature_matrix,
-        n_states=max(2, int(cfg.n_states)),
-        em_iterations=max(1, int(cfg.em_iterations)),
+
+    proxy_inputs = RegimeFeatureInputs(
+        vix_front=np.maximum(vol * 100.0, 1.0),
+        vix_back=np.maximum((vol_anchor + np.maximum(term_vol_spread, 0.0)) * 100.0, 1.0),
+        realized_vol=np.maximum(vol, 0.0),
+        yield_curve_slope=trend_spread,
+        breadth=breadth,
+        liquidity_proxy=liq_proxy,
+        credit_spread=np.maximum(correlation_stress + dispersion, 0.0),
     )
+    macro_feature_matrix, macro_feature_names, raw_macro_features = build_regime_feature_pipeline(proxy_inputs)
+    blended_features = np.column_stack([feature_matrix, macro_feature_matrix]) if feature_matrix.size else macro_feature_matrix
+    blended_feature_names = tuple(feature_names) + tuple(macro_feature_names)
+    regime_fit = classify_regimes(
+        features=blended_features,
+        feature_names=blended_feature_names,
+        raw_feature_map=raw_macro_features,
+        config=RegimeClassifierConfig(
+            n_states=max(2, int(cfg.n_states)),
+            hmm_iterations=max(1, int(cfg.hmm_iterations)),
+            cluster_iterations=max(1, int(cfg.cluster_iterations)),
+        ),
+    )
+    posterior = np.asarray(regime_fit["regime_probabilities"], dtype=float)
+    state_names = [str(item) for item in np.asarray(regime_fit["regime_states"], dtype=object).tolist()]
 
     component_labels = np.array(
         [
@@ -142,7 +166,7 @@ def compute_regime_labels(
         dtype=object,
     )
 
-    argmax_states = np.argmax(posterior, axis=1) if posterior.size else np.zeros(px.shape[0], dtype=int)
+    argmax_states = np.asarray(regime_fit.get("regime_state_argmax", np.argmax(posterior, axis=1) if posterior.size else np.zeros(px.shape[0], dtype=int)), dtype=int)
     mapped_labels = _map_states_to_legacy_labels(
         posterior=posterior,
         state_names=state_names,
@@ -151,17 +175,19 @@ def compute_regime_labels(
     labels = np.array([mapped_labels[state_names[idx]] for idx in argmax_states], dtype=object)
     return {
         "trend": trend,
-        "volatility": vol_state,
+        "volatility": np.asarray(regime_fit.get("volatility_state", vol_state), dtype=object),
         "liquidity": liquidity,
-        "macro": macro,
+        "macro": np.asarray(regime_fit.get("macro_state", macro), dtype=object),
         "labels": labels,
         "legacy_component_labels": component_labels,
         "regime_probabilities": posterior,
+        "regime_confidence": np.asarray(regime_fit.get("regime_confidence", np.max(posterior, axis=1) if posterior.size else np.zeros(px.shape[0], dtype=float)), dtype=float),
         "regime_states": np.asarray(state_names, dtype=object),
         "regime_state_argmax": np.asarray(argmax_states, dtype=int),
         "regime_state_to_legacy_label": np.asarray([mapped_labels[name] for name in state_names], dtype=object),
-        "feature_names": np.asarray(feature_names, dtype=object),
-        "feature_matrix": feature_matrix,
+        "feature_names": np.asarray(blended_feature_names, dtype=object),
+        "feature_matrix": blended_features,
+        "macro_feature_names": np.asarray(macro_feature_names, dtype=object),
     }
 
 

@@ -366,6 +366,28 @@ def run_time_series_momentum_backtest(
             signals[mask] = candidate[mask]
 
         signals = _throttle_signal_changes(signals, interval=max(1, int(signal_rebalance_interval)))
+
+        trend_cfg = parse_entry_signal_config("ma_trend", {"ma_window": 30}, default_lookback_days=lookback_days, default_skip_days=skip_days)
+        meanrev_cfg = parse_entry_signal_config("mean_reversion", {"lookback_days": 20, "zscore_threshold": 1.0}, default_lookback_days=lookback_days, default_skip_days=skip_days)
+        no_exit_cfg = parse_exit_signal_config("none", {}, default_lookback_days=lookback_days, default_skip_days=skip_days)
+        trend_targets = build_targets(close_prices=prices, missing_mask=arrays.missing_mask, entry_config=trend_cfg, exit_config=no_exit_cfg)
+        meanrev_targets = build_targets(close_prices=prices, missing_mask=arrays.missing_mask, entry_config=meanrev_cfg, exit_config=no_exit_cfg)
+        base_sleeve = np.nanmean(signals, axis=1)
+        trend_sleeve = np.nanmean(trend_targets, axis=1)
+        meanrev_sleeve = np.nanmean(meanrev_targets, axis=1)
+        regime_confidence = np.asarray(regime_state.get("regime_confidence", np.ones(prices.shape[0], dtype=float)), dtype=float)
+        routed = np.zeros_like(base_sleeve)
+        for idx in range(base_sleeve.size):
+            label = str(regime_labels[idx])
+            confidence = float(np.clip(regime_confidence[idx], 0.0, 1.0))
+            if "macro_risk_off" in label or "vol_high" in label:
+                routed[idx] = (1.0 - confidence) * base_sleeve[idx] + confidence * meanrev_sleeve[idx]
+            elif "trend_up" in label and "macro_risk_on" in label:
+                routed[idx] = (1.0 - confidence) * base_sleeve[idx] + confidence * trend_sleeve[idx]
+            else:
+                routed[idx] = 0.5 * base_sleeve[idx] + 0.25 * trend_sleeve[idx] + 0.25 * meanrev_sleeve[idx]
+        signals = np.repeat(routed[:, None], prices.shape[1], axis=1)
+
         sized_signals = _apply_discrete_bet_sizing(
             signals=signals,
             prices=prices,
@@ -443,6 +465,7 @@ def run_time_series_momentum_backtest(
     ):
         for idx, state_name in enumerate(regime_states.tolist()):
             regime_diag[f"regime_probability_{state_name}"] = regime_probabilities[:, idx]
+    regime_diag["regime_confidence"] = np.asarray(regime_state.get("regime_confidence", np.zeros(prices.shape[0], dtype=float)), dtype=float)
     portfolio_result.diagnostics.update(regime_diag)
 
     result = backtest_vectorized(
@@ -661,6 +684,14 @@ def run_time_series_momentum_backtest(
         ensemble_lines.append(
             f"- {row['policy']}: total_return={row['total_return']:.6f} sharpe={row['sharpe']:.6f} max_drawdown={row['max_drawdown']:.6f}"
         )
+    if regime_ensemble_report.get("uplift_by_regime_bucket"):
+        ensemble_lines.append("Regime routing uplift by bucket (weighted vs baseline):")
+        for row in regime_ensemble_report.get("uplift_by_regime_bucket", []):
+            if not isinstance(row, dict):
+                continue
+            ensemble_lines.append(
+                f"- {row.get('regime', '')}: uplift_pnl_mean={float(row.get('uplift_pnl_mean', 0.0)):.8f} bars={int(row.get('bars', 0))}"
+            )
     final_report = report_text + "\n\n" + trade_log_summary + "\n\n" + "\n".join(ensemble_lines)
     (run_dir / "report.txt").write_text(final_report)
 
@@ -2826,13 +2857,36 @@ def _build_regime_ensemble_comparison(
         row.update(_compute_stream_metrics(stream))
         comparison_rows.append(row)
 
+    regime_attribution = {
+        name: attribute_pnl_by_regime(pnl=stream, regime_labels=regime_labels)
+        for name, stream in series.items()
+    }
+    baseline_lookup = {
+        str(row.get("regime")): float(row.get("pnl_mean", 0.0))
+        for row in regime_attribution.get("always_on_baseline", [])
+        if isinstance(row, dict)
+    }
+    uplift_by_bucket: list[dict[str, float | str | int]] = []
+    for row in regime_attribution.get("regime_weighted", []):
+        if not isinstance(row, dict):
+            continue
+        regime = str(row.get("regime", ""))
+        base = baseline_lookup.get(regime, 0.0)
+        uplift_by_bucket.append(
+            {
+                "regime": regime,
+                "bars": int(row.get("bars", 0)),
+                "baseline_pnl_mean": base,
+                "routed_pnl_mean": float(row.get("pnl_mean", 0.0)),
+                "uplift_pnl_mean": float(row.get("pnl_mean", 0.0) - base),
+            }
+        )
+
     return {
         "strategy_names": list(strategy_names),
         "comparison": comparison_rows,
-        "regime_attribution": {
-            name: attribute_pnl_by_regime(pnl=stream, regime_labels=regime_labels)
-            for name, stream in series.items()
-        },
+        "regime_attribution": regime_attribution,
+        "uplift_by_regime_bucket": uplift_by_bucket,
         "meta_policy_diagnostics": {
             "gated": {
                 "mean_turnover": float(np.mean(gated_diag.get("meta_turnover", np.array([0.0])))),
