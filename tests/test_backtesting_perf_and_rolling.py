@@ -90,3 +90,14 @@ def test_profile_regression_thresholds() -> None:
         thresholds={"optimized_to_reference_max_ratio": 1.05},
     )
     assert fail_report["pass"] is False
+
+
+def test_serialization_boundary_benchmark_shapes() -> None:
+    report = perf.benchmark_serialization_boundaries(n_periods=250, n_assets=4)
+    assert report["n_periods"] == 250
+    assert report["n_assets"] == 4
+    results = report["results"]
+    assert "npz" in results and "json" in results and "parquet" in results
+    assert float(results["npz"]["write_seconds"]) >= 0.0
+    assert float(results["npz"]["read_seconds"]) >= 0.0
+    assert float(results["json"]["size_bytes"]) > 0.0

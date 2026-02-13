@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import cProfile
+import json
 import pstats
 from dataclasses import dataclass
 from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from time import perf_counter
 from statistics import NormalDist
 
@@ -126,6 +129,89 @@ def profile_backtest_hotspots(n_periods: int = 20_000, n_assets: int = 128) -> l
         stats.print_stats(15)
         outputs.append(ProfileSummary(mode=mode, output=buf.getvalue(), elapsed_seconds=float(elapsed)))
     return outputs
+
+
+
+
+def benchmark_serialization_boundaries(
+    *,
+    n_periods: int = 20_000,
+    n_assets: int = 32,
+) -> dict[str, dict[str, float] | int]:
+    """Benchmark serialization and I/O boundaries for representative arrays."""
+
+    rng = np.random.default_rng(123)
+    payload = {
+        "open": (100 + rng.normal(size=(n_periods, n_assets))).astype(np.float64),
+        "close": (100 + rng.normal(size=(n_periods, n_assets))).astype(np.float64),
+        "signal": np.sign(rng.normal(size=(n_periods, n_assets))).astype(np.float64),
+    }
+
+    results: dict[str, dict[str, float] | int] = {}
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        npz_path = root / "bundle.npz"
+        start = perf_counter()
+        np.savez_compressed(npz_path, **payload)
+        npz_write = perf_counter() - start
+        start = perf_counter()
+        with np.load(npz_path) as loaded:
+            _ = {k: loaded[k] for k in loaded.files}
+        npz_read = perf_counter() - start
+        results["npz"] = {
+            "write_seconds": float(npz_write),
+            "read_seconds": float(npz_read),
+            "size_bytes": float(npz_path.stat().st_size),
+        }
+
+        json_path = root / "bundle.json"
+        start = perf_counter()
+        json_path.write_text(json.dumps({k: v.tolist() for k, v in payload.items()}))
+        json_write = perf_counter() - start
+        start = perf_counter()
+        _ = json.loads(json_path.read_text())
+        json_read = perf_counter() - start
+        results["json"] = {
+            "write_seconds": float(json_write),
+            "read_seconds": float(json_read),
+            "size_bytes": float(json_path.stat().st_size),
+        }
+
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            parquet_path = root / "bundle.parquet"
+            flat_data = {
+                name: values.reshape(-1)
+                for name, values in payload.items()
+            }
+            table = pa.table(flat_data)
+            start = perf_counter()
+            pq.write_table(table, parquet_path)
+            parquet_write = perf_counter() - start
+            start = perf_counter()
+            _ = pq.read_table(parquet_path)
+            parquet_read = perf_counter() - start
+            results["parquet"] = {
+                "write_seconds": float(parquet_write),
+                "read_seconds": float(parquet_read),
+                "size_bytes": float(parquet_path.stat().st_size),
+            }
+        except Exception:
+            results["parquet"] = {
+                "write_seconds": -1.0,
+                "read_seconds": -1.0,
+                "size_bytes": -1.0,
+            }
+
+    return {
+        "n_periods": int(n_periods),
+        "n_assets": int(n_assets),
+        "results": results,
+    }
 
 
 def check_profile_regression(
