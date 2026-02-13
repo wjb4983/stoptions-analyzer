@@ -563,6 +563,9 @@ class BacktestingPage(ttk.Frame):
             ("Min Stability", "0.55"),
             ("Max Turnover", "4.0"),
             ("Min Capacity", "0.5"),
+            ("Max Signal Drift", "0.10"),
+            ("Max Fill Drift (bps)", "5.0"),
+            ("Max PnL Div", "0.15"),
         ]):
             ttk.Label(gate_row, text=label).grid(row=0, column=idx * 2, sticky="w", padx=(0, 4))
             var = tk.StringVar(value=default)
@@ -574,8 +577,40 @@ class BacktestingPage(ttk.Frame):
                 self.gov_min_stability_var = var
             elif label == "Max Turnover":
                 self.gov_max_turnover_var = var
-            else:
+            elif label == "Min Capacity":
                 self.gov_min_capacity_var = var
+            elif label == "Max Signal Drift":
+                self.gov_max_signal_agreement_drift_var = var
+            elif label == "Max Fill Drift (bps)":
+                self.gov_max_fill_slippage_drift_bps_var = var
+            else:
+                self.gov_max_pnl_attribution_divergence_var = var
+
+        g_row += 1
+        ttk.Label(governance_frame, text="Expected signal/fill/pnl").grid(row=g_row, column=0, sticky="w", padx=8, pady=4)
+        expected_row = ttk.Frame(governance_frame)
+        expected_row.grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
+        self.gov_expected_signal_agreement_var = tk.StringVar(value="1.0")
+        self.gov_expected_fill_slippage_bps_var = tk.StringVar(value="0.0")
+        self.gov_expected_pnl_attribution_var = tk.StringVar(value="1.0")
+        ttk.Entry(expected_row, textvariable=self.gov_expected_signal_agreement_var, width=8).pack(side="left")
+        ttk.Label(expected_row, text=" / ").pack(side="left")
+        ttk.Entry(expected_row, textvariable=self.gov_expected_fill_slippage_bps_var, width=8).pack(side="left")
+        ttk.Label(expected_row, text=" / ").pack(side="left")
+        ttk.Entry(expected_row, textvariable=self.gov_expected_pnl_attribution_var, width=8).pack(side="left")
+
+        g_row += 1
+        ttk.Label(governance_frame, text="Observed signal/fill/pnl").grid(row=g_row, column=0, sticky="w", padx=8, pady=4)
+        observed_row = ttk.Frame(governance_frame)
+        observed_row.grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
+        self.gov_observed_signal_agreement_var = tk.StringVar(value="1.0")
+        self.gov_observed_fill_slippage_bps_var = tk.StringVar(value="0.0")
+        self.gov_observed_pnl_attribution_var = tk.StringVar(value="1.0")
+        ttk.Entry(observed_row, textvariable=self.gov_observed_signal_agreement_var, width=8).pack(side="left")
+        ttk.Label(observed_row, text=" / ").pack(side="left")
+        ttk.Entry(observed_row, textvariable=self.gov_observed_fill_slippage_bps_var, width=8).pack(side="left")
+        ttk.Label(observed_row, text=" / ").pack(side="left")
+        ttk.Entry(observed_row, textvariable=self.gov_observed_pnl_attribution_var, width=8).pack(side="left")
 
         notes_frame = ttk.LabelFrame(run_setup_tab, text="Run Notes")
         notes_frame.grid(row=5, column=0, sticky="nsew", padx=10, pady=10)
@@ -1225,6 +1260,8 @@ class BacktestingPage(ttk.Frame):
         snap_chk = str(manifest.get("data_snapshot_checksum", "")) if isinstance(manifest, dict) else ""
         man_chk = str(manifest.get("manifest_checksum", "")) if isinstance(manifest, dict) else ""
         governance = manifest.get("governance", {}) if isinstance(manifest, dict) and isinstance(manifest.get("governance"), dict) else {}
+        drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
+        drift_alerts = drift_monitoring.get("alert_summaries", []) if isinstance(drift_monitoring.get("alert_summaries"), list) else []
         msg = [
             f"Run: {run_dir.name}",
             f"Run ID: {run_id[:24] if run_id else 'n/a'}",
@@ -1233,6 +1270,8 @@ class BacktestingPage(ttk.Frame):
             f"CAGR: {metrics.get('cagr', 'n/a')}",
             f"Promotion: {governance.get('promotion_state', 'n/a')}",
             f"Approval: {governance.get('approval_status', 'n/a')}",
+            f"Drift monitor: {'OK' if drift_monitoring.get('within_tolerance', False) else 'BREACH'}",
+            f"Drift alerts: {len(drift_alerts)}",
             f"Config hash/checksum: {(cfg_hash[:12] if cfg_hash else 'n/a')} / {(cfg_chk[:12] if cfg_chk else 'n/a')}",
             f"Snapshot checksum: {snap_chk[:24] if snap_chk else 'n/a'}",
             f"Manifest checksum: {man_chk[:24] if man_chk else 'n/a'}",
@@ -1264,6 +1303,16 @@ class BacktestingPage(ttk.Frame):
         if not run_id:
             messagebox.showerror("Workflow", f"Could not resolve run ID for {run_name}.")
             return
+        if action == "promote":
+            run_dir = next((d for d in self.current_run_dirs if d.name == run_name), None)
+            if run_dir is not None:
+                manifest = self._read_json(run_dir / "manifest.json")
+                if isinstance(manifest, dict):
+                    governance = manifest.get("governance", {}) if isinstance(manifest.get("governance"), dict) else {}
+                    drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
+                    if not bool(drift_monitoring.get("within_tolerance", False)):
+                        messagebox.showerror("Workflow", "Promotion blocked: drift monitoring exceeds configured tolerances.")
+                        return
         success = apply_governance_decision(
             BACKTEST_OUTPUT_DIR,
             run_id=run_id,
@@ -1272,7 +1321,7 @@ class BacktestingPage(ttk.Frame):
             actor=self.gov_owner_var.get().strip() or "ui",
         )
         if not success:
-            messagebox.showerror("Workflow", f"Run ID {run_id} not found in experiment registry.")
+            messagebox.showerror("Workflow", f"Run ID {run_id} not found in experiment registry or promotion blocked by drift tolerances.")
             return
         self.workflow_reason_var.set("")
         self._refresh_experiment_browser()
@@ -1469,6 +1518,16 @@ class BacktestingPage(ttk.Frame):
             failed = [row for row in scenario_checks if isinstance(row, dict) and not bool(row.get("passed", False))]
             if failed:
                 badges.append({"label": "Stress Failures", "severity": "high", "reason": f"{len(failed)} scenario guardrail checks failed."})
+        manifest = self._read_json(run_dir / "manifest.json")
+        if isinstance(manifest, dict):
+            governance = manifest.get("governance", {}) if isinstance(manifest.get("governance"), dict) else {}
+            drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
+            if drift_monitoring:
+                if bool(drift_monitoring.get("within_tolerance", False)):
+                    badges.append({"label": "Drift Monitor OK", "severity": "low", "reason": "Signal/fill/PnL drift are within governance tolerances."})
+                for alert in drift_monitoring.get("alert_summaries", []):
+                    if isinstance(alert, dict):
+                        badges.append({"label": "Drift Alert", "severity": str(alert.get("severity", "high")), "reason": str(alert.get("summary", "Drift tolerance breached."))})
         palette = {"high": "#d9534f", "medium": "#f0ad4e", "low": "#5cb85c"}
         for badge in badges:
             artifact = str(badge.get("artifact", ""))
@@ -1975,6 +2034,15 @@ class BacktestingPage(ttk.Frame):
         self.gov_min_stability_var.set(str(settings.get("governance_min_stability_score", "0.55")))
         self.gov_max_turnover_var.set(str(settings.get("governance_max_turnover_total", "4.0")))
         self.gov_min_capacity_var.set(str(settings.get("governance_min_capacity_score", "0.5")))
+        self.gov_max_signal_agreement_drift_var.set(str(settings.get("governance_max_signal_agreement_drift", "0.10")))
+        self.gov_max_fill_slippage_drift_bps_var.set(str(settings.get("governance_max_fill_slippage_drift_bps", "5.0")))
+        self.gov_max_pnl_attribution_divergence_var.set(str(settings.get("governance_max_pnl_attribution_divergence", "0.15")))
+        self.gov_expected_signal_agreement_var.set(str(settings.get("governance_expected_signal_agreement", "1.0")))
+        self.gov_expected_fill_slippage_bps_var.set(str(settings.get("governance_expected_fill_slippage_bps", "0.0")))
+        self.gov_expected_pnl_attribution_var.set(str(settings.get("governance_expected_pnl_attribution", "1.0")))
+        self.gov_observed_signal_agreement_var.set(str(settings.get("governance_observed_signal_agreement", "1.0")))
+        self.gov_observed_fill_slippage_bps_var.set(str(settings.get("governance_observed_fill_slippage_bps", "0.0")))
+        self.gov_observed_pnl_attribution_var.set(str(settings.get("governance_observed_pnl_attribution", "1.0")))
         self.logs_text.delete("1.0", tk.END)
         self.logs_text.insert("1.0", str(settings.get("notes", "")))
         self._refresh_template_choices()
@@ -2085,6 +2153,15 @@ class BacktestingPage(ttk.Frame):
             "governance_min_stability_score": self.gov_min_stability_var.get().strip() or "0.55",
             "governance_max_turnover_total": self.gov_max_turnover_var.get().strip() or "4.0",
             "governance_min_capacity_score": self.gov_min_capacity_var.get().strip() or "0.5",
+            "governance_max_signal_agreement_drift": self.gov_max_signal_agreement_drift_var.get().strip() or "0.10",
+            "governance_max_fill_slippage_drift_bps": self.gov_max_fill_slippage_drift_bps_var.get().strip() or "5.0",
+            "governance_max_pnl_attribution_divergence": self.gov_max_pnl_attribution_divergence_var.get().strip() or "0.15",
+            "governance_expected_signal_agreement": self.gov_expected_signal_agreement_var.get().strip() or "1.0",
+            "governance_expected_fill_slippage_bps": self.gov_expected_fill_slippage_bps_var.get().strip() or "0.0",
+            "governance_expected_pnl_attribution": self.gov_expected_pnl_attribution_var.get().strip() or "1.0",
+            "governance_observed_signal_agreement": self.gov_observed_signal_agreement_var.get().strip() or "1.0",
+            "governance_observed_fill_slippage_bps": self.gov_observed_fill_slippage_bps_var.get().strip() or "0.0",
+            "governance_observed_pnl_attribution": self.gov_observed_pnl_attribution_var.get().strip() or "1.0",
             "ui_mode": self.ui_mode_var.get().strip() or "basic",
             "selected_preset": self._preset_display_to_key.get(self.preset_var.get().strip(), "custom"),
             "selected_template": self.template_var.get().strip(),
@@ -2194,6 +2271,19 @@ class BacktestingPage(ttk.Frame):
             "min_stability_score": float(parse_float(self.gov_min_stability_var.get()) or 0.55),
             "max_turnover_total": float(parse_float(self.gov_max_turnover_var.get()) or 4.0),
             "min_capacity_score": float(parse_float(self.gov_min_capacity_var.get()) or 0.5),
+            "max_signal_agreement_drift": float(parse_float(self.gov_max_signal_agreement_drift_var.get()) or 0.10),
+            "max_fill_slippage_drift_bps": float(parse_float(self.gov_max_fill_slippage_drift_bps_var.get()) or 5.0),
+            "max_pnl_attribution_divergence": float(parse_float(self.gov_max_pnl_attribution_divergence_var.get()) or 0.15),
+            "expected_outcomes": {
+                "signal_agreement": float(parse_float(self.gov_expected_signal_agreement_var.get()) or 1.0),
+                "fill_slippage_bps": float(parse_float(self.gov_expected_fill_slippage_bps_var.get()) or 0.0),
+                "pnl_attribution": float(parse_float(self.gov_expected_pnl_attribution_var.get()) or 1.0),
+            },
+            "observed_outcomes": {
+                "signal_agreement": float(parse_float(self.gov_observed_signal_agreement_var.get()) or 1.0),
+                "fill_slippage_bps": float(parse_float(self.gov_observed_fill_slippage_bps_var.get()) or 0.0),
+                "pnl_attribution": float(parse_float(self.gov_observed_pnl_attribution_var.get()) or 1.0),
+            },
         }
 
         worker_args: tuple[object, ...]

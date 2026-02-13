@@ -84,6 +84,9 @@ def apply_governance_decision(
 
     governance = target.get("governance", {}) if isinstance(target.get("governance"), dict) else {}
     if action_l == "promote":
+        drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
+        if not bool(drift_monitoring.get("within_tolerance", False)):
+            return False
         current = str(governance.get("promotion_state", "research")).strip() or "research"
         order = ["research", "paper", "shadow", "production"]
         if current in order and current != order[-1]:
