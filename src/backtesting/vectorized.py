@@ -14,6 +14,7 @@ from typing import Any, Literal, Protocol
 
 import numpy as np
 
+from analysis.options import aggregate_option_exposures, summarize_lifecycle_events
 from .event_driven import VectorizedExecutionAdapter, replay_lifecycle
 from .execution import (
     BpsSlippage,
@@ -73,6 +74,7 @@ class DerivativesLifecycleConfig:
     strike_by_asset: tuple[float | None, ...] = ()
     option_type_by_asset: tuple[str | None, ...] = ()
     multipliers_by_asset: tuple[float, ...] = ()
+    multiplier_adjustments_by_asset: tuple[float, ...] = ()
     settlement_style_by_asset: tuple[str, ...] = ()
     enable_auto_roll: bool = False
     roll_days_before_expiry: int = 0
@@ -158,6 +160,7 @@ def backtest_vectorized(
     roll_days_before_expiry: int = 0,
     greek_sensitivities: dict[str, Any] | None = None,
     greek_limit_config: GreekLimitConfig | None = None,
+    contract_multiplier_adjustments_by_asset: list[float] | tuple[float, ...] | None = None,
     margin_schedule_by_asset: Any | None = None,
     stress_addon_by_asset: Any | None = None,
     concentration_addon: float = 0.0,
@@ -296,6 +299,7 @@ def backtest_vectorized(
         strike_by_asset=tuple(contract_strike_by_asset or [None] * n_assets),
         option_type_by_asset=tuple(contract_option_type_by_asset or [None] * n_assets),
         multipliers_by_asset=tuple(contract_multipliers_by_asset or [1.0] * n_assets),
+        multiplier_adjustments_by_asset=tuple(contract_multiplier_adjustments_by_asset or [1.0] * n_assets),
         settlement_style_by_asset=tuple(contract_settlement_style_by_asset or ["physical"] * n_assets),
         enable_auto_roll=bool(enable_contract_roll),
         roll_days_before_expiry=max(0, int(roll_days_before_expiry)),
@@ -353,6 +357,7 @@ def backtest_vectorized(
         periods_per_year=periods_per_year,
     )
     metrics.update(_greek_metrics(greek_diagnostics))
+    metrics.update({f"lifecycle_{k}": float(v) for k, v in summarize_lifecycle_events(lifecycle["events"]).items()})
 
     cost_breakdown = {
         "slippage": _to_series(slippage_cost, index),
@@ -364,6 +369,7 @@ def backtest_vectorized(
         "lifecycle": _to_series(lifecycle["portfolio_return"], index),
         "total": _to_series(slippage_cost + fee_cost + borrow_cost - lifecycle["portfolio_return"], index),
         "derivatives_events": lifecycle["events"],
+        "lifecycle_event_counts": summarize_lifecycle_events(lifecycle["events"]),
         "greek_diagnostics": greek_diagnostics,
         "account_state": {
             "cash": _to_series(account_state["cash"], index),
@@ -1030,6 +1036,22 @@ def _apply_derivatives_lifecycle(
     events: list[dict[str, Any]] = []
 
     for asset_idx in range(adjusted.shape[1]):
+        multiplier = float(config.multipliers_by_asset[asset_idx]) if asset_idx < len(config.multipliers_by_asset) else 1.0
+        corp_adj = (
+            float(config.multiplier_adjustments_by_asset[asset_idx])
+            if asset_idx < len(config.multiplier_adjustments_by_asset)
+            else 1.0
+        )
+        effective_multiplier = multiplier * corp_adj
+        if abs(corp_adj - 1.0) > 1e-12:
+            events.append(
+                {
+                    "event": "corporate_action_adjustment",
+                    "bar_index": 0,
+                    "asset_index": int(asset_idx),
+                    "multiplier_adjustment": corp_adj,
+                }
+            )
         expiry_raw = config.expiry_by_asset[asset_idx] if asset_idx < len(config.expiry_by_asset) else None
         expiry_dt = _parse_date_like(expiry_raw)
         if expiry_dt is None:
@@ -1046,7 +1068,6 @@ def _apply_derivatives_lifecycle(
 
         strike = config.strike_by_asset[asset_idx] if asset_idx < len(config.strike_by_asset) else None
         option_type = (config.option_type_by_asset[asset_idx] or "").lower() if asset_idx < len(config.option_type_by_asset) else ""
-        multiplier = float(config.multipliers_by_asset[asset_idx]) if asset_idx < len(config.multipliers_by_asset) else 1.0
         settlement_style = (
             str(config.settlement_style_by_asset[asset_idx]).lower()
             if asset_idx < len(config.settlement_style_by_asset)
@@ -1061,7 +1082,7 @@ def _apply_derivatives_lifecycle(
             elif option_type == "put":
                 intrinsic = max(0.0, float(strike) - px)
             qty = float(adjusted[expiry_idx, asset_idx])
-            cash_component = qty * intrinsic * multiplier
+            cash_component = qty * intrinsic * effective_multiplier
             if settlement_style == "cash":
                 denom = max(1.0, px)
                 lifecycle_return[expiry_idx] += (cash_component / denom) * portfolio_weights[asset_idx]
@@ -1069,7 +1090,7 @@ def _apply_derivatives_lifecycle(
             else:
                 post_idx = min(expiry_idx + 1, adjusted.shape[0] - 1)
                 direction = 1.0 if option_type == "call" else -1.0
-                adjusted[post_idx:, asset_idx] += qty * direction * multiplier
+                adjusted[post_idx:, asset_idx] += qty * direction * effective_multiplier
                 event_type = "assignment_exercise"
             events.append(
                 {
@@ -1079,6 +1100,7 @@ def _apply_derivatives_lifecycle(
                     "strike": None if strike is None else float(strike),
                     "spot": px,
                     "quantity": qty,
+                    "contract_multiplier": effective_multiplier,
                 }
             )
 
@@ -1111,10 +1133,18 @@ def _build_greek_diagnostics(
             return np.zeros((rows, assets), dtype=float)
         return arr
 
-    delta = np.sum(positions * _arr("delta") * portfolio_weights, axis=1)
-    gamma = np.sum(positions * _arr("gamma") * portfolio_weights, axis=1)
-    vega = np.sum(positions * _arr("vega") * portfolio_weights, axis=1)
-    theta = np.sum(positions * _arr("theta") * portfolio_weights, axis=1)
+    exposures = aggregate_option_exposures(
+        positions=positions,
+        portfolio_weights=portfolio_weights,
+        delta=_arr("delta"),
+        gamma=_arr("gamma"),
+        vega=_arr("vega"),
+        theta=_arr("theta"),
+    )
+    delta = exposures.delta
+    gamma = exposures.gamma
+    vega = exposures.vega
+    theta = exposures.theta
 
     limits = limit_config or GreekLimitConfig()
 

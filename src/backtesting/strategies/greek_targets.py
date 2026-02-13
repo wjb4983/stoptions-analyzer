@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from analysis.options import aggregate_option_exposures
+
 
 @dataclass(frozen=True)
 class GreekNeutralTargetRequest:
@@ -39,3 +41,29 @@ def build_greek_neutral_targets(request: GreekNeutralTargetRequest) -> np.ndarra
     gross = np.sum(np.abs(targets), axis=1, keepdims=True)
     targets = np.divide(targets, gross, out=np.zeros_like(targets), where=gross > 0.0)
     return targets
+
+
+def compute_aggregate_greek_exposures(
+    *,
+    positions: np.ndarray,
+    portfolio_weights: np.ndarray,
+    sensitivities: dict[str, np.ndarray],
+    multipliers: np.ndarray | None = None,
+    contract_adjustments: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    snapshot = aggregate_option_exposures(
+        positions=positions,
+        portfolio_weights=portfolio_weights,
+        delta=sensitivities.get("delta"),
+        gamma=sensitivities.get("gamma"),
+        vega=sensitivities.get("vega"),
+        theta=sensitivities.get("theta"),
+        multipliers=multipliers,
+        contract_adjustments=contract_adjustments,
+    )
+    return {
+        "delta": snapshot.delta,
+        "gamma": snapshot.gamma,
+        "vega": snapshot.vega,
+        "theta": snapshot.theta,
+    }

@@ -277,6 +277,21 @@ class BacktestingPage(ttk.Frame):
         self.portfolio_max_net_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
+        ttk.Label(strategy_frame, text="Max Net Gamma").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_max_net_gamma_var = tk.StringVar(value="")
+        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_net_gamma_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Max Abs Vega Bucket").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_max_abs_vega_bucket_var = tk.StringVar(value="")
+        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_abs_vega_bucket_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Max Abs Delta / Underlying").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.portfolio_max_abs_delta_underlying_var = tk.StringVar(value="")
+        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_abs_delta_underlying_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
         self.use_walk_forward_var = tk.BooleanVar(value=False)
         self.use_optimizer_var = tk.BooleanVar(value=False)
         self.use_walk_forward_check = ttk.Checkbutton(
@@ -1725,6 +1740,9 @@ class BacktestingPage(ttk.Frame):
         self.portfolio_max_gross_var.set(str(settings.get("portfolio_max_gross_exposure", "1.0")))
         self.portfolio_min_net_var.set(str(settings.get("portfolio_min_net_exposure", "-1.0")))
         self.portfolio_max_net_var.set(str(settings.get("portfolio_max_net_exposure", "1.0")))
+        self.portfolio_max_net_gamma_var.set(str(settings.get("portfolio_max_net_gamma", "")))
+        self.portfolio_max_abs_vega_bucket_var.set(str(settings.get("portfolio_max_abs_vega_bucket", "")))
+        self.portfolio_max_abs_delta_underlying_var.set(str(settings.get("portfolio_max_abs_delta_per_underlying", "")))
         self.wf_train_fraction_var.set(float(settings.get("wf_train_fraction", "0.70")))
         self.wf_validation_fraction_var.set(float(settings.get("wf_validation_fraction", "0.15")))
         self.wf_test_fraction_var.set(float(settings.get("wf_test_fraction", "0.15")))
@@ -1847,6 +1865,9 @@ class BacktestingPage(ttk.Frame):
             "portfolio_max_gross_exposure": self.portfolio_max_gross_var.get().strip() or "1.0",
             "portfolio_min_net_exposure": self.portfolio_min_net_var.get().strip() or "-1.0",
             "portfolio_max_net_exposure": self.portfolio_max_net_var.get().strip() or "1.0",
+            "portfolio_max_net_gamma": self.portfolio_max_net_gamma_var.get().strip(),
+            "portfolio_max_abs_vega_bucket": self.portfolio_max_abs_vega_bucket_var.get().strip(),
+            "portfolio_max_abs_delta_per_underlying": self.portfolio_max_abs_delta_underlying_var.get().strip(),
             "selected_entry_signals": ",".join(selected_entries),
             "selected_exit_signals": ",".join(selected_exits),
             "start_date": self.start_date_var.get().strip(),
@@ -1912,6 +1933,9 @@ class BacktestingPage(ttk.Frame):
         parsed_max_gross = parse_float(self.portfolio_max_gross_var.get())
         parsed_min_net = parse_float(self.portfolio_min_net_var.get())
         parsed_max_net = parse_float(self.portfolio_max_net_var.get())
+        parsed_max_gamma = parse_float(self.portfolio_max_net_gamma_var.get())
+        parsed_max_vega_bucket = parse_float(self.portfolio_max_abs_vega_bucket_var.get())
+        parsed_max_delta_underlying = parse_float(self.portfolio_max_abs_delta_underlying_var.get())
 
         portfolio_cfg = {
             "portfolio_method": self.portfolio_method_var.get().strip() or "equal_weight",
@@ -1922,6 +1946,9 @@ class BacktestingPage(ttk.Frame):
             "portfolio_max_gross_exposure": float(parsed_max_gross) if parsed_max_gross is not None else 1.0,
             "portfolio_min_net_exposure": float(parsed_min_net) if parsed_min_net is not None else -1.0,
             "portfolio_max_net_exposure": float(parsed_max_net) if parsed_max_net is not None else 1.0,
+            "portfolio_max_net_gamma": float(parsed_max_gamma) if parsed_max_gamma is not None else None,
+            "portfolio_max_abs_vega_bucket": float(parsed_max_vega_bucket) if parsed_max_vega_bucket is not None else None,
+            "portfolio_max_abs_delta_per_underlying": float(parsed_max_delta_underlying) if parsed_max_delta_underlying is not None else None,
         }
         if portfolio_cfg["portfolio_method"] not in PORTFOLIO_METHODS:
             messagebox.showinfo("Invalid input", "Please select a valid portfolio method.")
