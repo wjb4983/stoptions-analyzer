@@ -6,6 +6,7 @@ import random
 import argparse
 import logging
 import hashlib
+import importlib.metadata
 import time
 import os
 import platform
@@ -78,6 +79,12 @@ from backtesting.optimization import (
 
 LOGGER = logging.getLogger(__name__)
 CANONICAL_METRIC_SCHEMA_VERSION = "1.0"
+RUN_MANIFEST_SCHEMA_VERSION = "2.0"
+METRIC_TABLE_SCHEMA_VERSIONS: dict[str, str] = {
+    "metrics": CANONICAL_METRIC_SCHEMA_VERSION,
+    "leaderboard": CANONICAL_METRIC_SCHEMA_VERSION,
+    "per_combo_summary": CANONICAL_METRIC_SCHEMA_VERSION,
+}
 PROMOTION_STATES = ("research", "paper", "shadow", "production")
 PROMOTION_REQUIRED_CHECKS: dict[str, list[str]] = {
     "research": ["dataset_lock"],
@@ -1181,25 +1188,23 @@ def run_walk_forward_backtest(
         "missing_required_checks": list(governance_payload["missing_required_checks"]),
     })
 
-    manifest = {
-        "run_type": "walk_forward",
-        "created_at": datetime.now().isoformat(),
-        "code_version": _resolve_git_commit(),
-        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
-        "parameters": {
-            "tickers": list(tickers),
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "entry_grid": entry_grid,
-            "exit_grid": exit_grid,
-            "core_grid": core_grid,
-            "score_metric": score_metric,
-            "nested_optimization": nested_optimization,
-            "cv_scheme": cv_scheme,
-            "cpcv_n_groups": int(cpcv_n_groups),
-            "cpcv_n_test_groups": int(cpcv_n_test_groups),
-        },
-        "data_snapshot_identifiers": _build_sweep_snapshot_identifiers(
+    manifest_parameters = {
+        "tickers": list(tickers),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "entry_grid": entry_grid,
+        "exit_grid": exit_grid,
+        "core_grid": core_grid,
+        "score_metric": score_metric,
+        "nested_optimization": nested_optimization,
+        "cv_scheme": cv_scheme,
+        "cpcv_n_groups": int(cpcv_n_groups),
+        "cpcv_n_test_groups": int(cpcv_n_test_groups),
+    }
+    manifest = _build_run_manifest(
+        run_type="walk_forward",
+        parameters=manifest_parameters,
+        data_snapshot=_build_sweep_snapshot_identifiers(
             {
                 "tickers": tickers,
                 "start_date": start_date.isoformat(),
@@ -1208,30 +1213,14 @@ def run_walk_forward_backtest(
                 "core_grid": core_grid,
             }
         ),
-        "random_seed": None,
-        "environment": _collect_environment_metadata(),
-        "governance": governance_payload,
-        "lineage": {
+        random_seed=None,
+        governance=governance_payload,
+        lineage={
             "lineage_parent_manifest": lineage_parent_manifest,
             "merged_leaderboard_sources": [str(run_dir / "fold_scores.csv"), str(run_dir / "fold_details.json")],
         },
-        "reproducibility_fingerprint": _stable_fingerprint(
-            {
-                "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
-                "parameters": {
-                    "tickers": list(tickers),
-                    "start_date": start_date.isoformat(),
-                    "end_date": end_date.isoformat(),
-                    "score_metric": score_metric,
-                    "cv_scheme": cv_scheme,
-                    "cpcv_n_groups": int(cpcv_n_groups),
-                    "cpcv_n_test_groups": int(cpcv_n_test_groups),
-                },
-                "governance": governance_payload,
-                "lineage_parent_manifest": lineage_parent_manifest,
-            }
-        ),
-    }
+        extra_fingerprint_payload={"lineage_parent_manifest": lineage_parent_manifest},
+    )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     _append_experiment_index(
         {
@@ -1385,12 +1374,9 @@ def run_strategy_optimization(
         encoding="utf-8",
     )
 
-    manifest = {
-        "run_type": "optimization",
-        "created_at": datetime.now().isoformat(),
-        "code_version": _resolve_git_commit(),
-        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
-        "parameters": {
+    manifest = _build_run_manifest(
+        run_type="optimization",
+        parameters={
             "tickers": tickers,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
@@ -1404,23 +1390,17 @@ def run_strategy_optimization(
             "constraints": [constraint.__dict__ for constraint in constraints],
             "partial_period_fractions": partial_period_fractions,
         },
-        "data_snapshot_identifiers": _build_sweep_snapshot_identifiers({
+        data_snapshot=_build_sweep_snapshot_identifiers({
             "tickers": tickers,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "cache_root": str(cache_root),
             "core_grid": core_grid,
         }),
-        "random_seed": int(seed),
-        "environment": _collect_environment_metadata(),
-        "governance": governance_payload,
-        "reproducibility_fingerprint": _stable_fingerprint({
-            "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
-            "seed": int(seed),
-            "governance": governance_payload,
-            "best_trials": result.get("pareto_trials", []),
-        }),
-    }
+        random_seed=int(seed),
+        governance=governance_payload,
+        extra_fingerprint_payload={"best_trials": result.get("pareto_trials", [])},
+    )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     _append_experiment_index({
         "timestamp": manifest["created_at"],
@@ -1676,42 +1656,25 @@ def _persist_sweep_outputs(
     ])
     (run_dir / "top_n_report.txt").write_text("\n".join(report_lines))
 
-    manifest = {
-        "run_type": "parameter_sweep",
-        "created_at": datetime.now().isoformat(),
-        "code_version": _resolve_git_commit(),
-        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
-        "parameters": parameters,
-        "data_snapshot_identifiers": _build_sweep_snapshot_identifiers(parameters),
-        "random_seed": int(random_seed),
-        "environment": _collect_environment_metadata(),
-        "governance": governance_payload,
-        "result_summary": {
+    metric_tables = _write_metric_table_manifest(run_dir=run_dir, run_type="parameter_sweep", table_names=["leaderboard", "per_combo_summary"])
+    manifest = _build_run_manifest(
+        run_type="parameter_sweep",
+        parameters=parameters,
+        data_snapshot=_build_sweep_snapshot_identifiers(parameters),
+        random_seed=int(random_seed),
+        governance=governance_payload,
+        lineage=lineage or {},
+        result_summary={
             "successful_combos": len(ranked_rows),
             "invalid_combos": len(invalid_rows),
             "failed_combos": len(errors),
             "best_sharpe": float(ranked_rows[0]["sharpe"]) if ranked_rows else 0.0,
         },
-        "lineage": lineage or {},
-        "reproducibility_fingerprint": _stable_fingerprint(
-            {
-                "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
-                "parameters": parameters,
-                "random_seed": int(random_seed),
-                "top_row": ranked_rows[0] if ranked_rows else {},
-                "governance": {
-                    "promotion_state": governance_payload.get("promotion_state"),
-                    "gate_checks": governance_payload.get("gate_checks", {}),
-                    "missing_required_checks": governance_payload.get("missing_required_checks", []),
-                    "is_promotion_ready": governance_payload.get("is_promotion_ready", False),
-                },
-                "lineage": {
-                    "job_id": (lineage or {}).get("job_id"),
-                    "lineage_parent_manifest": (lineage or {}).get("lineage_parent_manifest"),
-                },
-            }
-        ),
-    }
+        extra_fingerprint_payload={
+            "top_row": ranked_rows[0] if ranked_rows else {},
+        },
+        metric_tables=metric_tables,
+    )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
     _append_experiment_index(
@@ -1891,6 +1854,7 @@ def _extract_saved_output_dir(report_text: str) -> Path:
 
 
 def _load_metrics_from_run_dir(run_dir: Path) -> dict[str, float]:
+    _assert_metric_table_compatibility(run_dir)
     metrics_path = run_dir / "metrics.json"
     rows = json.loads(metrics_path.read_text())
     metrics: dict[str, float] = {}
@@ -2483,7 +2447,7 @@ def _persist_backtest_outputs(
         writer.writerows(metrics_rows)
     (run_dir / "metrics.json").write_text(json.dumps(metrics_rows, indent=2))
     (run_dir / "metric_schema_version.txt").write_text(f"{CANONICAL_METRIC_SCHEMA_VERSION}\n")
-
+    metric_tables = _write_metric_table_manifest(run_dir=run_dir, run_type="backtest", table_names=["metrics"])
 
     if robustness_report is not None:
         _write_robustness_report(run_dir=run_dir, robustness_report=robustness_report)
@@ -2502,26 +2466,14 @@ def _persist_backtest_outputs(
         }
         (run_dir / "dataset_quality_audit.json").write_text(json.dumps(audit_payload, indent=2))
 
-    manifest = {
-        "run_type": "backtest",
-        "created_at": datetime.now().isoformat(),
-        "code_version": _resolve_git_commit(),
-        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
-        "parameters": parameters or {},
-        "data_snapshot_identifiers": data_snapshot or {},
-        "random_seed": random_seed,
-        "environment": _collect_environment_metadata(),
-        "governance": governance_payload,
-        "reproducibility_fingerprint": _stable_fingerprint(
-            {
-                "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
-                "parameters": parameters or {},
-                "random_seed": random_seed,
-                "data_snapshot_identifiers": data_snapshot or {},
-                "governance": governance_payload,
-            }
-        ),
-    }
+    manifest = _build_run_manifest(
+        run_type="backtest",
+        parameters=parameters or {},
+        data_snapshot=data_snapshot or {},
+        random_seed=random_seed,
+        governance=governance_payload,
+        metric_tables=metric_tables,
+    )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     _append_experiment_index(
         {
@@ -2639,6 +2591,202 @@ def _stable_fingerprint(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
+
+
+
+def _dependency_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _collect_dependency_versions() -> dict[str, str]:
+    deps = ["numpy", "pandas", "scipy"]
+    return {name: _dependency_version(name) for name in deps}
+
+
+def _compute_config_hash(parameters: dict[str, Any]) -> str:
+    return _stable_fingerprint(parameters or {})
+
+
+def _build_metric_table_manifest(*, run_type: str, table_names: list[str]) -> dict[str, Any]:
+    tables: list[dict[str, Any]] = []
+    for name in table_names:
+        schema = METRIC_TABLE_SCHEMA_VERSIONS.get(name, CANONICAL_METRIC_SCHEMA_VERSION)
+        tables.append(
+            {
+                "table": name,
+                "schema_version": schema,
+                "compatibility": {
+                    "minimum_reader_schema": schema,
+                    "maximum_reader_schema": schema,
+                },
+            }
+        )
+    return {
+        "run_type": run_type,
+        "manifest_schema_version": RUN_MANIFEST_SCHEMA_VERSION,
+        "tables": tables,
+    }
+
+
+def _write_metric_table_manifest(*, run_dir: Path, run_type: str, table_names: list[str]) -> dict[str, Any]:
+    payload = _build_metric_table_manifest(run_type=run_type, table_names=table_names)
+    (run_dir / "metric_tables_manifest.json").write_text(json.dumps(payload, indent=2))
+    return payload
+
+
+def _assert_metric_table_compatibility(run_dir: Path) -> dict[str, Any]:
+    path = run_dir / "metric_tables_manifest.json"
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text())
+    tables = payload.get("tables", []) if isinstance(payload, dict) else []
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        schema = str(table.get("schema_version", ""))
+        compat = table.get("compatibility", {}) if isinstance(table.get("compatibility"), dict) else {}
+        min_schema = str(compat.get("minimum_reader_schema", schema))
+        max_schema = str(compat.get("maximum_reader_schema", schema))
+        if schema < min_schema or schema > max_schema:
+            raise ValueError(f"Incompatible metric schema for table {table.get('table')}: {schema} not in [{min_schema}, {max_schema}]")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _build_run_manifest(*, run_type: str, parameters: dict[str, Any], data_snapshot: dict[str, Any], random_seed: int | None, governance: dict[str, Any], lineage: dict[str, Any] | None = None, result_summary: dict[str, Any] | None = None, extra_fingerprint_payload: dict[str, Any] | None = None, metric_tables: dict[str, Any] | None = None) -> dict[str, Any]:
+    code_commit = _resolve_git_commit()
+    dependency_versions = _collect_dependency_versions()
+    config_hash = _compute_config_hash(parameters)
+    random_seeds = {
+        "run_seed": random_seed,
+        "python_random_seed": random_seed,
+        "numpy_random_seed": random_seed,
+    }
+    fingerprint_payload = {
+        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+        "manifest_schema_version": RUN_MANIFEST_SCHEMA_VERSION,
+        "code_commit_hash": code_commit,
+        "config_hash": config_hash,
+        "parameters": parameters,
+        "random_seeds": random_seeds,
+        "data_snapshot_ids": data_snapshot,
+        "governance": governance,
+    }
+    if extra_fingerprint_payload:
+        fingerprint_payload.update(extra_fingerprint_payload)
+
+    manifest = {
+        "run_type": run_type,
+        "manifest_schema_version": RUN_MANIFEST_SCHEMA_VERSION,
+        "created_at": datetime.now().isoformat(),
+        "code_commit_hash": code_commit,
+        "code_version": code_commit,
+        "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
+        "parameters": parameters,
+        "config_hash": config_hash,
+        "data_snapshot_ids": data_snapshot,
+        "data_snapshot_identifiers": data_snapshot,
+        "random_seed": random_seed,
+        "random_seeds": random_seeds,
+        "dependency_versions": dependency_versions,
+        "environment": _collect_environment_metadata(),
+        "governance": governance,
+        "metric_tables": metric_tables or {},
+        "reproducibility_fingerprint": _stable_fingerprint(fingerprint_payload),
+    }
+    if lineage is not None:
+        manifest["lineage"] = lineage
+    if result_summary is not None:
+        manifest["result_summary"] = result_summary
+    return manifest
+
+
+def _load_run_manifest(manifest_path: Path, *, strict: bool = True) -> dict[str, Any]:
+    manifest = json.loads(manifest_path.read_text())
+    if not isinstance(manifest, dict):
+        raise ValueError("Manifest must be a JSON object")
+    required = [
+        "manifest_schema_version",
+        "code_commit_hash",
+        "config_hash",
+        "data_snapshot_ids",
+        "random_seeds",
+        "dependency_versions",
+        "parameters",
+    ]
+    for key in required:
+        if key not in manifest:
+            raise ValueError(f"Manifest missing required field: {key}")
+    if strict:
+        if str(manifest.get("manifest_schema_version")) != RUN_MANIFEST_SCHEMA_VERSION:
+            raise ValueError("Manifest schema version is incompatible")
+        if str(manifest.get("code_commit_hash")) != _resolve_git_commit():
+            raise ValueError("Current git commit does not match manifest code commit hash")
+        config_hash = _compute_config_hash(dict(manifest.get("parameters", {})))
+        if config_hash != str(manifest.get("config_hash")):
+            raise ValueError("Manifest config hash does not match serialized parameters")
+        dep_versions = manifest.get("dependency_versions", {})
+        if isinstance(dep_versions, dict):
+            current = _collect_dependency_versions()
+            for dep, dep_version in dep_versions.items():
+                if str(dep_version) != str(current.get(dep, "unknown")):
+                    raise ValueError(f"Dependency version mismatch for {dep}: expected {dep_version}, got {current.get(dep)}")
+    return manifest
+
+
+def replay_manifest_run(*, manifest_path: Path, cache_root: Path | None = None, strict: bool = True) -> str:
+    manifest = _load_run_manifest(manifest_path, strict=strict)
+    run_type = str(manifest.get("run_type", ""))
+    if run_type != "backtest":
+        raise ValueError("Replay command currently supports backtest manifests only")
+    params = dict(manifest.get("parameters", {}))
+    tickers = [str(v) for v in params.get("tickers", [])]
+    if not tickers:
+        raise ValueError("Manifest parameters are missing tickers")
+    output = run_time_series_momentum_backtest(
+        tickers=tickers,
+        start_date=date.fromisoformat(str(params["start_date"])),
+        end_date=date.fromisoformat(str(params["end_date"])),
+        cache_root=Path(cache_root or params.get("cache_root") or BACKTEST_CACHE_DIR),
+        lookback_days=int(params.get("lookback_days", 90)),
+        skip_days=int(params.get("skip_days", 5)),
+        costs_bps=float(params.get("costs_bps", 5.0)),
+        execution_model=str(params.get("execution_model", "bps")),
+        execution_model_params=dict(params.get("execution_model_params", {})),
+        carry_model=str(params.get("carry_model", "short_borrow")),
+        carry_model_params=dict(params.get("carry_model_params", {})),
+        entry_signal=str(params.get("entry_signal", "ts_momentum")),
+        entry_signal_params=dict(params.get("entry_signal_params", {})),
+        exit_signal=str(params.get("exit_signal", "none")),
+        exit_signal_params=dict(params.get("exit_signal_params", {})),
+        signal_rebalance_interval=int(params.get("signal_rebalance_interval", 1)),
+        starting_capital=float(params.get("starting_capital", 100_000.0)),
+        bet_sizing_mode=str(params.get("bet_sizing_mode", "half_kelly")),
+        custom_bet_pct=float(params.get("custom_bet_pct", 10.0)),
+        strategy=str(params.get("strategy", "momentum")),
+        xsmom_top_quantile=float(params.get("xsmom_top_quantile", 0.2)),
+        xsmom_bottom_quantile=float(params.get("xsmom_bottom_quantile", 0.2)),
+        xsmom_long_only=bool(params.get("xsmom_long_only", False)),
+        xsmom_vol_lookback_days=int(params.get("xsmom_vol_lookback_days", 20)),
+        timeframe=str(params.get("timeframe", "1m")),
+        portfolio_method=str(params.get("portfolio_method", "equal_weight")),
+        portfolio_vol_lookback_bars=int(params.get("portfolio_vol_lookback_bars", 20)),
+        portfolio_target_volatility=float(params.get("portfolio_target_volatility", 0.10)),
+        portfolio_max_symbol_weight=float(params.get("portfolio_max_symbol_weight", 0.25)),
+        portfolio_max_sector_weight=float(params.get("portfolio_max_sector_weight", 0.60)),
+        portfolio_max_gross_exposure=float(params.get("portfolio_max_gross_exposure", 1.0)),
+        portfolio_min_net_exposure=float(params.get("portfolio_min_net_exposure", -1.0)),
+        portfolio_max_net_exposure=float(params.get("portfolio_max_net_exposure", 1.0)),
+    )
+    run_dir = _extract_saved_output_dir(output)
+    _assert_metric_table_compatibility(run_dir)
+    replay_manifest = json.loads((run_dir / "manifest.json").read_text())
+    expected_fingerprint = str(manifest.get("reproducibility_fingerprint", ""))
+    if strict and expected_fingerprint and str(replay_manifest.get("reproducibility_fingerprint", "")) != expected_fingerprint:
+        raise ValueError("Replay reproducibility fingerprint mismatch")
+    return output
 
 def _build_data_snapshot_identifiers(*, arrays: EngineArrayBundle, cache_root: Path, timeframe: str) -> dict[str, Any]:
     symbols = [symbol for symbol, _ in sorted(arrays.metadata.symbol_to_column.items(), key=lambda item: item[1])]
@@ -3181,6 +3329,11 @@ def _build_parser() -> argparse.ArgumentParser:
     opt_parser.add_argument("--min-trades", type=float, default=None)
     opt_parser.add_argument("--partial-period-fractions", default='[0.33,0.66,1.0]')
 
+    replay_parser = subparsers.add_parser("replay", help="Strictly replay a prior backtest from a manifest.")
+    replay_parser.add_argument("--manifest-path", required=True, help="Path to manifest.json to replay.")
+    replay_parser.add_argument("--cache-root", default=None, help="Optional cache root override for replay.")
+    replay_parser.add_argument("--non-strict", action="store_true", help="Disable strict compatibility checks.")
+
     parser.set_defaults(command="run")
     return parser
 
@@ -3190,10 +3343,14 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    tickers = [part.strip() for part in args.tickers.split(",") if part.strip()]
-    start_date = date.fromisoformat(args.start_date)
-    end_date = date.fromisoformat(args.end_date)
-    cache_root = Path(args.cache_root)
+    tickers: list[str] = []
+    start_date: date | None = None
+    end_date: date | None = None
+    cache_root = Path(args.cache_root) if getattr(args, "cache_root", None) else BACKTEST_CACHE_DIR
+    if args.command != "replay":
+        tickers = [part.strip() for part in args.tickers.split(",") if part.strip()]
+        start_date = date.fromisoformat(args.start_date)
+        end_date = date.fromisoformat(args.end_date)
 
     if args.command == "sweep":
         output = run_parameter_sweep(
@@ -3251,6 +3408,12 @@ def main() -> None:
             max_drawdown_floor=args.max_drawdown_floor,
             min_trades=args.min_trades,
             partial_period_fractions=[float(v) for v in _parse_json_array(args.partial_period_fractions)],
+        )
+    elif args.command == "replay":
+        output = replay_manifest_run(
+            manifest_path=Path(args.manifest_path),
+            cache_root=Path(args.cache_root) if args.cache_root else None,
+            strict=not bool(args.non_strict),
         )
     else:
         output = run_time_series_momentum_backtest(

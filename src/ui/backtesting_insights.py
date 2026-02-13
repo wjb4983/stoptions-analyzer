@@ -159,3 +159,57 @@ def read_stress_scenarios(run_dir: Path) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def load_manifest(manifest_path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def index_manifests(output_dir: Path) -> list[dict[str, Any]]:
+    indexed: list[dict[str, Any]] = []
+    for row in read_experiment_index(output_dir):
+        manifest_path_raw = row.get("manifest_path")
+        if not manifest_path_raw:
+            continue
+        manifest_path = Path(str(manifest_path_raw))
+        manifest = load_manifest(manifest_path)
+        indexed.append({"index": row, "manifest": manifest, "manifest_path": str(manifest_path)})
+    return indexed
+
+
+def search_manifests(indexed_rows: list[dict[str, Any]], *, query: str = "", run_type: str | None = None, tag: str | None = None) -> list[dict[str, Any]]:
+    query_l = query.strip().lower()
+    tag_l = (tag or "").strip().lower()
+    selected: list[dict[str, Any]] = []
+    for row in indexed_rows:
+        manifest = row.get("manifest", {}) if isinstance(row.get("manifest"), dict) else {}
+        if run_type and str(manifest.get("run_type", "")) != run_type:
+            continue
+        tags = [t.lower() for t in parse_tags(manifest)]
+        if tag_l and tag_l not in tags:
+            continue
+        haystack = json.dumps({"index": row.get("index", {}), "manifest": manifest}, sort_keys=True).lower()
+        if query_l and query_l not in haystack:
+            continue
+        selected.append(row)
+    return selected
+
+
+def compare_manifests(base: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
+    base_params = base.get("parameters", {}) if isinstance(base.get("parameters"), dict) else {}
+    other_params = other.get("parameters", {}) if isinstance(other.get("parameters"), dict) else {}
+    base_metrics = base.get("metric_tables", {}) if isinstance(base.get("metric_tables"), dict) else {}
+    other_metrics = other.get("metric_tables", {}) if isinstance(other.get("metric_tables"), dict) else {}
+    base_deps = base.get("dependency_versions", {}) if isinstance(base.get("dependency_versions"), dict) else {}
+    other_deps = other.get("dependency_versions", {}) if isinstance(other.get("dependency_versions"), dict) else {}
+    return {
+        "parameter_diffs": parameter_diffs(base_params, other_params),
+        "metric_table_diffs": parameter_diffs(base_metrics, other_metrics),
+        "dependency_diffs": parameter_diffs(base_deps, other_deps),
+        "config_hash_changed": str(base.get("config_hash", "")) != str(other.get("config_hash", "")),
+        "reproducibility_fingerprint_changed": str(base.get("reproducibility_fingerprint", "")) != str(other.get("reproducibility_fingerprint", "")),
+    }
