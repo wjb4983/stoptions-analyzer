@@ -77,6 +77,7 @@ from backtesting.validation import generate_combinatorial_purged_cv_splits, gene
 from backtesting.optimization import (
     Constraint,
     Objective,
+    BayesianSampler,
     RandomSampler,
     TPESampler,
     optimize,
@@ -1346,6 +1347,7 @@ def run_strategy_optimization(
     seed: int = 42,
     n_trials: int = 30,
     sampler_name: str = "tpe",
+    search_space: dict[str, Any] | None = None,
     objectives: list[dict[str, str]] | None = None,
     max_turnover: float | None = None,
     max_drawdown_floor: float | None = None,
@@ -1382,7 +1384,13 @@ def run_strategy_optimization(
     if min_trades is not None:
         constraints.append(Constraint(metric="trade_count", min_value=float(min_trades)))
 
-    sampler = TPESampler() if sampler_name.lower() == "tpe" else RandomSampler()
+    sampler_key = sampler_name.lower()
+    if sampler_key == "bayesian":
+        sampler = BayesianSampler()
+    elif sampler_key == "tpe":
+        sampler = TPESampler()
+    else:
+        sampler = RandomSampler()
 
     def _evaluate(params: dict[str, Any], period_fraction: float) -> dict[str, float]:
         combo = combos[int(params["combo_index"])]
@@ -1400,8 +1408,10 @@ def run_strategy_optimization(
         )
         return {key: float(value) for key, value in row.items() if isinstance(value, (int, float))}
 
+    effective_space = search_space or {"combo_index": {"type": "discrete", "values": list(range(len(combos)))}}
+
     result = optimize(
-        space={"combo_index": list(range(len(combos)))},
+        space=effective_space,
         evaluate=_evaluate,
         objectives=objective_specs,
         constraints=constraints,
@@ -1449,6 +1459,7 @@ def run_strategy_optimization(
                 "seed": seed,
                 "n_trials": n_trials,
                 "sampler": sampler_name,
+                "search_space": effective_space,
                 "objectives": objective_defs,
                 "constraints": [constraint.__dict__ for constraint in constraints],
                 "partial_period_fractions": partial_period_fractions,
@@ -1472,6 +1483,7 @@ def run_strategy_optimization(
             "seed": seed,
             "n_trials": n_trials,
             "sampler": sampler_name,
+            "search_space": effective_space,
             "objectives": objective_defs,
             "constraints": [constraint.__dict__ for constraint in constraints],
             "partial_period_fractions": partial_period_fractions,
@@ -1506,7 +1518,8 @@ def run_strategy_optimization(
 
     return (
         f"Optimization complete: {result['trial_count']} trials, {result['feasible_count']} feasible, "
-        f"{result['pareto_count']} Pareto-optimal. Saved outputs to: {run_dir}"
+        f"{result['pareto_count']} Pareto-optimal. "
+        f"Top robust sets: {len(result.get('best_robust_params', []))}. Saved outputs to: {run_dir}"
     )
 
 
@@ -3647,7 +3660,8 @@ def _build_parser() -> argparse.ArgumentParser:
     opt_parser.add_argument("--core-grid", required=True, help="JSON mapping core param->list[values].")
     opt_parser.add_argument("--seed", type=int, default=42)
     opt_parser.add_argument("--n-trials", type=int, default=30)
-    opt_parser.add_argument("--sampler", choices=["tpe", "random"], default="tpe")
+    opt_parser.add_argument("--sampler", choices=["tpe", "random", "bayesian"], default="tpe")
+    opt_parser.add_argument("--search-space", default=None, help="Optional JSON search space with discrete/continuous dimensions.")
     opt_parser.add_argument("--objectives", default='[{"name":"sharpe","sense":"maximize"},{"name":"turnover_total","sense":"minimize"},{"name":"max_drawdown","sense":"maximize"}]')
     opt_parser.add_argument("--max-turnover", type=float, default=None)
     opt_parser.add_argument("--max-drawdown-floor", type=float, default=None)
@@ -3745,6 +3759,7 @@ def main() -> None:
             seed=int(args.seed),
             n_trials=int(args.n_trials),
             sampler_name=str(args.sampler),
+            search_space=None if args.search_space is None else _parse_json_object(args.search_space),
             objectives=list(_parse_json_array(args.objectives)),
             max_turnover=args.max_turnover,
             max_drawdown_floor=args.max_drawdown_floor,

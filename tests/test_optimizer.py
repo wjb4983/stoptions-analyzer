@@ -4,7 +4,7 @@ import json
 from datetime import date
 
 from src.backtesting import cache_runner
-from src.backtesting.optimization import Constraint, Objective, TPESampler, pareto_frontier, optimize
+from src.backtesting.optimization import BayesianSampler, Constraint, Objective, TPESampler, pareto_frontier, optimize
 
 
 def test_pareto_frontier_filters_dominated_rows() -> None:
@@ -92,3 +92,78 @@ def test_run_strategy_optimization_persists_artifacts(monkeypatch, tmp_path) -> 
     assert (run_dir / "trials.jsonl").exists()
     assert (run_dir / "pareto_frontier.json").exists()
     assert "Optimization complete" in output
+
+
+
+def test_optimize_supports_bayesian_trace_and_mixed_space(tmp_path) -> None:
+    def evaluate(params: dict[str, object], fraction: float) -> dict[str, float]:
+        x = float(params["x"])
+        y = int(params["y"])
+        score = 2.0 - abs(x - 0.7) - abs(y - 2) * 0.2
+        return {
+            "sharpe": float(score) * float(fraction),
+            "turnover_total": float(3.0 - y * 0.2),
+            "max_drawdown": -0.1,
+            "trade_count": float(5 + y),
+        }
+
+    out = optimize(
+        space={
+            "x": {"type": "continuous", "low": 0.1, "high": 1.0, "step": 0.1},
+            "y": {"type": "discrete", "values": [1, 2, 3]},
+        },
+        evaluate=evaluate,
+        objectives=[Objective("sharpe", "maximize"), Objective("turnover_total", "minimize")],
+        constraints=[Constraint(metric="trade_count", min_value=1.0)],
+        sampler=BayesianSampler(random_fraction=0.0, candidate_pool_size=32),
+        n_trials=10,
+        seed=11,
+        partial_period_fractions=[0.5, 1.0],
+        output_dir=tmp_path / "bayes",
+    )
+
+    assert (tmp_path / "bayes" / "optimization_trace.json").exists()
+    assert (tmp_path / "bayes" / "best_robust_params.json").exists()
+    assert out["best_robust_params"]
+    trace = json.loads((tmp_path / "bayes" / "optimization_trace.json").read_text())
+    assert all("candidate" in row and "score" in row for row in trace)
+
+
+def test_run_strategy_optimization_supports_bayesian_sampler(monkeypatch, tmp_path) -> None:
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+
+    def fake_combo(payload: dict[str, object]) -> dict[str, object]:
+        idx = int(payload["combo_index"])
+        frac = float(payload.get("partial_period_fraction", 1.0))
+        return {
+            "sharpe": float(2.0 - abs(idx - 1)) * frac,
+            "turnover_total": float(idx + 1),
+            "max_drawdown": -0.1,
+            "trade_count": 5.0,
+        }
+
+    monkeypatch.setattr(cache_runner, "_execute_sweep_combo", fake_combo)
+
+    output = cache_runner.run_strategy_optimization(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 5),
+        cache_root=tmp_path / "cache",
+        entry_grid={"ts_momentum": [{}]},
+        exit_grid={"none": [{}]},
+        core_grid={"lookback_days": [20], "skip_days": [5], "costs_bps": [1.0, 2.0, 3.0]},
+        seed=7,
+        n_trials=8,
+        sampler_name="bayesian",
+        search_space={"combo_index": {"type": "discrete", "values": [0, 1, 2]}},
+        max_turnover=3.0,
+        min_trades=1.0,
+        partial_period_fractions=[0.5, 1.0],
+    )
+
+    run_dirs = sorted((tmp_path / "outputs").glob("tsmom_optimize_*"))
+    run_dir = run_dirs[0]
+    manifest = json.loads((run_dir / "optimizer_manifest.json").read_text())
+    assert manifest["sampler"] == "bayesian"
+    assert "search_space" in manifest
+    assert "Top robust sets" in output
