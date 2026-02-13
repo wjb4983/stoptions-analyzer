@@ -6,11 +6,13 @@ from .deployment import (
     REASON_PROMOTION_GATES_PASSED,
     REASON_RISK_BREACH,
     REASON_ROLLBACK_TO_PRIOR_CHAMPION,
+    REASON_ROBUSTNESS_FAILURE,
     REASON_SHADOW_UNDERPERFORMANCE,
     REASON_STABILITY_FAILURE,
     SlotEvent,
 )
 from .registry import MODEL_REGISTRY, ModelActivation, ModelActivationConfig, activated_models, create_model
+from .robustness import RobustnessThresholds, build_robustness_scorecards
 
 __all__ = [
     "BaseParadigmModel",
@@ -29,6 +31,9 @@ __all__ = [
     "REASON_PROMOTION_GATES_PASSED",
     "REASON_RISK_BREACH",
     "REASON_ROLLBACK_TO_PRIOR_CHAMPION",
+    "REASON_ROBUSTNESS_FAILURE",
     "REASON_SHADOW_UNDERPERFORMANCE",
     "REASON_STABILITY_FAILURE",
+    "RobustnessThresholds",
+    "build_robustness_scorecards",
 ]
