@@ -663,23 +663,47 @@ def _coerce_liquidity_array(values: Any | None, shape: tuple[int, int], default:
 
 
 def _rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
-    out = np.zeros_like(values, dtype=float)
-    for col in range(values.shape[1]):
-        for idx in range(values.shape[0]):
-            start = max(0, idx - window + 1)
-            out[idx, col] = float(np.mean(values[start:idx + 1, col]))
+    arr = np.asarray(values, dtype=float)
+    out = np.zeros_like(arr, dtype=float)
+    if arr.size == 0:
+        return out
+
+    win = max(1, int(window))
+    csum = np.cumsum(arr, axis=0, dtype=float)
+    counts = np.minimum(np.arange(1, arr.shape[0] + 1, dtype=int), win).astype(float).reshape(-1, 1)
+
+    out[:] = csum
+    if win < arr.shape[0]:
+        out[win:] = csum[win:] - csum[:-win]
+    out /= counts
     return out
 
 
 def _rolling_volatility(prices: np.ndarray, window: int) -> np.ndarray:
-    rets = np.zeros_like(prices, dtype=float)
-    rets[1:] = prices[1:] / np.where(prices[:-1] == 0.0, 1.0, prices[:-1]) - 1.0
-    out = np.zeros_like(prices, dtype=float)
-    for col in range(prices.shape[1]):
-        for idx in range(prices.shape[0]):
-            start = max(0, idx - window + 1)
-            segment = rets[start:idx + 1, col]
-            out[idx, col] = float(np.std(segment, ddof=1)) if segment.size > 1 else 0.0
+    px = np.asarray(prices, dtype=float)
+    rets = np.zeros_like(px, dtype=float)
+    rets[1:] = px[1:] / np.where(px[:-1] == 0.0, 1.0, px[:-1]) - 1.0
+
+    out = np.zeros_like(px, dtype=float)
+    if px.size == 0:
+        return out
+
+    win = max(1, int(window))
+    csum = np.cumsum(rets, axis=0, dtype=float)
+    csum_sq = np.cumsum(rets * rets, axis=0, dtype=float)
+    counts = np.minimum(np.arange(1, px.shape[0] + 1, dtype=int), win)
+
+    sum_x = csum.copy()
+    sum_x_sq = csum_sq.copy()
+    if win < px.shape[0]:
+        sum_x[win:] = csum[win:] - csum[:-win]
+        sum_x_sq[win:] = csum_sq[win:] - csum_sq[:-win]
+
+    valid = (counts > 1).reshape(-1, 1)
+    counts_f = counts.astype(float).reshape(-1, 1)
+    numer = np.where(valid, sum_x_sq - (sum_x * sum_x / counts_f), 0.0)
+    denom = np.maximum(counts_f - 1.0, 1.0)
+    out = np.where(valid, np.sqrt(np.maximum(numer / denom, 0.0)), 0.0)
     return out
 
 
