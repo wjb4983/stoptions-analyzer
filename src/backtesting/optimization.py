@@ -385,6 +385,18 @@ def optimize(
         )[:5]
     ]
     (output_dir / "best_robust_params.json").write_text(json.dumps(robust_best, indent=2, sort_keys=True), encoding="utf-8")
+    (output_dir / "artifact_metadata.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "run_type": "optimization_trials",
+                "random_seeds": {"run_seed": int(seed), "numpy_random_seed": int(seed)},
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
     return {
         "trial_count": len(trials),

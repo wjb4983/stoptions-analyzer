@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -38,6 +39,7 @@ class EngineArrayMetadata:
     delisted_symbols: list[str]
     survivorship_bias_flags_by_symbol: dict[str, bool]
     leakage_flags_by_symbol: dict[str, bool]
+    data_fingerprint: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -307,6 +309,57 @@ def load_canonical_price_arrays(
             symbol: bool(symbol_series[symbol].forward_known_fields)
             for symbol in accepted_symbols
         },
+        data_fingerprint={},
+    )
+
+    normalized_bars_hash = _hash_normalized_bars(
+        date_index=aligned_index,
+        open_prices=open_prices,
+        close_prices=close_prices,
+        missing_mask=missing_mask,
+        symbols=accepted_symbols,
+    )
+    provider_name = provider.__class__.__name__ if provider is not None else "local_npz_cache"
+    actual_start = _timestamp_to_iso8601(aligned_index[0]) if aligned_index.size else None
+    actual_end = _timestamp_to_iso8601(aligned_index[-1]) if aligned_index.size else None
+    row_counts = {
+        "total_rows": int(aligned_index.size),
+        "symbol_count": int(len(accepted_symbols)),
+        "rows_per_symbol": {symbol: int((~missing_mask[:, idx]).sum()) for idx, symbol in enumerate(accepted_symbols)},
+    }
+    data_fingerprint = {
+        "schema_version": "1.0",
+        "provider": provider_name,
+        "requested_start": start_dt.isoformat(),
+        "requested_end": end_dt.isoformat(),
+        "actual_start": actual_start,
+        "actual_end": actual_end,
+        "row_counts": row_counts,
+        "normalized_bars_hash": normalized_bars_hash,
+    }
+    metadata = EngineArrayMetadata(
+        symbol_to_column=metadata.symbol_to_column,
+        date_index=metadata.date_index,
+        missingness_ratio=metadata.missingness_ratio,
+        missingness_by_symbol=metadata.missingness_by_symbol,
+        coverage_by_symbol=metadata.coverage_by_symbol,
+        tradable_ratio_by_symbol=metadata.tradable_ratio_by_symbol,
+        excluded_symbols=metadata.excluded_symbols,
+        audit_summary_by_symbol=metadata.audit_summary_by_symbol,
+        asset_class_by_symbol=metadata.asset_class_by_symbol,
+        expiry_by_symbol=metadata.expiry_by_symbol,
+        strike_by_symbol=metadata.strike_by_symbol,
+        option_type_by_symbol=metadata.option_type_by_symbol,
+        multiplier_by_symbol=metadata.multiplier_by_symbol,
+        settlement_style_by_symbol=metadata.settlement_style_by_symbol,
+        borrow_availability_tier_by_symbol=metadata.borrow_availability_tier_by_symbol,
+        financing_benchmark_by_symbol=metadata.financing_benchmark_by_symbol,
+        pit_membership_violations_by_symbol=metadata.pit_membership_violations_by_symbol,
+        adjustment_violations_by_symbol=metadata.adjustment_violations_by_symbol,
+        delisted_symbols=metadata.delisted_symbols,
+        survivorship_bias_flags_by_symbol=metadata.survivorship_bias_flags_by_symbol,
+        leakage_flags_by_symbol=metadata.leakage_flags_by_symbol,
+        data_fingerprint=data_fingerprint,
     )
 
     return EngineArrayBundle(
@@ -320,6 +373,28 @@ def load_canonical_price_arrays(
         missing_mask=missing_mask,
         metadata=metadata,
     )
+
+
+def _hash_normalized_bars(
+    *,
+    date_index: np.ndarray,
+    open_prices: np.ndarray,
+    close_prices: np.ndarray,
+    missing_mask: np.ndarray,
+    symbols: Sequence[str],
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(np.asarray(date_index, dtype=np.int64).tobytes())
+    digest.update(np.asarray(open_prices, dtype=np.float64).tobytes())
+    digest.update(np.asarray(close_prices, dtype=np.float64).tobytes())
+    digest.update(np.asarray(missing_mask, dtype=bool).tobytes())
+    digest.update("|".join(symbols).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _timestamp_to_iso8601(timestamp_ms: int) -> str:
+    dt = datetime.fromtimestamp(float(timestamp_ms) / 1000.0, tz=timezone.utc)
+    return dt.isoformat()
 
 
 def _load_symbol_npz_range(

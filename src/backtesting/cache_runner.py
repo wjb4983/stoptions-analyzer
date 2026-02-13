@@ -241,8 +241,11 @@ def run_time_series_momentum_backtest(
     regime_cost_multipliers: dict[str, float] | None = None,
     governance_metadata: dict[str, Any] | None = None,
     stress_controls: dict[str, Any] | None = None,
+    random_seed: int = 42,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    random.seed(int(random_seed))
+    np.random.seed(int(random_seed))
     entry_cfg = parse_entry_signal_config(
         entry_signal,
         entry_signal_params,
@@ -571,6 +574,7 @@ def run_time_series_momentum_backtest(
         if key in account_state:
             merged_risk_diagnostics[key] = _to_numpy_1d(account_state[key])
 
+    data_snapshot = _build_data_snapshot_identifiers(arrays=arrays, cache_root=cache_root, timeframe=timeframe)
     run_dir = _persist_backtest_outputs(
         timestamps=timestamps,
         symbol_order=symbol_order,
@@ -581,8 +585,8 @@ def run_time_series_momentum_backtest(
         metrics=metrics,
         dataset_contracts=dataset_contracts,
         parameters=parameter_payload,
-        data_snapshot=_build_data_snapshot_identifiers(arrays=arrays, cache_root=cache_root, timeframe=timeframe),
-        random_seed=None,
+        data_snapshot=data_snapshot,
+        random_seed=int(random_seed),
         robustness_report=robustness_report,
         scenario_payload=scenario_payload,
         regime_labels=regime_labels,
@@ -940,6 +944,7 @@ def run_parameter_sweep(
             "fail_fast": fail_fast,
             "continue_on_error": continue_on_error,
             "top_n": top_n,
+            "data_fingerprint": {},
         },
         random_seed=seed,
         governance=None,
@@ -992,6 +997,8 @@ def run_walk_forward_backtest(
     lineage_parent_manifest: str | None = None,
     stress_controls: dict[str, Any] | None = None,
 ) -> str:
+    random.seed(int(cv_seed))
+    np.random.seed(int(cv_seed))
     combos, invalid_rows = generate_sweep_combinations(
         entry_grid=entry_grid,
         exit_grid=exit_grid,
@@ -1198,6 +1205,7 @@ def run_walk_forward_backtest(
     (run_dir / "audit_inputs.json").write_text(
         json.dumps(
             {
+                "schema_version": "1.0",
                 "tickers": tickers,
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
@@ -1209,6 +1217,7 @@ def run_walk_forward_backtest(
                 "cpcv_n_groups": int(cpcv_n_groups),
                 "cpcv_n_test_groups": int(cpcv_n_test_groups),
                 "cv_seed": int(cv_seed),
+                "random_seeds": {"run_seed": int(cv_seed), "python_random_seed": int(cv_seed), "numpy_random_seed": int(cv_seed)},
                 "windowing": {
                     "train_bars": train_bars,
                     "validation_bars": validation_bars,
@@ -1261,6 +1270,12 @@ def run_walk_forward_backtest(
         skipped_invalid_count=len(invalid_rows),
     )
     (run_dir / "report.txt").write_text(report_text)
+    (run_dir / "artifact_metadata.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "run_type": "walk_forward",
+        "random_seeds": {"run_seed": int(cv_seed), "python_random_seed": int(cv_seed), "numpy_random_seed": int(cv_seed)},
+        "data_fingerprint": {},
+    }, indent=2))
 
     computed_checks = _evaluate_governance_gate_checks(
         metrics={k: float(v) for k, v in wf_result.aggregate_metrics.items()},
@@ -1304,9 +1319,10 @@ def run_walk_forward_backtest(
                 "end_date": end_date.isoformat(),
                 "cache_root": str(cache_root),
                 "core_grid": core_grid,
+                "data_fingerprint": {},
             }
         ),
-        random_seed=None,
+        random_seed=int(cv_seed),
         governance=governance_payload,
         lineage={
             "lineage_parent_manifest": lineage_parent_manifest,
@@ -1322,7 +1338,7 @@ def run_walk_forward_backtest(
             "run_dir": str(run_dir),
             "code_version": manifest["code_version"],
             "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
-            "random_seed": None,
+            "random_seed": int(cv_seed),
             "primary_metric": score_metric,
             "primary_metric_value": float(wf_result.aggregate_metrics.get(score_metric, 0.0)),
             "manifest_path": str(run_dir / "manifest.json"),
@@ -1369,6 +1385,8 @@ def run_strategy_optimization(
     governance_metadata: dict[str, Any] | None = None,
     stress_controls: dict[str, Any] | None = None,
 ) -> str:
+    random.seed(int(seed))
+    np.random.seed(int(seed))
     combos, invalid_rows = generate_sweep_combinations(
         entry_grid=entry_grid,
         exit_grid=exit_grid,
@@ -1472,6 +1490,7 @@ def run_strategy_optimization(
                 "exit_grid": exit_grid,
                 "core_grid": core_grid,
                 "seed": seed,
+                "random_seeds": {"run_seed": int(seed), "python_random_seed": int(seed), "numpy_random_seed": int(seed)},
                 "n_trials": n_trials,
                 "sampler": sampler_name,
                 "search_space": effective_space,
@@ -1510,12 +1529,19 @@ def run_strategy_optimization(
             "end_date": end_date.isoformat(),
             "cache_root": str(cache_root),
             "core_grid": core_grid,
+            "data_fingerprint": {},
         }),
         random_seed=int(seed),
         governance=governance_payload,
         extra_fingerprint_payload={"best_trials": result.get("pareto_trials", [])},
     )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    (run_dir / "artifact_metadata.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "run_type": "optimization",
+        "random_seeds": {"run_seed": int(seed), "python_random_seed": int(seed), "numpy_random_seed": int(seed)},
+        "data_fingerprint": {},
+    }, indent=2))
     _append_experiment_index({
         "timestamp": manifest["created_at"],
         "run_type": "optimization",
@@ -1792,7 +1818,7 @@ def _persist_sweep_outputs(
     (run_dir / "per_combo_summary.json").write_text(json.dumps(ranked_rows, indent=2))
     (run_dir / "skipped_invalid_combos.json").write_text(json.dumps(invalid_rows, indent=2))
     (run_dir / "errors.json").write_text(json.dumps(errors, indent=2))
-    (run_dir / "audit_inputs.json").write_text(json.dumps({"parameters": parameters, "random_seed": int(random_seed)}, indent=2))
+    (run_dir / "audit_inputs.json").write_text(json.dumps({"parameters": parameters, "random_seed": int(random_seed), "random_seeds": {"python_random_seed": int(random_seed), "numpy_random_seed": int(random_seed), "run_seed": int(random_seed)}}, indent=2))
     (run_dir / "audit_outputs.json").write_text(
         json.dumps(
             {
@@ -1833,6 +1859,12 @@ def _persist_sweep_outputs(
     (run_dir / "top_n_report.txt").write_text("\n".join(report_lines))
 
     metric_tables = _write_metric_table_manifest(run_dir=run_dir, run_type="parameter_sweep", table_names=["leaderboard", "per_combo_summary"])
+    (run_dir / "artifact_metadata.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "run_type": "parameter_sweep",
+        "random_seeds": {"run_seed": int(random_seed), "python_random_seed": int(random_seed), "numpy_random_seed": int(random_seed)},
+        "data_fingerprint": dict(parameters.get("data_fingerprint", {})) if isinstance(parameters, dict) else {},
+    }, indent=2))
     manifest = _build_run_manifest(
         run_type="parameter_sweep",
         parameters=parameters,
@@ -2201,6 +2233,7 @@ def _resample_engine_bundle_from_1m(arrays: EngineArrayBundle, *, timeframe: str
         delisted_symbols=list(arrays.metadata.delisted_symbols),
         survivorship_bias_flags_by_symbol=dict(arrays.metadata.survivorship_bias_flags_by_symbol),
         leakage_flags_by_symbol=dict(arrays.metadata.leakage_flags_by_symbol),
+        data_fingerprint={**dict(getattr(arrays.metadata, "data_fingerprint", {}) or {}), "resampled_timeframe": timeframe},
     )
     return EngineArrayBundle(
         date_index=date_index,
@@ -2880,6 +2913,12 @@ def _persist_backtest_outputs(
         metric_tables=metric_tables,
     )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    (run_dir / "artifact_metadata.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "run_type": "backtest",
+        "random_seeds": {"run_seed": random_seed, "python_random_seed": random_seed, "numpy_random_seed": random_seed},
+        "data_fingerprint": dict((data_snapshot or {}).get("data_fingerprint", {})) if isinstance(data_snapshot, dict) else {},
+    }, indent=2))
     _append_experiment_index(
         {
             "timestamp": manifest["created_at"],
@@ -3252,6 +3291,7 @@ def _build_data_snapshot_identifiers(*, arrays: EngineArrayBundle, cache_root: P
         "range_end": range_end,
         "coverage_by_symbol": arrays.metadata.coverage_by_symbol,
         "missingness_by_symbol": arrays.metadata.missingness_by_symbol,
+        "data_fingerprint": dict(getattr(arrays.metadata, "data_fingerprint", {}) or {}),
     }
     payload["dataset_fingerprint"] = _stable_fingerprint(payload)
     return payload
@@ -3264,6 +3304,7 @@ def _build_sweep_snapshot_identifiers(parameters: dict[str, Any]) -> dict[str, A
         "end_date": parameters.get("end_date"),
         "cache_root": parameters.get("cache_root"),
         "core_grid": parameters.get("core_grid", {}),
+        "data_fingerprint": dict(parameters.get("data_fingerprint", {})) if isinstance(parameters.get("data_fingerprint"), dict) else {},
     }
     payload["dataset_fingerprint"] = _stable_fingerprint(payload)
     return payload

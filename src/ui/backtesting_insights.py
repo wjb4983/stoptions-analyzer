@@ -8,6 +8,52 @@ from typing import Any
 
 from backtesting.experiment_registry import append_governance_event, read_registry
 
+SUPPORTED_MANIFEST_SCHEMA_RANGE = ("1.0", "2.0")
+SUPPORTED_METRIC_SCHEMA_RANGE = ("1.0", "1.0")
+
+
+def _parse_version(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for token in str(version).split('.'):
+        try:
+            parts.append(int(token))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _version_in_range(version: str, minimum: str, maximum: str) -> bool:
+    parsed = _parse_version(version)
+    return _parse_version(minimum) <= parsed <= _parse_version(maximum)
+
+
+def _read_metric_manifest(run_dir: Path) -> dict[str, Any]:
+    path = run_dir / "metric_tables_manifest.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _validate_metric_manifest(payload: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    tables = payload.get("tables", []) if isinstance(payload, dict) else []
+    for table in tables if isinstance(tables, list) else []:
+        if not isinstance(table, dict):
+            continue
+        schema = str(table.get("schema_version", ""))
+        compat = table.get("compatibility", {}) if isinstance(table.get("compatibility"), dict) else {}
+        min_schema = str(compat.get("minimum_reader_schema", SUPPORTED_METRIC_SCHEMA_RANGE[0]))
+        max_schema = str(compat.get("maximum_reader_schema", SUPPORTED_METRIC_SCHEMA_RANGE[1]))
+        if not _version_in_range(SUPPORTED_METRIC_SCHEMA_RANGE[0], min_schema, max_schema):
+            warnings.append(f"reader schema unsupported for table {table.get('table')}: requires [{min_schema}, {max_schema}]")
+        if schema and not _version_in_range(schema, min_schema, max_schema):
+            warnings.append(f"table schema out of compatibility range for {table.get('table')}: {schema} not in [{min_schema}, {max_schema}]")
+    return warnings
+
 
 def read_experiment_index(output_dir: Path) -> list[dict[str, Any]]:
     return list(reversed(read_registry(output_dir)))
@@ -284,7 +330,14 @@ def read_stress_scenarios(run_dir: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
-    return payload if isinstance(payload, dict) else {}
+    if isinstance(payload, dict):
+        out = dict(payload)
+        if "schema_version" not in out:
+            out["schema_version"] = "legacy"
+        return out
+    if isinstance(payload, list):
+        return {"schema_version": "legacy", "scenario_attribution": payload}
+    return {}
 
 
 def load_manifest(manifest_path: Path) -> dict[str, Any]:
@@ -292,7 +345,20 @@ def load_manifest(manifest_path: Path) -> dict[str, Any]:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+
+    out = dict(payload)
+    manifest_schema = str(out.get("manifest_schema_version", "1.0"))
+    warnings: list[str] = []
+    if not _version_in_range(manifest_schema, SUPPORTED_MANIFEST_SCHEMA_RANGE[0], SUPPORTED_MANIFEST_SCHEMA_RANGE[1]):
+        warnings.append(f"unsupported manifest schema {manifest_schema}")
+
+    metric_manifest = _read_metric_manifest(manifest_path.parent)
+    warnings.extend(_validate_metric_manifest(metric_manifest))
+    if warnings:
+        out["compatibility_warnings"] = warnings
+    return out
 
 
 def index_manifests(output_dir: Path) -> list[dict[str, Any]]:
