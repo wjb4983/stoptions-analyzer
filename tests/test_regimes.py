@@ -30,8 +30,24 @@ def test_compute_regime_labels_is_deterministic() -> None:
     first = compute_regime_labels(prices, config=cfg)
     second = compute_regime_labels(prices, config=cfg)
 
-    for key in ("trend", "volatility", "liquidity", "macro", "labels"):
+    for key in (
+        "trend",
+        "volatility",
+        "liquidity",
+        "macro",
+        "labels",
+        "legacy_component_labels",
+        "regime_state_argmax",
+        "regime_states",
+        "feature_names",
+    ):
         assert np.array_equal(first[key], second[key])
+
+    probs = first["regime_probabilities"]
+    assert probs.shape == (prices.shape[0], int(cfg.n_states))
+    assert np.allclose(np.sum(probs, axis=1), 1.0)
+    assert len(first["regime_state_to_legacy_label"]) == int(cfg.n_states)
+    assert first["feature_matrix"].shape == (prices.shape[0], len(first["feature_names"]))
 
 
 def test_regime_risk_overlay_caps_exposure_by_regime() -> None:
