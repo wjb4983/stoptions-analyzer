@@ -168,6 +168,8 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     assert "dependency_versions" in manifest
     assert "random_seeds" in manifest
     assert "environment" in manifest
+    assert "reproducibility_metadata" in manifest
+    assert "feature_hashes" in manifest["reproducibility_metadata"]
     assert (run_dir / "metric_tables_manifest.json").exists()
 
     index_rows = (output_root / "experiment_index.jsonl").read_text().strip().splitlines()
@@ -175,7 +177,9 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     index_entry = json.loads(index_rows[0])
     assert index_entry["run_type"] == "backtest"
     assert index_entry["manifest_path"].endswith("manifest.json")
-
+    assert "model_artifacts" in index_entry
+    assert "plot_artifacts" in index_entry
+    assert "reproducibility_metadata" in index_entry
 
     robustness = json.loads((run_dir / "robustness_report.json").read_text())
     assert "bootstrap_confidence_intervals" in robustness

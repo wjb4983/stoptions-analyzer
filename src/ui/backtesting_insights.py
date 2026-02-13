@@ -87,6 +87,8 @@ def apply_governance_decision(
         drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
         if not bool(drift_monitoring.get("within_tolerance", False)):
             return False
+        if not str(governance.get("experiment_id", "")).strip():
+            return False
         current = str(governance.get("promotion_state", "research")).strip() or "research"
         order = ["research", "paper", "shadow", "production"]
         if current in order and current != order[-1]:

@@ -104,8 +104,8 @@ PROMOTION_STATES = ("research", "paper", "shadow", "production")
 PROMOTION_REQUIRED_CHECKS: dict[str, list[str]] = {
     "research": ["dataset_lock", "signal_diagnostics"],
     "paper": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "drift_monitoring", "friction_adjusted_edge", "causal_robustness"],
-    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness"],
-    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness", "approval"],
+    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness", "experiment_id"],
+    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness", "experiment_id", "approval"],
 }
 
 
@@ -483,16 +483,16 @@ def run_time_series_momentum_backtest(
         slippage_model=slippage,
         fee_model=fee_model,
         borrow_cost_model=borrow,
-        volumes=arrays.volume,
-        adv=arrays.adv,
-        volatility=arrays.realized_volatility,
-        spread_bps=arrays.spread_bps,
+        volumes=getattr(arrays, "volume", np.maximum(arrays.close_prices, 1.0)),
+        adv=getattr(arrays, "adv", np.maximum(arrays.close_prices, 1.0)),
+        volatility=getattr(arrays, "realized_volatility", np.zeros_like(arrays.close_prices)),
+        spread_bps=getattr(arrays, "spread_bps", np.full_like(arrays.close_prices, float(costs_bps))),
         order_type=str((execution_model_params or {}).get("order_type", "market")),
-        latency_bars=arrays.latency_bars,
-        latency_ms=arrays.latency_ms,
-        queue_rank_proxy=arrays.queue_rank_proxy,
-        available_bar_volume=arrays.available_bar_volume,
-        max_participation_per_bar=arrays.max_participation,
+        latency_bars=getattr(arrays, "latency_bars", np.zeros_like(arrays.close_prices)),
+        latency_ms=getattr(arrays, "latency_ms", np.zeros_like(arrays.close_prices)),
+        queue_rank_proxy=getattr(arrays, "queue_rank_proxy", np.full_like(arrays.close_prices, 0.5)),
+        available_bar_volume=getattr(arrays, "available_bar_volume", np.maximum(arrays.close_prices, 1.0)),
+        max_participation_per_bar=getattr(arrays, "max_participation", np.ones_like(arrays.close_prices)),
         initial_equity=float(starting_capital),
         timeframe=timeframe,
         dates=arrays.date_index,
@@ -516,16 +516,16 @@ def run_time_series_momentum_backtest(
         slippage_model=BpsSlippage(0.0),
         fee_model=BrokerFeeModel(fee_bps=0.0, fee_per_unit=0.0, minimum_fee=0.0),
         borrow_cost_model=ShortBorrowCost(annual_borrow_rate=0.0),
-        volumes=arrays.volume,
-        adv=arrays.adv,
-        volatility=arrays.realized_volatility,
-        spread_bps=arrays.spread_bps,
+        volumes=getattr(arrays, "volume", np.maximum(arrays.close_prices, 1.0)),
+        adv=getattr(arrays, "adv", np.maximum(arrays.close_prices, 1.0)),
+        volatility=getattr(arrays, "realized_volatility", np.zeros_like(arrays.close_prices)),
+        spread_bps=getattr(arrays, "spread_bps", np.full_like(arrays.close_prices, float(costs_bps))),
         order_type=str((execution_model_params or {}).get("order_type", "market")),
-        latency_bars=arrays.latency_bars,
-        latency_ms=arrays.latency_ms,
-        queue_rank_proxy=arrays.queue_rank_proxy,
-        available_bar_volume=arrays.available_bar_volume,
-        max_participation_per_bar=arrays.max_participation,
+        latency_bars=getattr(arrays, "latency_bars", np.zeros_like(arrays.close_prices)),
+        latency_ms=getattr(arrays, "latency_ms", np.zeros_like(arrays.close_prices)),
+        queue_rank_proxy=getattr(arrays, "queue_rank_proxy", np.full_like(arrays.close_prices, 0.5)),
+        available_bar_volume=getattr(arrays, "available_bar_volume", np.maximum(arrays.close_prices, 1.0)),
+        max_participation_per_bar=getattr(arrays, "max_participation", np.ones_like(arrays.close_prices)),
         initial_equity=float(starting_capital),
         timeframe=timeframe,
         dates=arrays.date_index,
@@ -1505,6 +1505,10 @@ def run_walk_forward_backtest(
             "metrics": {k: float(v) for k, v in wf_result.aggregate_metrics.items()},
             "significance": {},
             "governance": governance_payload,
+            "model_artifacts": _collect_artifact_inventory(run_dir).get("model_artifacts", []),
+            "plot_artifacts": _collect_artifact_inventory(run_dir).get("plot_artifacts", []),
+            "metric_artifacts": _collect_artifact_inventory(run_dir).get("metric_artifacts", []),
+            "reproducibility_metadata": manifest.get("reproducibility_metadata", {}),
         }
     )
 
@@ -1715,6 +1719,10 @@ def run_strategy_optimization(
         "metrics": best_metrics,
         "significance": {},
         "governance": governance_payload,
+        "model_artifacts": _collect_artifact_inventory(run_dir).get("model_artifacts", []),
+        "plot_artifacts": _collect_artifact_inventory(run_dir).get("plot_artifacts", []),
+        "metric_artifacts": _collect_artifact_inventory(run_dir).get("metric_artifacts", []),
+        "reproducibility_metadata": manifest.get("reproducibility_metadata", {}),
     })
 
     return (
@@ -3160,6 +3168,10 @@ def _persist_backtest_outputs(
         random_seed=random_seed,
         governance=governance_payload,
         metric_tables=metric_tables,
+        result_summary={
+            "metrics": {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))},
+            **_collect_artifact_inventory(run_dir),
+        },
     )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     (run_dir / "artifact_metadata.json").write_text(json.dumps({
@@ -3190,6 +3202,10 @@ def _persist_backtest_outputs(
             "metrics": metrics,
             "significance": {"robustness": robustness_report} if robustness_report else {},
             "governance": governance_payload,
+            "model_artifacts": _collect_artifact_inventory(run_dir).get("model_artifacts", []),
+            "plot_artifacts": _collect_artifact_inventory(run_dir).get("plot_artifacts", []),
+            "metric_artifacts": _collect_artifact_inventory(run_dir).get("metric_artifacts", []),
+            "reproducibility_metadata": manifest.get("reproducibility_metadata", {}),
         }
     )
 
@@ -3304,6 +3320,41 @@ def _collect_environment_metadata() -> dict[str, Any]:
     }
 
 
+def _collect_feature_hashes(parameters: dict[str, Any], data_snapshot: dict[str, Any]) -> dict[str, str]:
+    feature_hashes: dict[str, str] = {}
+    for key, value in sorted((parameters or {}).items(), key=lambda item: str(item[0])):
+        name = str(key)
+        if "feature" in name.lower() or name.lower().startswith("xsmom_"):
+            feature_hashes[name] = _stable_fingerprint({"name": name, "value": value})
+    if isinstance(data_snapshot, dict):
+        data_fingerprint = data_snapshot.get("data_fingerprint")
+        if isinstance(data_fingerprint, dict):
+            for key, value in sorted(data_fingerprint.items(), key=lambda item: str(item[0])):
+                feature_hashes[f"data_fingerprint.{key}"] = _stable_fingerprint({"name": key, "value": value})
+    return feature_hashes
+
+
+def _collect_artifact_inventory(run_dir: Path) -> dict[str, list[str]]:
+    model_artifacts: list[str] = []
+    plot_artifacts: list[str] = []
+    metric_artifacts: list[str] = []
+    for path in sorted(run_dir.glob("*")):
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix in {".png", ".svg", ".jpg", ".jpeg"}:
+            plot_artifacts.append(path.name)
+        if suffix in {".json", ".csv"} and "metric" in path.name.lower():
+            metric_artifacts.append(path.name)
+        if "model" in path.name.lower() or "leaderboard" in path.name.lower() or "fold_" in path.name.lower():
+            model_artifacts.append(path.name)
+    return {
+        "model_artifacts": model_artifacts,
+        "plot_artifacts": plot_artifacts,
+        "metric_artifacts": metric_artifacts,
+    }
+
+
 def _stable_fingerprint(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -3393,6 +3444,10 @@ def _build_run_manifest(*, run_type: str, parameters: dict[str, Any], data_snaps
         "python_random_seed": random_seed,
         "numpy_random_seed": random_seed,
     }
+    reproducibility_metadata = {
+        "feature_hashes": _collect_feature_hashes(parameters, data_snapshot),
+        "environment_fingerprint": _stable_fingerprint(_collect_environment_metadata()),
+    }
     fingerprint_payload = {
         "metric_schema_version": CANONICAL_METRIC_SCHEMA_VERSION,
         "manifest_schema_version": RUN_MANIFEST_SCHEMA_VERSION,
@@ -3402,6 +3457,7 @@ def _build_run_manifest(*, run_type: str, parameters: dict[str, Any], data_snaps
         "random_seeds": random_seeds,
         "data_snapshot_ids": data_snapshot,
         "governance": _normalize_governance_for_fingerprint(governance),
+        "reproducibility_metadata": reproducibility_metadata,
     }
     if extra_fingerprint_payload:
         fingerprint_payload.update(extra_fingerprint_payload)
@@ -3421,6 +3477,7 @@ def _build_run_manifest(*, run_type: str, parameters: dict[str, Any], data_snaps
         "random_seeds": random_seeds,
         "dependency_versions": dependency_versions,
         "environment": _collect_environment_metadata(),
+        "reproducibility_metadata": reproducibility_metadata,
         "governance": _normalize_governance_for_fingerprint(governance),
         "metric_tables": metric_tables or {},
         "reproducibility_fingerprint": _stable_fingerprint(fingerprint_payload),
@@ -3625,6 +3682,8 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         thresholds=gate_thresholds,
     )
 
+    experiment_id = str(source.get("experiment_id", "")).strip()
+
     gate_checks = {
         "dataset_lock": bool(source.get("dataset_snapshot_lock", "").strip()),
         "oos_periods": bool(checks.get("oos_periods", False)),
@@ -3635,12 +3694,14 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "drift_monitoring": bool(drift_monitoring.get("within_tolerance", False)),
         "friction_adjusted_edge": bool(checks.get("friction_adjusted_edge", False)),
         "causal_robustness": bool(causal_robustness.get("pass", False)),
+        "experiment_id": bool(experiment_id),
     }
 
     missing_required = [name for name in required_checks if not gate_checks.get(name, False)]
 
     governance = {
         "hypothesis_id": str(source.get("hypothesis_id", "")).strip(),
+        "experiment_id": experiment_id,
         "owner": str(source.get("owner", "")).strip(),
         "dataset_snapshot_lock": str(source.get("dataset_snapshot_lock", "")).strip(),
         "acceptance_criteria": str(source.get("acceptance_criteria", "")).strip(),
@@ -3690,6 +3751,7 @@ def _evaluate_governance_gate_checks(
     drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
     drift_within_tolerance = bool(drift_monitoring.get("within_tolerance", False))
     causal_robustness = governance.get("causal_robustness", {}) if isinstance(governance.get("causal_robustness"), dict) else {}
+    experiment_id = str(governance.get("experiment_id", "")).strip()
 
     checks = {
         "dataset_lock": bool(governance.get("dataset_snapshot_lock")),
@@ -3701,6 +3763,7 @@ def _evaluate_governance_gate_checks(
         "drift_monitoring": drift_within_tolerance,
         "friction_adjusted_edge": float(metrics.get("friction_adjusted_edge", float("-inf"))) >= float(thresholds.get("min_friction_adjusted_edge", 0.0)),
         "causal_robustness": bool(causal_robustness.get("pass", False)),
+        "experiment_id": bool(experiment_id),
     }
     return checks
 

@@ -30,6 +30,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             manifest_path TEXT,
             reproducibility_fingerprint TEXT,
             manifest_checksum TEXT,
+            model_artifacts_json TEXT,
+            plot_artifacts_json TEXT,
+            metric_artifacts_json TEXT,
+            reproducibility_metadata_json TEXT,
             raw_entry_json TEXT
         )
         """
@@ -79,6 +83,10 @@ def append_experiment_entry(output_dir: Path, entry: dict[str, Any]) -> None:
         "governance_json": json.dumps(entry.get("governance", {}), sort_keys=True),
         "metrics_json": json.dumps(entry.get("metrics", {}), sort_keys=True),
         "significance_json": json.dumps(entry.get("significance", {}), sort_keys=True),
+        "model_artifacts_json": json.dumps(entry.get("model_artifacts", []), sort_keys=True),
+        "plot_artifacts_json": json.dumps(entry.get("plot_artifacts", []), sort_keys=True),
+        "metric_artifacts_json": json.dumps(entry.get("metric_artifacts", []), sort_keys=True),
+        "reproducibility_metadata_json": json.dumps(entry.get("reproducibility_metadata", {}), sort_keys=True),
     }
     fieldnames = list(row.keys())
     write_header = not csv_path.exists()
@@ -96,8 +104,10 @@ def append_experiment_entry(output_dir: Path, entry: dict[str, Any]) -> None:
                 run_id, run_dir, run_type, timestamp, config_hash, config_checksum,
                 data_snapshot_identifiers_json, data_snapshot_checksum,
                 metrics_json, significance_json, governance_json,
-                manifest_path, reproducibility_fingerprint, manifest_checksum, raw_entry_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                manifest_path, reproducibility_fingerprint, manifest_checksum,
+                model_artifacts_json, plot_artifacts_json, metric_artifacts_json, reproducibility_metadata_json,
+                raw_entry_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(entry.get("run_id", "")),
@@ -114,6 +124,10 @@ def append_experiment_entry(output_dir: Path, entry: dict[str, Any]) -> None:
                 str(entry.get("manifest_path", "")),
                 str(entry.get("reproducibility_fingerprint", "")),
                 str(entry.get("manifest_checksum", "")),
+                json.dumps(entry.get("model_artifacts", []), sort_keys=True),
+                json.dumps(entry.get("plot_artifacts", []), sort_keys=True),
+                json.dumps(entry.get("metric_artifacts", []), sort_keys=True),
+                json.dumps(entry.get("reproducibility_metadata", {}), sort_keys=True),
                 json.dumps(entry, sort_keys=True),
             ),
         )
