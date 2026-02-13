@@ -118,3 +118,44 @@ def build_guardrails(
     if not badges:
         badges.append({"label": "Guardrails OK", "severity": "low", "reason": "No obvious stability alerts."})
     return badges
+
+
+def build_scenario_comparison(base_payload: dict[str, Any], other_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    def _rows(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        rows = payload.get("scenario_attribution", []) if isinstance(payload, dict) else []
+        out: dict[str, dict[str, Any]] = {}
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    out[str(row.get("scenario", ""))] = row
+        return out
+
+    base_rows = _rows(base_payload)
+    other_rows = _rows(other_payload)
+    merged: list[dict[str, Any]] = []
+    for name in sorted(set(base_rows) | set(other_rows)):
+        a = base_rows.get(name, {})
+        b = other_rows.get(name, {})
+        a_pnl = float(a.get("pnl_total", 0.0))
+        b_pnl = float(b.get("pnl_total", 0.0))
+        merged.append({
+            "scenario": name,
+            "base_pnl": a_pnl,
+            "compare_pnl": b_pnl,
+            "delta_pnl": b_pnl - a_pnl,
+            "base_delta_sharpe": float(a.get("delta_sharpe", 0.0)),
+            "compare_delta_sharpe": float(b.get("delta_sharpe", 0.0)),
+        })
+    merged.sort(key=lambda row: abs(float(row["delta_pnl"])), reverse=True)
+    return merged
+
+
+def read_stress_scenarios(run_dir: Path) -> dict[str, Any]:
+    path = run_dir / "stress_scenarios.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}

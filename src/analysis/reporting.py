@@ -556,6 +556,52 @@ def build_sweep_robustness_report(
     }
 
 
+
+
+def build_scenario_attribution_and_guardrails(
+    *,
+    baseline_metrics: dict[str, float],
+    scenario_results: list[dict[str, object]],
+) -> dict[str, list[dict[str, object]]]:
+    baseline_sharpe = float(baseline_metrics.get("sharpe", 0.0))
+    baseline_drawdown = float(baseline_metrics.get("max_drawdown", 0.0))
+    baseline_return = float(baseline_metrics.get("total_return", 0.0))
+
+    attribution: list[dict[str, object]] = []
+    guardrails: list[dict[str, object]] = []
+    for row in scenario_results:
+        name = str(row.get("name", "unnamed"))
+        metrics = row.get("metrics", {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+        sharpe = float(metrics.get("sharpe", 0.0))
+        max_drawdown = float(metrics.get("max_drawdown", 0.0))
+        total_return = float(metrics.get("total_return", 0.0))
+        pnl_total = float(row.get("pnl_total", 0.0))
+
+        attribution.append({
+            "scenario": name,
+            "pnl_total": pnl_total,
+            "delta_total_return": total_return - baseline_return,
+            "delta_sharpe": sharpe - baseline_sharpe,
+            "delta_max_drawdown": max_drawdown - baseline_drawdown,
+        })
+
+        checks = {
+            "drawdown": max_drawdown >= min(-0.5, baseline_drawdown - 0.15),
+            "sharpe_floor": sharpe >= min(0.0, baseline_sharpe - 1.0),
+            "return_floor": total_return >= baseline_return - 0.30,
+        }
+        guardrails.append({
+            "scenario": name,
+            "passed": bool(all(checks.values())),
+            "checks": checks,
+        })
+
+    return {
+        "scenario_attribution": attribution,
+        "scenario_guardrails": guardrails,
+    }
 def _compute_pbo_style(
     *,
     ranked_rows: list[dict[str, object]],

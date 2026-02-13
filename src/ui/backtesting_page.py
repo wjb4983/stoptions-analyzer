@@ -15,7 +15,7 @@ from backtesting.cache_runner import (
     run_walk_forward_backtest,
 )
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PRESETS, DEFAULT_BACKTEST_SETTINGS
-from ui.backtesting_insights import build_guardrails, metric_deltas, parameter_diffs, parse_tags, read_experiment_index
+from ui.backtesting_insights import build_guardrails, build_scenario_comparison, metric_deltas, parameter_diffs, parse_tags, read_experiment_index, read_stress_scenarios
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
 ENTRY_SIGNALS = ["ts_momentum", "ma_trend", "breakout"]
@@ -556,8 +556,10 @@ class BacktestingPage(ttk.Frame):
         cmp_pane.grid(row=1, column=0, rowspan=2, sticky="nsew", padx=10, pady=4)
         metrics_frame = ttk.Labelframe(cmp_pane, text="Metric Deltas")
         params_frame = ttk.Labelframe(cmp_pane, text="Parameter Diffs")
+        scenario_frame = ttk.Labelframe(cmp_pane, text="Scenario Comparison")
         cmp_pane.add(metrics_frame, weight=1)
         cmp_pane.add(params_frame, weight=1)
+        cmp_pane.add(scenario_frame, weight=1)
         metrics_frame.columnconfigure(0, weight=1)
         metrics_frame.rowconfigure(0, weight=1)
         params_frame.columnconfigure(0, weight=1)
@@ -566,6 +568,10 @@ class BacktestingPage(ttk.Frame):
         self.metric_delta_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
         self.param_diff_tree = ttk.Treeview(params_frame, show="headings", height=12)
         self.param_diff_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        scenario_frame.columnconfigure(0, weight=1)
+        scenario_frame.rowconfigure(0, weight=1)
+        self.scenario_compare_tree = ttk.Treeview(scenario_frame, show="headings", height=12)
+        self.scenario_compare_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
 
         heatmap_tab = ttk.Frame(self.section_notebook)
         heatmap_tab.columnconfigure(0, weight=1)
@@ -1091,6 +1097,11 @@ class BacktestingPage(ttk.Frame):
         param_rows = parameter_diffs(base_params, other_params)
         self._set_tree_data(self.param_diff_tree, param_rows[:120])
 
+        base_scenarios = read_stress_scenarios(base_run)
+        other_scenarios = read_stress_scenarios(other_run)
+        scenario_rows = build_scenario_comparison(base_scenarios, other_scenarios)
+        self._set_tree_data(self.scenario_compare_tree, scenario_rows[:120])
+
     def _render_guardrails(self, run_dir: Path) -> None:
         for child in self.guardrail_frame.winfo_children():
             child.destroy()
@@ -1101,6 +1112,12 @@ class BacktestingPage(ttk.Frame):
         robustness = self._read_json(run_dir / "robustness_report.json")
         robustness_payload = robustness if isinstance(robustness, dict) else None
         badges = build_guardrails(metrics, fold_rows=rows, trade_count=trade_count, robustness=robustness_payload)
+        scenario_payload = read_stress_scenarios(run_dir)
+        scenario_checks = scenario_payload.get("scenario_guardrails", []) if isinstance(scenario_payload, dict) else []
+        if isinstance(scenario_checks, list):
+            failed = [row for row in scenario_checks if isinstance(row, dict) and not bool(row.get("passed", False))]
+            if failed:
+                badges.append({"label": "Stress Failures", "severity": "high", "reason": f"{len(failed)} scenario guardrail checks failed."})
         palette = {"high": "#d9534f", "medium": "#f0ad4e", "low": "#5cb85c"}
         for badge in badges:
             label = ttk.Label(
