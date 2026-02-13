@@ -311,3 +311,28 @@ def test_composite_slippage_stacks_spread_impact_and_latency() -> None:
     base = model.apply(100.0, 1.0, {"realized_participation": 0.01, "latency_bars": 0, "queue_rank_proxy": 0.0})
     stressed = model.apply(100.0, 1.0, {"realized_participation": 0.49, "latency_bars": 2, "queue_rank_proxy": 1.0})
     assert stressed > base
+
+
+def test_broker_fee_model_applies_minimum_and_notional_components() -> None:
+    from src.backtesting.execution import BrokerFeeModel
+
+    model = BrokerFeeModel(fee_bps=5.0, fee_per_unit=0.01, minimum_fee=1.0)
+    small = model.calculate(price=10.0, size=1.0)
+    large = model.calculate(price=100.0, size=100.0)
+    assert np.isclose(small, 1.0)
+    assert large > small
+
+
+def test_partial_fill_supports_market_limit_and_participation_order_types() -> None:
+    from src.backtesting.execution import PartialFillModel
+
+    model = PartialFillModel(max_participation_per_bar=1.0)
+    requested = np.array([[1.0]])
+    volume = np.array([[1.0]])
+
+    market_fill, _, _ = model.run(requested, volume, order_type="market", queue_rank_proxy=0.9)
+    limit_fill, _, _ = model.run(requested, volume, order_type="limit", queue_rank_proxy=0.9)
+    participation_fill, _, _ = model.run(requested, volume, order_type="participation", queue_rank_proxy=0.9)
+
+    assert market_fill[0, 0] >= participation_fill[0, 0] >= limit_fill[0, 0]
+    assert limit_fill[0, 0] < market_fill[0, 0]

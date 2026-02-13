@@ -33,6 +33,7 @@ from analysis.reporting import (
 from backtesting.execution import (
     AssetClassCarryCost,
     BpsSlippage,
+    BrokerFeeModel,
     CompositeSlippage,
     LatencyQueueDriftSlippage,
     ParticipationImpactSlippage,
@@ -101,9 +102,9 @@ METRIC_TABLE_SCHEMA_VERSIONS: dict[str, str] = {
 PROMOTION_STATES = ("research", "paper", "shadow", "production")
 PROMOTION_REQUIRED_CHECKS: dict[str, list[str]] = {
     "research": ["dataset_lock", "signal_diagnostics"],
-    "paper": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "drift_monitoring"],
-    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring"],
-    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "approval"],
+    "paper": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "drift_monitoring", "friction_adjusted_edge"],
+    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge"],
+    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "approval"],
 }
 
 
@@ -468,11 +469,28 @@ def run_time_series_momentum_backtest(
     regime_diag["regime_confidence"] = np.asarray(regime_state.get("regime_confidence", np.zeros(prices.shape[0], dtype=float)), dtype=float)
     portfolio_result.diagnostics.update(regime_diag)
 
+    fee_model = BrokerFeeModel(
+        fee_bps=float((execution_model_params or {}).get("broker_fee_bps", 0.0)),
+        fee_per_unit=float((execution_model_params or {}).get("broker_fee_per_unit", 0.0)),
+        minimum_fee=float((execution_model_params or {}).get("broker_min_fee", 0.0)),
+    )
+
     result = backtest_vectorized(
         prices=prices,
         signals=adjusted_weights,
         slippage_model=slippage,
+        fee_model=fee_model,
         borrow_cost_model=borrow,
+        volumes=arrays.volume,
+        adv=arrays.adv,
+        volatility=arrays.realized_volatility,
+        spread_bps=arrays.spread_bps,
+        order_type=str((execution_model_params or {}).get("order_type", "market")),
+        latency_bars=arrays.latency_bars,
+        latency_ms=arrays.latency_ms,
+        queue_rank_proxy=arrays.queue_rank_proxy,
+        available_bar_volume=arrays.available_bar_volume,
+        max_participation_per_bar=arrays.max_participation,
         initial_equity=float(starting_capital),
         timeframe=timeframe,
         dates=arrays.date_index,
@@ -489,6 +507,48 @@ def run_time_series_momentum_backtest(
         corporate_action_splits=arrays.split_factors,
         corporate_action_dividends=arrays.dividends,
     )
+
+    friction_off_result = backtest_vectorized(
+        prices=prices,
+        signals=adjusted_weights,
+        slippage_model=BpsSlippage(0.0),
+        fee_model=BrokerFeeModel(fee_bps=0.0, fee_per_unit=0.0, minimum_fee=0.0),
+        borrow_cost_model=ShortBorrowCost(annual_borrow_rate=0.0),
+        volumes=arrays.volume,
+        adv=arrays.adv,
+        volatility=arrays.realized_volatility,
+        spread_bps=arrays.spread_bps,
+        order_type=str((execution_model_params or {}).get("order_type", "market")),
+        latency_bars=arrays.latency_bars,
+        latency_ms=arrays.latency_ms,
+        queue_rank_proxy=arrays.queue_rank_proxy,
+        available_bar_volume=arrays.available_bar_volume,
+        max_participation_per_bar=arrays.max_participation,
+        initial_equity=float(starting_capital),
+        timeframe=timeframe,
+        dates=arrays.date_index,
+        symbols=symbol_order,
+        carry_asset_classes=[arrays.metadata.asset_class_by_symbol[symbol] for symbol in symbol_order],
+        carry_expiry_by_asset=[arrays.metadata.expiry_by_symbol[symbol] for symbol in symbol_order],
+        carry_multipliers=[arrays.metadata.multiplier_by_symbol[symbol] for symbol in symbol_order],
+        carry_borrow_availability_tiers=[
+            arrays.metadata.borrow_availability_tier_by_symbol[symbol] for symbol in symbol_order
+        ],
+        carry_financing_benchmarks=[arrays.metadata.financing_benchmark_by_symbol[symbol] for symbol in symbol_order],
+        borrow_rate_series=borrow_rate_series,
+        borrow_available_flags=borrow_available_flags,
+        corporate_action_splits=arrays.split_factors,
+        corporate_action_dividends=arrays.dividends,
+    )
+
+    governance_payload = _build_governance_metadata(governance_metadata)
+
+    friction_edge = _friction_adjusted_edge_checks(
+        friction_on_metrics={k: float(v) for k, v in result.metrics.items() if isinstance(v, (int, float))},
+        friction_off_metrics={k: float(v) for k, v in friction_off_result.metrics.items() if isinstance(v, (int, float))},
+        governance_payload=governance_payload,
+    )
+    governance_payload["gate_checks"]["friction_adjusted_edge"] = bool(friction_edge["pass"])
 
     timestamps = arrays.date_index
 
@@ -520,6 +580,8 @@ def run_time_series_momentum_backtest(
     metrics = dict(result.metrics)
     metrics["turnover_total"] = turnover_stats["total"]
     metrics["cost_total"] = cost_totals.get("total", 0.0)
+    metrics["friction_adjusted_edge"] = float(friction_edge["friction_adjusted_edge"])
+    metrics["friction_edge_retention"] = float(friction_edge["friction_edge_retention"])
 
     regime_pnl_attribution = attribute_pnl_by_regime(pnl=pnl, regime_labels=regime_labels)
     regime_ensemble_report = _build_regime_ensemble_comparison(
@@ -528,8 +590,6 @@ def run_time_series_momentum_backtest(
         regime_labels=regime_labels,
     )
 
-    governance_payload = _build_governance_metadata(governance_metadata)
-
     parameter_payload = {
         "tickers": list(tickers),
         "lookback_days": lookback_days,
@@ -537,6 +597,11 @@ def run_time_series_momentum_backtest(
         "costs_bps": costs_bps,
         "execution_model": execution_model,
         "execution_model_params": execution_model_params or {},
+        "friction_backtests": {
+            "friction_on": {"metrics": {k: float(v) for k, v in result.metrics.items() if isinstance(v, (int, float))}},
+            "friction_off": {"metrics": {k: float(v) for k, v in friction_off_result.metrics.items() if isinstance(v, (int, float))}},
+            "edge": friction_edge,
+        },
         "execution_model_calibration": {
             "source": calibration_selection.source,
             "effective_date": calibration_selection.effective_date,
@@ -1760,13 +1825,38 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         entry_config=entry_cfg,
         exit_config=exit_cfg,
     )
-    result = backtest_vectorized(
+    friction_on = backtest_vectorized(
         prices=prices,
         signals=signals,
         slippage_model=BpsSlippage(costs_bps),
+        fee_model=BrokerFeeModel(
+            fee_bps=float(payload.get("broker_fee_bps", 0.0)),
+            fee_per_unit=float(payload.get("broker_fee_per_unit", 0.0)),
+            minimum_fee=float(payload.get("broker_min_fee", 0.0)),
+        ),
+        order_type=str(payload.get("order_type", "market")),
+        available_bar_volume=np.maximum(prices, 1.0),
+        max_participation_per_bar=float(payload.get("max_participation_per_bar", 1.0)),
+        latency_bars=int(payload.get("latency_bars", 0)),
+        latency_ms=int(payload.get("latency_ms", 0)),
         initial_equity=1.0,
         timeframe="1m",
     )
+    friction_off = backtest_vectorized(
+        prices=prices,
+        signals=signals,
+        slippage_model=BpsSlippage(0.0),
+        fee_model=BrokerFeeModel(fee_bps=0.0, fee_per_unit=0.0, minimum_fee=0.0),
+        borrow_cost_model=ShortBorrowCost(annual_borrow_rate=0.0),
+        order_type=str(payload.get("order_type", "market")),
+        available_bar_volume=np.maximum(prices, 1.0),
+        max_participation_per_bar=float(payload.get("max_participation_per_bar", 1.0)),
+        latency_bars=int(payload.get("latency_bars", 0)),
+        latency_ms=int(payload.get("latency_ms", 0)),
+        initial_equity=1.0,
+        timeframe="1m",
+    )
+    result = friction_on
 
     turnover = _to_numpy_1d(result.turnover)
     trades = _to_numpy_2d(result.trades)
@@ -1776,6 +1866,9 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         for key, value in result.cost_breakdown.get("totals", {}).items()
     }
     metrics = dict(result.metrics)
+    friction_edge = float(friction_on.metrics.get("sharpe", 0.0))
+    metrics["friction_adjusted_edge"] = friction_edge
+    metrics["friction_edge_retention"] = 0.0 if abs(float(friction_off.metrics.get("sharpe", 0.0))) < 1e-12 else friction_edge / float(friction_off.metrics.get("sharpe", 0.0))
     turnover_total = float(np.sum(turnover)) if turnover.size else 0.0
     avg_participation = float(np.mean(np.array([float(row.get("participation_rate", 0.0)) for row in fills], dtype=float))) if fills else 0.0
     scaled_participation = avg_participation * aum_scale
@@ -1806,6 +1899,8 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         "total_return": float(metrics.get("total_return", 0.0)),
         "sharpe": float(metrics.get("sharpe", 0.0)),
         "post_cost_sharpe": float(post_cost_sharpe),
+        "friction_off_sharpe": float(friction_off.metrics.get("sharpe", 0.0)),
+        "friction_adjusted_edge": float(metrics.get("friction_adjusted_edge", 0.0)),
         "cagr": float(metrics.get("cagr", 0.0)),
         "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
         "calmar": float(metrics.get("calmar", 0.0)),
@@ -3508,6 +3603,7 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "max_signal_agreement_drift": _float("max_signal_agreement_drift", 0.10),
         "max_fill_slippage_drift_bps": _float("max_fill_slippage_drift_bps", 5.0),
         "max_pnl_attribution_divergence": _float("max_pnl_attribution_divergence", 0.15),
+        "min_friction_adjusted_edge": _float("min_friction_adjusted_edge", 0.0),
     }
 
     drift_monitoring = evaluate_drift_monitoring(
@@ -3524,6 +3620,7 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "approval": bool(checks.get("approval", False)),
         "signal_diagnostics": bool(checks.get("signal_diagnostics", False)),
         "drift_monitoring": bool(drift_monitoring.get("within_tolerance", False)),
+        "friction_adjusted_edge": bool(checks.get("friction_adjusted_edge", False)),
     }
 
     missing_required = [name for name in required_checks if not gate_checks.get(name, False)]
@@ -3586,6 +3683,7 @@ def _evaluate_governance_gate_checks(
         "turnover_capacity": turnover_total <= max_turnover and capacity_score >= min_capacity,
         "approval": str(governance.get("approval_status", "pending")).lower() in {"approved", "waived"},
         "drift_monitoring": drift_within_tolerance,
+        "friction_adjusted_edge": float(metrics.get("friction_adjusted_edge", float("-inf"))) >= float(thresholds.get("min_friction_adjusted_edge", 0.0)),
     }
     return checks
 
@@ -3802,6 +3900,30 @@ def _write_regime_pnl_attribution(*, run_dir: Path, rows: list[dict[str, float |
         writer.writeheader()
         writer.writerows(rows)
     (run_dir / "regime_pnl_attribution.json").write_text(json.dumps(rows, indent=2))
+
+
+def _friction_adjusted_edge_checks(
+    *,
+    friction_on_metrics: dict[str, float],
+    friction_off_metrics: dict[str, float],
+    governance_payload: dict[str, Any],
+) -> dict[str, Any]:
+    thresholds = governance_payload.get("gate_thresholds", {}) if isinstance(governance_payload.get("gate_thresholds"), dict) else {}
+    min_edge = float(thresholds.get("min_friction_adjusted_edge", 0.0))
+    on_sharpe = float(friction_on_metrics.get("sharpe", 0.0))
+    off_sharpe = float(friction_off_metrics.get("sharpe", 0.0))
+    edge = on_sharpe
+    edge_retention = 0.0 if abs(off_sharpe) < 1e-12 else edge / off_sharpe
+    passed = edge >= min_edge
+    return {
+        "friction_on_sharpe": on_sharpe,
+        "friction_off_sharpe": off_sharpe,
+        "friction_adjusted_edge": edge,
+        "friction_edge_retention": float(edge_retention),
+        "min_friction_adjusted_edge": min_edge,
+        "pass": bool(passed),
+    }
+
 
 
 def _build_slippage_model(
