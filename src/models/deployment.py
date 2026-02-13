@@ -12,6 +12,7 @@ REASON_STABILITY_FAILURE = "STABILITY_FAILURE"
 REASON_ROBUSTNESS_FAILURE = "ROBUSTNESS_FAILURE"
 REASON_MANUAL_CANDIDATE_PROMOTION = "MANUAL_CANDIDATE_PROMOTION"
 REASON_ROLLBACK_TO_PRIOR_CHAMPION = "ROLLBACK_TO_PRIOR_CHAMPION"
+REASON_CAPACITY_CONSTRAINT = "CAPACITY_CONSTRAINT"
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,8 @@ class PromotionGates:
     min_stability_score: float = 0.55
     min_robustness_score: float = 0.7
     max_brittle_features: int = 1
+    high_sharpe_threshold: float = 1.5
+    min_capacity_score: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,9 @@ class ModelSlots:
         chal_stability = float(challenger_metrics.get("stability_score", 0.0))
         chal_robustness = float(challenger_metrics.get("robustness_score", 1.0))
         chal_brittle_features = int(challenger_metrics.get("brittle_feature_count", 0))
+        chal_sharpe = float(challenger_metrics.get("sharpe", chal_risk_adj))
+        chal_capacity_score = float(challenger_metrics.get("capacity_score", 1.0))
+        chal_is_niche = bool(challenger_metrics.get("is_niche", False) or str(challenger_metrics.get("strategy_label", "")).strip().lower() == "niche")
 
         if chal_drawdown < gates.max_drawdown or chal_turnover > gates.max_turnover:
             self._rollback_challenger(REASON_RISK_BREACH, challenger_metrics)
@@ -85,6 +91,19 @@ class ModelSlots:
             self._rollback_challenger(REASON_STABILITY_FAILURE, challenger_metrics)
             return {"decision": "rollback", "reason_code": REASON_STABILITY_FAILURE, "promoted": False, "rolled_back": True}
 
+        if chal_sharpe >= gates.high_sharpe_threshold and chal_capacity_score < gates.min_capacity_score and not chal_is_niche:
+            self._rollback_challenger(
+                REASON_CAPACITY_CONSTRAINT,
+                {
+                    "sharpe": chal_sharpe,
+                    "high_sharpe_threshold": gates.high_sharpe_threshold,
+                    "capacity_score": chal_capacity_score,
+                    "min_capacity_score": gates.min_capacity_score,
+                    "is_niche": chal_is_niche,
+                },
+            )
+            return {"decision": "rollback", "reason_code": REASON_CAPACITY_CONSTRAINT, "promoted": False, "rolled_back": True}
+
         robustness_fail = chal_robustness < gates.min_robustness_score or chal_brittle_features > gates.max_brittle_features
         if robustness_fail:
             self._rollback_challenger(
@@ -93,6 +112,8 @@ class ModelSlots:
                     "robustness_score": chal_robustness,
                     "min_robustness_score": gates.min_robustness_score,
                     "brittle_feature_count": chal_brittle_features,
+                    "capacity_score": chal_capacity_score,
+                    "is_niche": chal_is_niche,
                     "max_brittle_features": gates.max_brittle_features,
                 },
             )
@@ -126,6 +147,8 @@ class ModelSlots:
                 "stability_score": chal_stability,
                 "robustness_score": chal_robustness,
                 "brittle_feature_count": chal_brittle_features,
+                "capacity_score": chal_capacity_score,
+                "is_niche": chal_is_niche,
             },
         )
         return {"decision": "promote", "reason_code": REASON_PROMOTION_GATES_PASSED, "promoted": True, "rolled_back": False}
