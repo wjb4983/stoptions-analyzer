@@ -6,6 +6,7 @@ from models.deployment import (
     REASON_PROMOTION_GATES_PASSED,
     REASON_RISK_BREACH,
     REASON_ROLLBACK_TO_PRIOR_CHAMPION,
+    REASON_ROBUSTNESS_FAILURE,
     REASON_SHADOW_UNDERPERFORMANCE,
 )
 
@@ -106,3 +107,27 @@ def test_post_promotion_rollback_to_prior_champion() -> None:
     assert slots.champion == "model_v1"
     assert slots.challenger == "model_v2"
     assert slots.audit_log[-1].reason_code == REASON_ROLLBACK_TO_PRIOR_CHAMPION
+
+
+def test_shadow_mode_auto_rollback_on_robustness_failure() -> None:
+    slots = ModelSlots(champion="model_v1", challenger="model_v2")
+    gates = PromotionGates(min_robustness_score=0.8, max_brittle_features=0)
+
+    decision = slots.evaluate_shadow_mode(
+        champion_metrics={"risk_adjusted_return": 0.8},
+        challenger_metrics={
+            "risk_adjusted_return": 1.5,
+            "max_drawdown": -0.05,
+            "turnover_total": 0.4,
+            "stability_score": 0.9,
+            "robustness_score": 0.62,
+            "brittle_feature_count": 2,
+        },
+        gates=gates,
+    )
+
+    assert decision["rolled_back"] is True
+    assert decision["reason_code"] == REASON_ROBUSTNESS_FAILURE
+    assert slots.challenger is None
+    assert slots.candidate == "model_v2"
+
