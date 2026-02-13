@@ -1778,6 +1778,10 @@ def _apply_sweep_statistical_annotations(
     multiple_testing = robustness_report.get("multiple_testing", {})
     raw_pvalues = multiple_testing.get("raw_pvalues", []) if isinstance(multiple_testing, dict) else []
     adjusted_pvalues = multiple_testing.get("bh_adjusted_pvalues", []) if isinstance(multiple_testing, dict) else []
+    corrected_pvalues = multiple_testing.get("corrected_pvalues", []) if isinstance(multiple_testing, dict) else []
+    correction_components = multiple_testing.get("correction_components", {}) if isinstance(multiple_testing, dict) else {}
+    white_component = float(correction_components.get("white_reality_check_pvalue", 1.0)) if isinstance(correction_components, dict) else 1.0
+    spa_component = float(correction_components.get("spa_pvalue", 1.0)) if isinstance(correction_components, dict) else 1.0
 
     sharpes = np.array([float(row.get("sharpe", 0.0)) for row in ranked_rows], dtype=float)
     centered = sharpes - float(np.mean(sharpes))
@@ -1806,8 +1810,14 @@ def _apply_sweep_statistical_annotations(
         adj_p = float(adjusted_pvalues[idx]) if idx < len(adjusted_pvalues) else 1.0
         row["nominal_pvalue"] = raw_p
         row["bh_adjusted_pvalue"] = adj_p
+        corrected_p = float(corrected_pvalues[idx]) if idx < len(corrected_pvalues) else max(adj_p, white_component, spa_component)
+        row["corrected_pvalue"] = corrected_p
+        row["white_reality_check_pvalue"] = white_component
+        row["spa_pvalue"] = spa_component
         row["is_significant_nominal_5pct"] = raw_p <= 0.05
         row["is_significant_fdr_5pct"] = adj_p <= 0.05
+        row["is_significant_corrected_5pct"] = corrected_p <= 0.05
+        row["is_significant"] = bool(row["is_significant_corrected_5pct"] and float(row["deflated_sharpe_ratio"]) >= 0.95)
 
 
 
@@ -1898,6 +1908,7 @@ def _persist_sweep_outputs(
         f"spa_pvalue={float(spa.get('p_value', 1.0)):.6f}",
         f"min_nominal_pvalue={float((robustness_report.get('multiple_testing', {}) or {}).get('min_raw_pvalue', 1.0)):.6f}",
         f"min_bh_adjusted_pvalue={float((robustness_report.get('multiple_testing', {}) or {}).get('min_bh_adjusted_pvalue', 1.0)):.6f}",
+        f"min_corrected_pvalue={float((robustness_report.get('multiple_testing', {}) or {}).get('min_corrected_pvalue', 1.0)):.6f}",
     ])
     (run_dir / "top_n_report.txt").write_text("\n".join(report_lines))
 
