@@ -4,7 +4,16 @@ import json
 from datetime import date
 
 from src.backtesting import cache_runner
-from src.backtesting.optimization import BayesianSampler, Constraint, Objective, TPESampler, pareto_frontier, optimize
+from src.backtesting.optimization import (
+    BayesianSampler,
+    Constraint,
+    DiscreteDimension,
+    Objective,
+    TPESampler,
+    Trial,
+    pareto_frontier,
+    optimize,
+)
 
 
 def test_pareto_frontier_filters_dominated_rows() -> None:
@@ -127,6 +136,64 @@ def test_optimize_supports_bayesian_trace_and_mixed_space(tmp_path) -> None:
     assert out["best_robust_params"]
     trace = json.loads((tmp_path / "bayes" / "optimization_trace.json").read_text())
     assert all("candidate" in row and "score" in row for row in trace)
+
+
+def test_sampler_predictive_stats_available_for_bayesian_and_tpe() -> None:
+    trials = [
+        Trial(
+            trial_id=i,
+            params={"x": i % 2},
+            metrics={"_scalar_score": float(i + 1)},
+            feasible=True,
+            stopped_early=False,
+            period_fraction=1.0,
+        )
+        for i in range(6)
+    ]
+    space = {"x": DiscreteDimension(values=[0, 1])}
+
+    bayes_pred = BayesianSampler(random_fraction=0.0).predict(trials=trials, space=space, params={"x": 1})
+    tpe_pred = TPESampler(random_fraction=0.0).predict(trials=trials, space=space, params={"x": 1})
+
+    assert bayes_pred is not None
+    assert bayes_pred[1] > 0.0
+    assert tpe_pred is not None
+    assert tpe_pred[1] > 0.0
+
+
+def test_optimize_pruning_deterministic_with_fixed_seed(tmp_path) -> None:
+    def evaluate(params: dict[str, object], fraction: float) -> dict[str, float]:
+        x = int(params["x"])
+        y = int(params["y"])
+        quality = (x * 0.4 + y * 0.2) - (2.0 if x == 0 and y == 0 else 0.0)
+        return {
+            "sharpe": float(quality) * float(fraction),
+            "turnover_total": float(3 - y),
+            "max_drawdown": -0.1,
+            "trade_count": float(4 + x + y),
+        }
+
+    kwargs = dict(
+        space={"x": [0, 1, 2], "y": [0, 1, 2]},
+        evaluate=evaluate,
+        objectives=[Objective("sharpe", "maximize")],
+        constraints=[Constraint(metric="trade_count", min_value=1.0)],
+        sampler=BayesianSampler(random_fraction=0.0, candidate_pool_size=24),
+        n_trials=18,
+        seed=42,
+        partial_period_fractions=[0.33, 0.66, 1.0],
+    )
+
+    optimize(output_dir=tmp_path / "run1", **kwargs)
+    optimize(output_dir=tmp_path / "run2", **kwargs)
+
+    trace1 = json.loads((tmp_path / "run1" / "optimization_trace.json").read_text())
+    trace2 = json.loads((tmp_path / "run2" / "optimization_trace.json").read_text())
+
+    stopped1 = [row["stopped_early"] for row in trace1]
+    stopped2 = [row["stopped_early"] for row in trace2]
+    assert stopped1 == stopped2
+    assert any(stopped1)
 
 
 def test_run_strategy_optimization_supports_bayesian_sampler(monkeypatch, tmp_path) -> None:

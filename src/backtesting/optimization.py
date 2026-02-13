@@ -49,7 +49,7 @@ class Trial:
     feasible: bool
     stopped_early: bool
     period_fraction: float
-    uncertainty: float | None = None
+    uncertainty: dict[str, float] | None = None
     fold_scores: list[float] | None = None
     robust_score: float | None = None
 
@@ -149,7 +149,63 @@ class TPESampler:
         return sampled
 
     def predict(self, *, trials: list[Trial], space: dict[str, SearchDimension], params: dict[str, Any]) -> tuple[float, float] | None:
+        observed = [t for t in trials if not t.stopped_early and t.metrics.get("_scalar_score") is not None]
+        if len(observed) < 3:
+            return None
+
+        global_scores = np.array([float(t.metrics["_scalar_score"]) for t in observed], dtype=float)
+        matched = [
+            float(t.metrics["_scalar_score"])
+            for t in observed
+            if all(t.params.get(key) == params.get(key) for key in space)
+        ]
+        if matched:
+            local_scores = np.array(matched, dtype=float)
+            support = len(matched)
+            blend = min(1.0, support / 3.0)
+            mean = float((1.0 - blend) * np.mean(global_scores) + blend * np.mean(local_scores))
+            std = float(max(np.std(local_scores), np.std(global_scores) / max(1.0, math.sqrt(support))))
+            return mean, max(1e-6, std)
+
+        return float(np.mean(global_scores)), max(1e-6, float(np.std(global_scores)))
+
+
+def _pruning_reference_lcb(*, trials: list[Trial], risk_beta: float, min_completed: int = 5) -> float | None:
+    completed = [
+        t
+        for t in trials
+        if t.feasible and not t.stopped_early and t.period_fraction >= 1.0 and t.metrics.get("_scalar_score") is not None
+    ]
+    if len(completed) < min_completed:
         return None
+    lcb_scores = []
+    for trial in completed:
+        trial_std = float((trial.uncertainty or {}).get("predicted_std", 0.0))
+        lcb_scores.append(float(trial.metrics["_scalar_score"]) - risk_beta * trial_std)
+    return max(lcb_scores, default=None)
+
+
+def _build_uncertainty(
+    *,
+    predicted_mean: float | None,
+    predicted_std: float | None,
+    observed_scores: list[float],
+    risk_beta: float,
+) -> dict[str, float] | None:
+    if predicted_mean is None and predicted_std is None and not observed_scores:
+        return None
+    running_mean = float(np.mean(observed_scores)) if observed_scores else float("nan")
+    running_std = float(np.std(observed_scores)) if len(observed_scores) > 1 else 0.0
+    total_std = math.sqrt(max(1e-9, running_std**2 + float(predicted_std or 0.0) ** 2))
+    blended_mean = float(predicted_mean) if predicted_mean is not None else running_mean
+    lcb = blended_mean - risk_beta * total_std
+    return {
+        "predicted_mean": blended_mean,
+        "predicted_std": total_std,
+        "running_mean": running_mean,
+        "running_std": running_std,
+        "lcb": lcb,
+    }
 
 
 class BayesianSampler:
@@ -278,6 +334,7 @@ def optimize(
     partial_period_fractions: list[float] | None,
     output_dir: Path,
 ) -> dict[str, Any]:
+    risk_beta = 1.5
     output_dir.mkdir(parents=True, exist_ok=True)
     normalized_space = _normalize_space(space)
     fractions = sorted(set(partial_period_fractions or [1.0]))
@@ -297,27 +354,30 @@ def optimize(
             period_fraction = 1.0
             fold_scores: list[float] = []
             pred = sampler.predict(trials=trials, space=normalized_space, params=params)
-            predicted_uncertainty = None if pred is None else float(pred[1])
+            pred_mean = None if pred is None else float(pred[0])
+            pred_std = None if pred is None else float(pred[1])
+            uncertainty: dict[str, float] | None = None
             for period_fraction in fractions:
                 last_metrics = {k: float(v) for k, v in evaluate(params, float(period_fraction)).items()}
                 last_metrics["_scalar_score"] = compute_scalar_score(last_metrics, objectives)
                 fold_scores.append(float(last_metrics["_scalar_score"]))
                 feasible = check_constraints(last_metrics, constraints)
+                uncertainty = _build_uncertainty(
+                    predicted_mean=pred_mean,
+                    predicted_std=pred_std,
+                    observed_scores=fold_scores,
+                    risk_beta=risk_beta,
+                )
                 if not feasible and period_fraction < 1.0:
                     stopped_early = True
                     break
                 if period_fraction < 1.0:
-                    completed_scores = [
-                        float(t.metrics.get("_scalar_score", -math.inf))
-                        for t in trials
-                        if t.feasible and not t.stopped_early and t.period_fraction >= 1.0
-                    ]
-                    if len(completed_scores) >= 5:
-                        prune_bar = float(np.quantile(np.array(completed_scores), 0.25))
-                        if float(last_metrics["_scalar_score"]) < (prune_bar - 0.25):
-                            stopped_early = True
-                            feasible = False
-                            break
+                    reference_lcb = _pruning_reference_lcb(trials=trials, risk_beta=risk_beta)
+                    current_lcb = None if uncertainty is None else uncertainty.get("lcb")
+                    if reference_lcb is not None and current_lcb is not None and float(current_lcb) < float(reference_lcb):
+                        stopped_early = True
+                        feasible = False
+                        break
 
             robust_score = float(np.mean(fold_scores) - np.std(fold_scores)) if fold_scores else None
             trial = Trial(
@@ -327,7 +387,7 @@ def optimize(
                 feasible=feasible,
                 stopped_early=stopped_early,
                 period_fraction=float(period_fraction),
-                uncertainty=predicted_uncertainty,
+                uncertainty=uncertainty,
                 fold_scores=list(fold_scores),
                 robust_score=robust_score,
             )
@@ -391,6 +451,10 @@ def optimize(
                 "schema_version": "1.0",
                 "run_type": "optimization_trials",
                 "random_seeds": {"run_seed": int(seed), "numpy_random_seed": int(seed)},
+                "uncertainty_diagnostics": {
+                    "risk_beta": risk_beta,
+                    "fields": ["predicted_mean", "predicted_std", "running_mean", "running_std", "lcb"],
+                },
             },
             indent=2,
             sort_keys=True,
