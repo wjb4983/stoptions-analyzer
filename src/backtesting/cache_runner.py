@@ -1300,12 +1300,31 @@ def run_walk_forward_backtest(
             {
                 "aggregate_metrics": wf_result.aggregate_metrics,
                 "stability": wf_result.stability,
+                "validation_report": wf_result.validation_report,
                 "fold_count": len(wf_result.folds),
             },
             indent=2,
         )
     )
     (run_dir / "split_metadata.json").write_text(json.dumps(split_rows, indent=2))
+    with (run_dir / "fold_performance.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["fold_id", "total_return", "sharpe", "max_drawdown", "turnover_total", "hit_rate"],
+        )
+        writer.writeheader()
+        for row in wf_result.folds:
+            metrics = row.get("oos_metrics", {}) if isinstance(row.get("oos_metrics"), dict) else {}
+            writer.writerow(
+                {
+                    "fold_id": int(row.get("fold_id", -1)),
+                    "total_return": float(metrics.get("total_return", 0.0)),
+                    "sharpe": float(metrics.get("sharpe", 0.0)),
+                    "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
+                    "turnover_total": float(metrics.get("turnover_total", metrics.get("turnover", 0.0))),
+                    "hit_rate": float(metrics.get("hit_rate", 0.0)),
+                }
+            )
     with (run_dir / "fold_boundaries.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(
             handle,
