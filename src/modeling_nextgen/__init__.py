@@ -5,6 +5,13 @@ introducing advanced modeling workflows without changing legacy paradigms.
 """
 
 from .core.contracts import FeatureBuilder, Model, ProbabilisticModel, Validator
+from .core.interfaces import NextGenModelInterface
+from .core.schemas import (
+    OptionSurfaceTensorPayload,
+    PanelFeaturesPayload,
+    RegimeLabelsPayload,
+    UncertaintyOutputPayload,
+)
 from .core.config import NextGenModelingConfig
 
 __all__ = [
@@ -13,4 +20,9 @@ __all__ = [
     "ProbabilisticModel",
     "Validator",
     "NextGenModelingConfig",
+    "NextGenModelInterface",
+    "PanelFeaturesPayload",
+    "OptionSurfaceTensorPayload",
+    "RegimeLabelsPayload",
+    "UncertaintyOutputPayload",
 ]
