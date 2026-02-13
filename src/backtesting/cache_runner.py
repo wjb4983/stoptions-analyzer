@@ -81,6 +81,7 @@ from backtesting.optimization import (
     Constraint,
     Objective,
     BayesianSampler,
+    OverfittingPenaltyConfig,
     RandomSampler,
     TPESampler,
     optimize,
@@ -1361,6 +1362,11 @@ def run_walk_forward_backtest(
     governance_metadata: dict[str, Any] | None = None,
     lineage_parent_manifest: str | None = None,
     stress_controls: dict[str, Any] | None = None,
+    objective_weights: dict[str, float] | None = None,
+    overfitting_penalty: dict[str, float] | None = None,
+    strategy_key: str | None = None,
+    prior_strategy_keys: list[str] | None = None,
+    history_path: Path | None = None,
 ) -> str:
     random.seed(int(cv_seed))
     np.random.seed(int(cv_seed))
@@ -1772,6 +1778,11 @@ def run_strategy_optimization(
     partial_period_fractions: list[float] | None = None,
     governance_metadata: dict[str, Any] | None = None,
     stress_controls: dict[str, Any] | None = None,
+    objective_weights: dict[str, float] | None = None,
+    overfitting_penalty: dict[str, float] | None = None,
+    strategy_key: str | None = None,
+    prior_strategy_keys: list[str] | None = None,
+    history_path: Path | None = None,
 ) -> str:
     random.seed(int(seed))
     np.random.seed(int(seed))
@@ -1841,6 +1852,12 @@ def run_strategy_optimization(
         seed=int(seed),
         partial_period_fractions=partial_period_fractions,
         output_dir=run_dir,
+        objective_weights=objective_weights,
+        overfitting_penalty=OverfittingPenaltyConfig(**(overfitting_penalty or {})),
+        use_walk_forward_objective_metrics=True,
+        history_path=history_path if history_path is not None else run_dir / "optimization_history.jsonl",
+        strategy_key=strategy_key,
+        prior_strategy_keys=prior_strategy_keys,
     )
 
     best_metrics: dict[str, float] = {}
@@ -1887,6 +1904,11 @@ def run_strategy_optimization(
                 "partial_period_fractions": partial_period_fractions,
                 "governance": governance_payload,
                 "stress_controls": dict(stress_controls or {}),
+                "objective_weights": dict(objective_weights or {}),
+                "overfitting_penalty": dict(overfitting_penalty or {}),
+                "strategy_key": strategy_key,
+                "prior_strategy_keys": list(prior_strategy_keys or []),
+                "history_path": str(history_path) if history_path is not None else str(run_dir / "optimization_history.jsonl"),
             },
             indent=2,
             sort_keys=True,

@@ -57,6 +57,27 @@ class Trial:
     robust_score: float | None = None
 
 
+@dataclass(frozen=True)
+class OverfittingPenaltyConfig:
+    train_validation_gap_weight: float = 0.2
+    fold_instability_weight: float = 0.1
+    tail_risk_weight: float = 0.1
+
+
+def _resolve_metric_value(metrics: dict[str, float], objective_name: str) -> float:
+    if objective_name in metrics:
+        return float(metrics[objective_name])
+    alias_candidates = {
+        "tail_risk": ("cvar_95", "expected_shortfall", "tail_expected_shortfall"),
+        "max_drawdown": ("drawdown",),
+        "turnover": ("turnover_total",),
+    }
+    for alias in alias_candidates.get(objective_name, ()):  # pragma: no branch - tiny mapping
+        if alias in metrics:
+            return float(metrics[alias])
+    return float("nan")
+
+
 def compute_bootstrap_reality_check(
     *,
     score_vectors: list[list[float]],
@@ -357,12 +378,100 @@ class BayesianSampler:
         return self._fit_predict(trials=trials, space=space, params=params)
 
 
-def compute_scalar_score(metrics: dict[str, float], objectives: list[Objective]) -> float:
+def compute_scalar_score(
+    metrics: dict[str, float],
+    objectives: list[Objective],
+    *,
+    objective_weights: dict[str, float] | None = None,
+) -> float:
     score = 0.0
     for obj in objectives:
-        value = float(metrics.get(obj.name, -math.inf if obj.sense == "maximize" else math.inf))
-        score += value if obj.sense == "maximize" else -value
+        value = _resolve_metric_value(metrics, obj.name)
+        if math.isnan(value):
+            value = -math.inf if obj.sense == "maximize" else math.inf
+        weight = float((objective_weights or {}).get(obj.name, 1.0))
+        score += weight * (value if obj.sense == "maximize" else -value)
     return score
+
+
+def compute_overfitting_penalty(
+    *,
+    metrics: dict[str, float],
+    fold_scores: list[float],
+    config: OverfittingPenaltyConfig,
+) -> float:
+    train_sharpe = float(metrics.get("train_sharpe", metrics.get("in_sample_sharpe", float("nan"))))
+    validation_sharpe = float(metrics.get("validation_sharpe", metrics.get("oos_sharpe", float("nan"))))
+    gap_penalty = 0.0
+    if not math.isnan(train_sharpe) and not math.isnan(validation_sharpe):
+        gap_penalty = max(0.0, train_sharpe - validation_sharpe) * float(config.train_validation_gap_weight)
+
+    instability_penalty = (float(np.std(fold_scores)) if len(fold_scores) > 1 else 0.0) * float(config.fold_instability_weight)
+
+    tail_risk_value = _resolve_metric_value(metrics, "tail_risk")
+    tail_risk_penalty = 0.0 if math.isnan(tail_risk_value) else abs(float(tail_risk_value)) * float(config.tail_risk_weight)
+
+    direct_penalty = max(0.0, float(metrics.get("probability_of_overfitting", 0.0)))
+    return float(gap_penalty + instability_penalty + tail_risk_penalty + direct_penalty)
+
+
+def _aggregate_walk_forward_metrics(
+    metric_history: list[dict[str, float]],
+    objectives: list[Objective],
+    final_metrics: dict[str, float],
+) -> dict[str, float]:
+    if not metric_history:
+        return dict(final_metrics)
+    out = dict(final_metrics)
+    for obj in objectives:
+        values = [
+            _resolve_metric_value(metrics=row, objective_name=obj.name)
+            for row in metric_history
+        ]
+        finite_vals = [float(v) for v in values if math.isfinite(v)]
+        if not finite_vals:
+            continue
+        out[f"wf_{obj.name}_mean"] = float(np.mean(finite_vals))
+        out[f"wf_{obj.name}_worst"] = float(min(finite_vals) if obj.sense == "maximize" else max(finite_vals))
+        out[f"wf_{obj.name}_final"] = float(finite_vals[-1])
+    return out
+
+
+def _load_prior_trials(
+    *,
+    history_path: Path | None,
+    strategy_key: str | None,
+    prior_strategy_keys: list[str] | None,
+) -> list[Trial]:
+    if history_path is None or not history_path.exists():
+        return []
+    accepted = {str(strategy_key)} if strategy_key else set()
+    accepted.update(str(item) for item in (prior_strategy_keys or []))
+    loaded: list[Trial] = []
+    for raw_line in history_path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            row = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if accepted and str(row.get("strategy_key", "")) not in accepted:
+            continue
+        params = row.get("params") if isinstance(row.get("params"), dict) else None
+        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else None
+        if not params or not metrics:
+            continue
+        loaded.append(
+            Trial(
+                trial_id=int(row.get("trial_id", -len(loaded) - 1)),
+                params={k: v for k, v in params.items()},
+                metrics={k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))},
+                feasible=bool(row.get("feasible", True)),
+                stopped_early=bool(row.get("stopped_early", False)),
+                period_fraction=float(row.get("period_fraction", 1.0)),
+            )
+        )
+    return loaded
 
 
 def check_constraints(metrics: dict[str, float], constraints: list[Constraint]) -> bool:
@@ -420,6 +529,12 @@ def optimize(
     seed: int,
     partial_period_fractions: list[float] | None,
     output_dir: Path,
+    objective_weights: dict[str, float] | None = None,
+    overfitting_penalty: OverfittingPenaltyConfig | None = None,
+    use_walk_forward_objective_metrics: bool = True,
+    history_path: Path | None = None,
+    strategy_key: str | None = None,
+    prior_strategy_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     risk_beta = 1.5
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -430,23 +545,42 @@ def optimize(
 
     rng = np.random.default_rng(seed)
     trials: list[Trial] = []
+    seeded_trials = _load_prior_trials(
+        history_path=history_path,
+        strategy_key=strategy_key,
+        prior_strategy_keys=prior_strategy_keys,
+    )
     jsonl_path = output_dir / "trials.jsonl"
+    penalty_cfg = overfitting_penalty or OverfittingPenaltyConfig()
 
     with jsonl_path.open("w", encoding="utf-8") as handle:
         for trial_id in range(int(n_trials)):
-            params = sampler.sample(trials=trials, space=normalized_space, rng=rng)
+            context_trials = [*seeded_trials, *trials]
+            params = sampler.sample(trials=context_trials, space=normalized_space, rng=rng)
             last_metrics: dict[str, float] = {}
+            metric_history: list[dict[str, float]] = []
             feasible = False
             stopped_early = False
             period_fraction = 1.0
             fold_scores: list[float] = []
-            pred = sampler.predict(trials=trials, space=normalized_space, params=params)
+            pred = sampler.predict(trials=context_trials, space=normalized_space, params=params)
             pred_mean = None if pred is None else float(pred[0])
             pred_std = None if pred is None else float(pred[1])
             uncertainty: dict[str, float] | None = None
             for period_fraction in fractions:
                 last_metrics = {k: float(v) for k, v in evaluate(params, float(period_fraction)).items()}
-                last_metrics["_scalar_score"] = compute_scalar_score(last_metrics, objectives)
+                metric_history.append(dict(last_metrics))
+                scoring_metrics = (
+                    _aggregate_walk_forward_metrics(metric_history, objectives, last_metrics)
+                    if use_walk_forward_objective_metrics
+                    else last_metrics
+                )
+                raw_scalar = compute_scalar_score(scoring_metrics, objectives, objective_weights=objective_weights)
+                overfit_pen = compute_overfitting_penalty(metrics=scoring_metrics, fold_scores=fold_scores, config=penalty_cfg)
+                last_metrics.update(scoring_metrics)
+                last_metrics["_overfit_penalty"] = float(overfit_pen)
+                last_metrics["_raw_scalar_score"] = float(raw_scalar)
+                last_metrics["_scalar_score"] = float(raw_scalar - overfit_pen)
                 fold_scores.append(float(last_metrics["_scalar_score"]))
                 feasible = check_constraints(last_metrics, constraints)
                 uncertainty = _build_uncertainty(
@@ -565,12 +699,35 @@ def optimize(
                     "risk_beta": risk_beta,
                     "fields": ["predicted_mean", "predicted_std", "running_mean", "running_std", "lcb"],
                 },
+                "seeded_prior_trials": len(seeded_trials),
+                "strategy_key": strategy_key,
+                "prior_strategy_keys": list(prior_strategy_keys or []),
             },
             indent=2,
             sort_keys=True,
         ),
         encoding="utf-8",
     )
+
+    if history_path is not None:
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        with history_path.open("a", encoding="utf-8") as handle:
+            for trial in trials:
+                handle.write(
+                    json.dumps(
+                        {
+                            "strategy_key": strategy_key,
+                            "trial_id": int(trial.trial_id),
+                            "params": trial.params,
+                            "metrics": trial.metrics,
+                            "feasible": bool(trial.feasible),
+                            "stopped_early": bool(trial.stopped_early),
+                            "period_fraction": float(trial.period_fraction),
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
 
     return {
         "trial_count": len(trials),
