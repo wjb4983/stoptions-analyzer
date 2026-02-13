@@ -145,6 +145,32 @@ def test_walk_forward_nested_optimization_uses_inner_scores() -> None:
     assert "inner_diagnostics" in result.folds[0]["diagnostics"][0]
 
 
+
+
+def test_walk_forward_validation_report_contains_flags() -> None:
+    folds = build_walk_forward_folds(
+        total_bars=24,
+        train_bars=8,
+        validation_bars=4,
+        test_bars=4,
+        step_bars=4,
+    )
+    candidates = [{"name": "a"}]
+
+    def fake_eval(candidate: dict[str, object], start: int, end: int) -> dict[str, object]:
+        score = 2.0 if end - start >= 8 else 1.0
+        return {"metrics": {"sharpe": score}, "equity": []}
+
+    result = run_walk_forward_optimization(
+        folds=folds,
+        parameter_candidates=candidates,
+        evaluate_segment=fake_eval,
+    )
+
+    assert result.validation_report is not None
+    assert "flags" in result.validation_report
+    assert "overfitting" in result.validation_report["flags"]
+
 def test_persist_walk_forward_outputs(tmp_path) -> None:
     result = WalkForwardResult(
         folds=[
@@ -169,6 +195,8 @@ def test_persist_walk_forward_outputs(tmp_path) -> None:
 
     assert (run_dir / "aggregate_metrics.json").exists()
     assert (run_dir / "stability.json").exists()
+    assert (run_dir / "validation" / "report.json").exists()
+    assert (run_dir / "validation" / "report.txt").exists()
     fold_dir = run_dir / "folds" / "fold_000"
     assert (fold_dir / "selected_params.json").exists()
     rows = list(csv.DictReader((fold_dir / "oos_equity.csv").read_text().splitlines()))
@@ -225,6 +253,8 @@ def test_run_walk_forward_backtest_persists_fold_artifacts(monkeypatch, tmp_path
     assert (fold_dirs[0] / "diagnostics.json").exists()
     assert (run_dirs[0] / "split_metadata.json").exists()
     assert (run_dirs[0] / "fold_boundaries.csv").exists()
+    assert (run_dirs[0] / "fold_performance.csv").exists()
+    assert (run_dirs[0] / "validation" / "report.json").exists()
     summary = (run_dirs[0] / "fold_summary.json").read_text()
     assert "excluded_ranges" in summary
     assert "leakage_checks" in summary

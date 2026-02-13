@@ -48,6 +48,7 @@ class WalkForwardResult:
     aggregate_metrics: dict[str, float]
     stability: dict[str, Any]
     audit: dict[str, Any] | None = None
+    validation_report: dict[str, Any] | None = None
 
 
 def build_walk_forward_folds(
@@ -269,11 +270,13 @@ def run_walk_forward_optimization(
 
     aggregate_metrics = _aggregate_numeric_metrics([row["oos_metrics"] for row in fold_rows])
     stability = _build_stability_summary(selected_keys, fold_rows)
+    validation_report = _build_validation_report(fold_rows=fold_rows, stability=stability, score_metric=score_metric)
     return WalkForwardResult(
         folds=fold_rows,
         aggregate_metrics=aggregate_metrics,
         stability=stability,
         audit={"n_candidates": len(parameter_candidates), "n_folds": len(folds), "score_metric": score_metric},
+        validation_report=validation_report,
     )
 
 
@@ -303,6 +306,15 @@ def persist_walk_forward_outputs(*, run_dir: Path, result: WalkForwardResult) ->
     (run_dir / "aggregate_metrics.json").write_text(json.dumps(result.aggregate_metrics, indent=2))
     (run_dir / "stability.json").write_text(json.dumps(result.stability, indent=2))
     (run_dir / "audit.json").write_text(json.dumps(result.audit or {}, indent=2))
+    validation_dir = run_dir / "validation"
+    validation_dir.mkdir(parents=True, exist_ok=True)
+    validation_payload = result.validation_report or _build_validation_report(
+        fold_rows=result.folds,
+        stability=result.stability,
+        score_metric=str((result.audit or {}).get("score_metric", "sharpe")),
+    )
+    (validation_dir / "report.json").write_text(json.dumps(validation_payload, indent=2))
+    (validation_dir / "report.txt").write_text(_format_validation_report_text(validation_payload))
 
 
 def _aggregate_numeric_metrics(metrics_rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -332,6 +344,91 @@ def _build_stability_summary(selected_keys: list[str], fold_rows: list[dict[str,
         "validation_score_std": float(np.std(validation_scores, ddof=0)) if validation_scores else 0.0,
         "fold_reuse": _build_fold_reuse_diagnostics(fold_rows),
     }
+
+
+def _build_validation_report(
+    *,
+    fold_rows: list[dict[str, Any]],
+    stability: dict[str, Any],
+    score_metric: str,
+) -> dict[str, Any]:
+    fold_scores: list[dict[str, float]] = []
+    train_val_gaps: list[float] = []
+    val_test_gaps: list[float] = []
+    for row in fold_rows:
+        oos_metrics = row.get("oos_metrics", {})
+        diagnostics = row.get("diagnostics", [])
+        best_diag = max(
+            diagnostics,
+            key=lambda item: float(item.get("validation_score", float("-inf"))),
+            default=None,
+        )
+        train_metric = 0.0
+        val_metric = 0.0
+        if isinstance(best_diag, dict):
+            train_metric = float(best_diag.get("train_metrics", {}).get(score_metric, 0.0))
+            val_metric = float(best_diag.get("validation_metrics", {}).get(score_metric, 0.0))
+        oos_metric = float(oos_metrics.get(score_metric, 0.0))
+        fold_scores.append(
+            {
+                "fold_id": int(row.get("fold_id", -1)),
+                "train": train_metric,
+                "validation": val_metric,
+                "test": oos_metric,
+            }
+        )
+        train_val_gaps.append(train_metric - val_metric)
+        val_test_gaps.append(val_metric - oos_metric)
+
+    instability_flags: list[str] = []
+    overfit_flags: list[str] = []
+    validation_std = float(stability.get("validation_score_std", 0.0))
+    if validation_std > 0.75:
+        instability_flags.append("validation_score_variance_high")
+    unique_params = int(stability.get("unique_selected_params", 0))
+    if unique_params > max(2, len(fold_rows) // 2):
+        instability_flags.append("parameter_churn_high")
+    if train_val_gaps and float(np.mean(np.asarray(train_val_gaps, dtype=float))) > 0.2:
+        overfit_flags.append("train_validation_gap_large")
+    if val_test_gaps and float(np.mean(np.asarray(val_test_gaps, dtype=float))) > 0.2:
+        overfit_flags.append("validation_test_decay_large")
+
+    return {
+        "summary": {
+            "score_metric": score_metric,
+            "fold_count": len(fold_rows),
+            "validation_score_std": validation_std,
+            "mean_train_validation_gap": float(np.mean(np.asarray(train_val_gaps, dtype=float))) if train_val_gaps else 0.0,
+            "mean_validation_test_gap": float(np.mean(np.asarray(val_test_gaps, dtype=float))) if val_test_gaps else 0.0,
+        },
+        "flags": {
+            "instability": instability_flags,
+            "overfitting": overfit_flags,
+        },
+        "per_fold_score_ladder": fold_scores,
+    }
+
+
+def _format_validation_report_text(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {})
+    flags = report.get("flags", {})
+    instability = flags.get("instability", []) if isinstance(flags, dict) else []
+    overfitting = flags.get("overfitting", []) if isinstance(flags, dict) else []
+    lines = [
+        "Walk-Forward Validation Report",
+        "==============================",
+        f"Score metric: {summary.get('score_metric', 'sharpe')}",
+        f"Fold count: {int(summary.get('fold_count', 0))}",
+        f"Validation std: {float(summary.get('validation_score_std', 0.0)):.6f}",
+        f"Mean train-validation gap: {float(summary.get('mean_train_validation_gap', 0.0)):.6f}",
+        f"Mean validation-test gap: {float(summary.get('mean_validation_test_gap', 0.0)):.6f}",
+        "",
+        "Instability flags:",
+    ]
+    lines.extend([f"- {item}" for item in instability] or ["- none"])
+    lines.append("Overfitting flags:")
+    lines.extend([f"- {item}" for item in overfitting] or ["- none"])
+    return "\n".join(lines)
 
 
 def _build_fold_reuse_diagnostics(fold_rows: list[dict[str, Any]]) -> dict[str, float]:
