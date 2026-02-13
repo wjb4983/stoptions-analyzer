@@ -271,6 +271,18 @@ def format_backtest_report(
                                 bps=float(row.get("expected_slippage_bps", 0.0)),
                             )
                         )
+            frontier = capacity.get("capacity_frontier", [])
+            if isinstance(frontier, list) and frontier:
+                lines.append("  - Capacity frontier (alpha net costs):")
+                for row in frontier[:4]:
+                    if isinstance(row, dict):
+                        lines.append(
+                            "    - AUM={aum:.0f}, scale={scale:.2f}x, net_alpha={net:.3f} bps".format(
+                                aum=float(row.get("aum", 0.0)),
+                                scale=float(row.get("aum_scale", 0.0)),
+                                net=float(row.get("expected_alpha_net_cost_bps", 0.0)),
+                            )
+                        )
             lines.append("")
 
     return "\n".join(lines)
@@ -646,6 +658,47 @@ def _compute_pbo_style(
     }
 
 
+
+
+def compute_capacity_frontier(
+    *,
+    expected_alpha_bps: float,
+    realized_slippage_bps: float,
+    average_participation_rate: float,
+    base_aum: float = 1_000_000.0,
+    turnover_total: float = 1.0,
+    scales: np.ndarray | None = None,
+) -> list[dict[str, float]]:
+    """Compute a capacity frontier: expected alpha net of trading costs by AUM scale."""
+
+    levels = np.asarray(scales, dtype=float) if scales is not None else np.array([0.25, 0.5, 1.0, 2.0, 4.0, 8.0], dtype=float)
+    levels = levels[np.isfinite(levels) & (levels > 0.0)]
+    if levels.size == 0:
+        levels = np.array([1.0], dtype=float)
+
+    base_participation = max(float(average_participation_rate), 0.01)
+    base_slippage = max(float(realized_slippage_bps), 0.0)
+    alpha = float(expected_alpha_bps)
+    turnover = max(float(turnover_total), 0.0)
+
+    rows: list[dict[str, float]] = []
+    for scale in levels:
+        aum = float(base_aum) * float(scale)
+        scaled_participation = base_participation * float(scale)
+        impact_scale = np.sqrt(max(scaled_participation, 1e-12) / base_participation)
+        projected_slippage_bps = base_slippage * impact_scale
+        net_alpha_bps = alpha - projected_slippage_bps * turnover
+        rows.append(
+            {
+                "aum": float(aum),
+                "aum_scale": float(scale),
+                "participation_rate": float(scaled_participation),
+                "expected_alpha_bps": float(alpha),
+                "projected_slippage_bps": float(projected_slippage_bps),
+                "expected_alpha_net_cost_bps": float(net_alpha_bps),
+            }
+        )
+    return rows
 def _build_capacity_diagnostics(
     *,
     metrics: dict[str, float],
@@ -664,6 +717,7 @@ def _build_capacity_diagnostics(
     levels = np.array([0.01, 0.02, 0.05, 0.10, 0.20, 0.40], dtype=float)
     slippage_curve: list[dict[str, float]] = []
     degradation_curve: list[dict[str, float]] = []
+    realized_alpha_bps = float(metrics.get("turnover_adjusted_return", metrics.get("cagr", 0.0))) * 10_000.0
     for level in levels:
         scale = np.sqrt(level / base_participation) if base_participation > 0 else 1.0
         expected_bps = realized_slippage_bps * scale
@@ -677,11 +731,20 @@ def _build_capacity_diagnostics(
             }
         )
 
+    frontier = compute_capacity_frontier(
+        expected_alpha_bps=realized_alpha_bps,
+        realized_slippage_bps=realized_slippage_bps,
+        average_participation_rate=avg_participation,
+        turnover_total=float(turnover_stats.get("total", 0.0)),
+    )
+
     return {
         "average_participation_rate": avg_participation,
         "realized_slippage_bps": realized_slippage_bps,
+        "expected_alpha_bps": realized_alpha_bps,
         "expected_slippage_curve": slippage_curve,
         "performance_degradation_curve": degradation_curve,
+        "capacity_frontier": frontier,
     }
 
 

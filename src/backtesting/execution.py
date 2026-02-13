@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 
@@ -361,6 +361,145 @@ class FillEvent:
     latency_bars: int
     latency_ms: int
     queue_rank_proxy: float
+
+
+SchedulerStyle = Literal["twap", "vwap", "pov", "arrival_price", "arrival"]
+
+
+@dataclass(frozen=True)
+class ExecutionTrajectory:
+    """Child-order trajectory generated from a parent order."""
+
+    scheduler: str
+    parent_size: float
+    child_sizes: np.ndarray
+    schedule_weights: np.ndarray
+    horizon_bars: int
+
+
+def build_child_order_trajectory(
+    *,
+    parent_size: float,
+    horizon_bars: int,
+    scheduler: SchedulerStyle = "twap",
+    volume_profile: np.ndarray | None = None,
+    pov_rate: float = 0.1,
+    arrival_urgency: float = 2.0,
+) -> ExecutionTrajectory:
+    """Convert a parent order into a scheduled child-order trajectory."""
+
+    horizon = max(1, int(horizon_bars))
+    total_size = float(parent_size)
+    abs_parent = abs(total_size)
+
+    if abs_parent == 0.0:
+        zeros = np.zeros(horizon, dtype=float)
+        return ExecutionTrajectory(
+            scheduler=str(scheduler),
+            parent_size=total_size,
+            child_sizes=zeros,
+            schedule_weights=zeros,
+            horizon_bars=horizon,
+        )
+
+    if scheduler == "twap":
+        weights = np.full(horizon, 1.0 / horizon, dtype=float)
+    elif scheduler == "vwap":
+        if volume_profile is None:
+            weights = np.full(horizon, 1.0 / horizon, dtype=float)
+        else:
+            volume = np.asarray(volume_profile, dtype=float).reshape(-1)
+            if volume.size != horizon:
+                raise ValueError("volume_profile length must match horizon_bars.")
+            volume = np.clip(volume, 0.0, None)
+            denom = float(np.sum(volume))
+            weights = np.full(horizon, 1.0 / horizon, dtype=float) if denom <= 0.0 else volume / denom
+    elif scheduler in {"arrival_price", "arrival"}:
+        urgency = max(float(arrival_urgency), 1e-6)
+        x = np.linspace(0.0, 1.0, horizon)
+        profile = np.exp(-urgency * x)
+        weights = profile / np.sum(profile)
+    elif scheduler == "pov":
+        if volume_profile is None:
+            volume = np.ones(horizon, dtype=float)
+        else:
+            volume = np.asarray(volume_profile, dtype=float).reshape(-1)
+            if volume.size != horizon:
+                raise ValueError("volume_profile length must match horizon_bars.")
+            volume = np.clip(volume, 0.0, None)
+        remaining = abs_parent
+        fills = np.zeros(horizon, dtype=float)
+        cap_rate = max(float(pov_rate), 0.0)
+        for idx in range(horizon):
+            take = min(remaining, cap_rate * float(volume[idx]))
+            fills[idx] = take
+            remaining -= take
+        if remaining > 0:
+            fills[-1] += remaining
+        weights = fills / abs_parent
+    else:
+        raise ValueError(f"Unsupported scheduler: {scheduler}")
+
+    children = np.sign(total_size) * abs_parent * weights
+    return ExecutionTrajectory(
+        scheduler=str(scheduler),
+        parent_size=total_size,
+        child_sizes=children,
+        schedule_weights=weights,
+        horizon_bars=horizon,
+    )
+
+
+def simulate_alpha_decay_pnl(
+    *,
+    parent_size: float,
+    arrival_price: float,
+    scheduler: SchedulerStyle,
+    horizon_bars: int,
+    alpha_bps: float,
+    alpha_half_life_bars: float = 5.0,
+    slippage_bps: float = 2.0,
+    fee_bps: float = 0.5,
+    volume_profile: np.ndarray | None = None,
+    pov_rate: float = 0.1,
+    arrival_urgency: float = 2.0,
+) -> dict[str, float | list[float]]:
+    """Simulate realized alpha PnL with alpha-decay and execution-cost drag."""
+
+    trajectory = build_child_order_trajectory(
+        parent_size=parent_size,
+        horizon_bars=horizon_bars,
+        scheduler=scheduler,
+        volume_profile=volume_profile,
+        pov_rate=pov_rate,
+        arrival_urgency=arrival_urgency,
+    )
+    half_life = max(float(alpha_half_life_bars), 1e-6)
+    decay_lambda = np.log(2.0) / half_life
+    abs_parent = max(abs(float(parent_size)), 1e-12)
+
+    alpha_pnl = 0.0
+    cost_pnl = 0.0
+    realized_alpha_path: list[float] = []
+    for idx, child in enumerate(trajectory.child_sizes):
+        child_abs = abs(float(child))
+        fill_fraction = child_abs / abs_parent
+        alpha_eff_bps = float(alpha_bps) * float(np.exp(-decay_lambda * idx))
+        notional = child_abs * float(arrival_price)
+        alpha_component = notional * (alpha_eff_bps / 10_000.0)
+        cost_component = notional * ((float(slippage_bps) + float(fee_bps)) / 10_000.0)
+        alpha_pnl += alpha_component
+        cost_pnl += cost_component
+        realized_alpha_path.append(alpha_eff_bps * fill_fraction)
+
+    return {
+        "alpha_pnl": float(alpha_pnl),
+        "cost_pnl": float(cost_pnl),
+        "net_pnl": float(alpha_pnl - cost_pnl),
+        "realized_alpha_bps": float(np.sum(realized_alpha_path)),
+        "realized_alpha_path_bps": [float(v) for v in realized_alpha_path],
+        "horizon_bars": int(horizon_bars),
+    }
 
 
 class PartialFillModel:
