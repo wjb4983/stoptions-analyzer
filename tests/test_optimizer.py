@@ -100,6 +100,8 @@ def test_run_strategy_optimization_persists_artifacts(monkeypatch, tmp_path) -> 
     run_dir = run_dirs[0]
     assert (run_dir / "trials.jsonl").exists()
     assert (run_dir / "pareto_frontier.json").exists()
+    assert (run_dir / "oos_score_vectors.json").exists()
+    assert (run_dir / "corrected_significance.json").exists()
     assert "Optimization complete" in output
 
 

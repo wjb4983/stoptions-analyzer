@@ -8,6 +8,8 @@ from typing import Any, Callable, Protocol
 
 import numpy as np
 
+from .perf import benjamini_hochberg_adjusted_pvalues
+
 
 ObjectiveSense = str
 
@@ -51,7 +53,92 @@ class Trial:
     period_fraction: float
     uncertainty: dict[str, float] | None = None
     fold_scores: list[float] | None = None
+    oos_score_vector: list[float] | None = None
     robust_score: float | None = None
+
+
+def compute_bootstrap_reality_check(
+    *,
+    score_vectors: list[list[float]],
+    n_bootstrap: int = 500,
+    seed: int = 42,
+) -> dict[str, float]:
+    """Compute simple White Reality Check / SPA-style bootstrap diagnostics."""
+    valid = [np.asarray(vec, dtype=float) for vec in score_vectors if len(vec) > 0]
+    if not valid:
+        return {
+            "observed_stat": 0.0,
+            "white_reality_check_pvalue": 1.0,
+            "spa_pvalue": 1.0,
+            "n_candidates": 0.0,
+            "n_observations": 0.0,
+        }
+
+    n_obs = int(max(arr.size for arr in valid))
+    aligned = np.column_stack([
+        arr if arr.size == n_obs else np.pad(arr, (0, n_obs - arr.size), mode="edge")
+        for arr in valid
+    ])
+    observed_means = np.mean(aligned, axis=0)
+    observed = float(np.max(observed_means))
+    centered = aligned - observed_means
+    std = np.std(aligned, axis=0, ddof=1)
+    std = np.where(std > 1e-12, std, 1.0)
+
+    rng = np.random.default_rng(seed)
+    white_stats: list[float] = []
+    spa_stats: list[float] = []
+    for _ in range(max(1, int(n_bootstrap))):
+        idx = rng.integers(0, n_obs, size=n_obs)
+        sampled = centered[idx, :]
+        boot_means = np.mean(sampled, axis=0)
+        white_stats.append(float(np.max(boot_means)))
+        spa_stats.append(float(np.max(np.sqrt(n_obs) * boot_means / std)))
+
+    observed_spa = float(np.max(np.sqrt(n_obs) * observed_means / std))
+    return {
+        "observed_stat": observed,
+        "white_reality_check_pvalue": float(np.mean(np.asarray(white_stats) >= observed)) if white_stats else 1.0,
+        "spa_pvalue": float(np.mean(np.asarray(spa_stats) >= observed_spa)) if spa_stats else 1.0,
+        "n_candidates": float(aligned.shape[1]),
+        "n_observations": float(n_obs),
+    }
+
+
+def compute_corrected_pvalues(*, score_vectors: list[list[float]], seed: int = 42) -> dict[str, Any]:
+    """Combine BH-adjusted and bootstrap RC/SPA p-values into corrected significance terms."""
+    valid = [np.asarray(vec, dtype=float) for vec in score_vectors if len(vec) > 0]
+    if not valid:
+        return {
+            "raw_pvalues": [],
+            "bh_adjusted_pvalues": [],
+            "corrected_pvalues": [],
+            "white_reality_check_pvalue": 1.0,
+            "spa_pvalue": 1.0,
+        }
+
+    raw_pvalues: list[float] = []
+    for vec in valid:
+        mean = float(np.mean(vec))
+        std = float(np.std(vec, ddof=1)) if vec.size > 1 else 0.0
+        if std <= 1e-12:
+            raw_pvalues.append(1.0 if mean <= 0.0 else 0.0)
+            continue
+        t_stat = mean / (std / math.sqrt(max(1, vec.size)))
+        raw_pvalues.append(float(0.5 * math.erfc(t_stat / math.sqrt(2.0))))
+
+    bh_adjusted = benjamini_hochberg_adjusted_pvalues(raw_pvalues)
+    bootstrap = compute_bootstrap_reality_check(score_vectors=[vec.tolist() for vec in valid], seed=seed)
+    white_p = float(bootstrap["white_reality_check_pvalue"])
+    spa_p = float(bootstrap["spa_pvalue"])
+    corrected = [float(max(p, white_p, spa_p)) for p in bh_adjusted]
+    return {
+        "raw_pvalues": raw_pvalues,
+        "bh_adjusted_pvalues": bh_adjusted,
+        "corrected_pvalues": corrected,
+        "white_reality_check_pvalue": white_p,
+        "spa_pvalue": spa_p,
+    }
 
 
 class Sampler(Protocol):
@@ -389,6 +476,7 @@ def optimize(
                 period_fraction=float(period_fraction),
                 uncertainty=uncertainty,
                 fold_scores=list(fold_scores),
+                oos_score_vector=list(fold_scores),
                 robust_score=robust_score,
             )
             trials.append(trial)
@@ -403,6 +491,7 @@ def optimize(
                         "period_fraction": trial.period_fraction,
                         "uncertainty": trial.uncertainty,
                         "fold_scores": trial.fold_scores,
+                        "oos_score_vector": trial.oos_score_vector,
                         "robust_score": trial.robust_score,
                     },
                     sort_keys=True,
@@ -445,6 +534,27 @@ def optimize(
         )[:5]
     ]
     (output_dir / "best_robust_params.json").write_text(json.dumps(robust_best, indent=2, sort_keys=True), encoding="utf-8")
+    oos_vectors = [list(t.oos_score_vector or t.fold_scores or []) for t in trials if t.feasible and not t.stopped_early]
+    corrected_significance = compute_corrected_pvalues(score_vectors=oos_vectors, seed=seed)
+    (output_dir / "oos_score_vectors.json").write_text(
+        json.dumps(
+            [
+                {
+                    "trial_id": t.trial_id,
+                    "params": t.params,
+                    "oos_score_vector": list(t.oos_score_vector or t.fold_scores or []),
+                }
+                for t in trials
+            ],
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "corrected_significance.json").write_text(
+        json.dumps(corrected_significance, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     (output_dir / "artifact_metadata.json").write_text(
         json.dumps(
             {
@@ -473,6 +583,7 @@ def optimize(
         "optimization_trace_path": str(output_dir / "optimization_trace.json"),
         "best_robust_params_path": str(output_dir / "best_robust_params.json"),
         "best_robust_params": robust_best,
+        "corrected_significance": corrected_significance,
         "trials_path": str(jsonl_path),
         "pareto_path": str(output_dir / "pareto_frontier.json"),
     }

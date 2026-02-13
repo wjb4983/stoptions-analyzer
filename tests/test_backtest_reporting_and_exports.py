@@ -54,6 +54,10 @@ def test_build_sweep_robustness_report_includes_white_and_spa() -> None:
     assert "spa" in report
     assert 0.0 <= float(report["white_reality_check"]["p_value"]) <= 1.0
     assert 0.0 <= float(report["spa"]["p_value"]) <= 1.0
+    mt = report["multiple_testing"]
+    assert "corrected_pvalues" in mt
+    assert "correction_components" in mt
+    assert "min_corrected_pvalue" in mt
 
 def test_build_drawdown_rows_returns_sorted_worst_first() -> None:
     base = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -430,6 +434,10 @@ def test_persist_sweep_outputs_writes_robustness_report(tmp_path: Path) -> None:
     assert "spa_pvalue" in top_report
     assert (run_dir / "audit_inputs.json").exists()
     assert (run_dir / "audit_outputs.json").exists()
+    leaderboard_rows = list(__import__("csv").DictReader((run_dir / "leaderboard.csv").read_text().splitlines()))
+    assert leaderboard_rows
+    required_cols = {"corrected_pvalue", "white_reality_check_pvalue", "spa_pvalue", "is_significant_corrected_5pct", "is_significant"}
+    assert required_cols.issubset(set(leaderboard_rows[0].keys()))
 
 
 def test_manifest_completeness_includes_replay_fields(tmp_path: Path) -> None:

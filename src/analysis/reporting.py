@@ -650,6 +650,9 @@ def build_sweep_robustness_report(
     else:
         p_values = [float(np.mean(scores >= s)) for s in scores]
     bh_adjusted = benjamini_hochberg_adjusted_pvalues(p_values)
+    white_p = float(white.get("p_value", 1.0)) if isinstance(white, dict) else 1.0
+    spa_p = float(spa.get("p_value", 1.0)) if isinstance(spa, dict) else 1.0
+    corrected = [float(max(p, white_p, spa_p)) for p in bh_adjusted]
 
     return {
         "deflated_sharpe_ratio": dsr,
@@ -662,8 +665,14 @@ def build_sweep_robustness_report(
             "n_hypotheses": int(len(p_values)),
             "raw_pvalues": p_values,
             "bh_adjusted_pvalues": bh_adjusted,
+            "corrected_pvalues": corrected,
+            "correction_components": {
+                "white_reality_check_pvalue": white_p,
+                "spa_pvalue": spa_p,
+            },
             "min_raw_pvalue": float(min(p_values)) if p_values else 1.0,
             "min_bh_adjusted_pvalue": float(min(bh_adjusted)) if bh_adjusted else 1.0,
+            "min_corrected_pvalue": float(min(corrected)) if corrected else 1.0,
         },
     }
 
