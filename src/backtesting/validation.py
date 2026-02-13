@@ -109,16 +109,26 @@ def generate_combinatorial_purged_cv_splits(
     all_idx = np.arange(n_samples, dtype=int)
     splits: list[PurgedSplit] = []
     for split_id, held_out_groups in enumerate(combinations):
-        train_mask = np.ones(n_samples, dtype=bool)
+        held_out_mask = np.zeros(n_samples, dtype=bool)
         test_ranges: list[list[int]] = []
+        purge_ranges: list[list[int]] = []
+        embargo_ranges: list[list[int]] = []
         for group_id in held_out_groups:
             test_start = int(boundaries[group_id])
             test_end = int(boundaries[group_id + 1])
+            held_out_mask[test_start:test_end] = True
             test_ranges.append([test_start, test_end])
+
+        train_mask = ~held_out_mask
+        for test_start, test_end in test_ranges:
             purge_start = max(0, test_start - purge)
             embargo_end = min(n_samples, test_end + embargo)
-            train_mask[purge_start:embargo_end] = False
-        test_idx = all_idx[~train_mask]
+            train_mask[purge_start:test_start] = False
+            train_mask[test_end:embargo_end] = False
+            purge_ranges.append([purge_start, test_start])
+            embargo_ranges.append([test_end, embargo_end])
+
+        test_idx = all_idx[held_out_mask]
         train_idx = all_idx[train_mask]
         splits.append(
             PurgedSplit(
@@ -135,6 +145,8 @@ def generate_combinatorial_purged_cv_splits(
                     "held_out_groups": [int(x) for x in held_out_groups],
                     "group_boundaries": [[int(boundaries[i]), int(boundaries[i + 1])] for i in range(n_groups)],
                     "test_ranges": test_ranges,
+                    "purge_ranges": purge_ranges,
+                    "embargo_ranges": embargo_ranges,
                 },
             )
         )

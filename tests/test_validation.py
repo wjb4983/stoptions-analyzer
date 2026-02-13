@@ -52,3 +52,50 @@ def test_cpcv_split_order_is_deterministic_for_seed() -> None:
         seed=123,
     )
     assert [split.metadata["held_out_groups"] for split in left] == [split.metadata["held_out_groups"] for split in right]
+
+
+def test_cpcv_test_indices_include_only_held_out_groups_for_adjacent_groups() -> None:
+    splits = generate_combinatorial_purged_cv_splits(
+        n_samples=12,
+        n_groups=4,
+        n_test_groups=2,
+        purge_window_bars=3,
+        embargo_window_bars=3,
+        seed=5,
+    )
+
+    split = next(s for s in splits if s.metadata["held_out_groups"] == [1, 2])
+    assert split.test_indices.tolist() == [3, 4, 5, 6, 7, 8]
+    assert set(split.train_indices.tolist()).isdisjoint(set(split.test_indices.tolist()))
+
+
+def test_cpcv_test_indices_include_only_held_out_groups_for_non_adjacent_groups() -> None:
+    splits = generate_combinatorial_purged_cv_splits(
+        n_samples=12,
+        n_groups=4,
+        n_test_groups=2,
+        purge_window_bars=3,
+        embargo_window_bars=3,
+        seed=11,
+    )
+
+    split = next(s for s in splits if s.metadata["held_out_groups"] == [0, 2])
+    assert split.test_indices.tolist() == [0, 1, 2, 6, 7, 8]
+    assert set(split.train_indices.tolist()).isdisjoint(set(split.test_indices.tolist()))
+
+
+def test_cpcv_large_purge_embargo_do_not_expand_test_set() -> None:
+    splits = generate_combinatorial_purged_cv_splits(
+        n_samples=15,
+        n_groups=5,
+        n_test_groups=1,
+        purge_window_bars=10,
+        embargo_window_bars=10,
+        seed=0,
+    )
+
+    split = next(s for s in splits if s.metadata["held_out_groups"] == [2])
+    assert split.test_indices.tolist() == [6, 7, 8]
+    assert split.train_indices.size == 0
+    assert split.metadata["purge_ranges"] == [[0, 6]]
+    assert split.metadata["embargo_ranges"] == [[9, 15]]
