@@ -103,9 +103,9 @@ METRIC_TABLE_SCHEMA_VERSIONS: dict[str, str] = {
 PROMOTION_STATES = ("research", "paper", "shadow", "production")
 PROMOTION_REQUIRED_CHECKS: dict[str, list[str]] = {
     "research": ["dataset_lock", "signal_diagnostics"],
-    "paper": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "drift_monitoring", "friction_adjusted_edge"],
-    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge"],
-    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "approval"],
+    "paper": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "drift_monitoring", "friction_adjusted_edge", "causal_robustness"],
+    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness"],
+    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness", "approval"],
 }
 
 
@@ -3609,11 +3609,19 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "max_fill_slippage_drift_bps": _float("max_fill_slippage_drift_bps", 5.0),
         "max_pnl_attribution_divergence": _float("max_pnl_attribution_divergence", 0.15),
         "min_friction_adjusted_edge": _float("min_friction_adjusted_edge", 0.0),
+        "min_causal_effect_tstat": _float("min_causal_effect_tstat", 1.96),
+        "max_pretrend_pvalue": _float("max_pretrend_pvalue", 0.10),
+        "min_placebo_pvalue": _float("min_placebo_pvalue", 0.05),
+        "max_relative_attenuation": _float("max_relative_attenuation", 0.50),
     }
 
     drift_monitoring = evaluate_drift_monitoring(
         expected=source.get("expected_outcomes") if isinstance(source.get("expected_outcomes"), dict) else {},
         observed=source.get("observed_outcomes") if isinstance(source.get("observed_outcomes"), dict) else {},
+        thresholds=gate_thresholds,
+    )
+    causal_robustness = _evaluate_causal_robustness(
+        causal_validation=source.get("causal_validation") if isinstance(source.get("causal_validation"), dict) else {},
         thresholds=gate_thresholds,
     )
 
@@ -3626,6 +3634,7 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "signal_diagnostics": bool(checks.get("signal_diagnostics", False)),
         "drift_monitoring": bool(drift_monitoring.get("within_tolerance", False)),
         "friction_adjusted_edge": bool(checks.get("friction_adjusted_edge", False)),
+        "causal_robustness": bool(causal_robustness.get("pass", False)),
     }
 
     missing_required = [name for name in required_checks if not gate_checks.get(name, False)]
@@ -3641,6 +3650,7 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "gate_thresholds": gate_thresholds,
         "gate_checks": gate_checks,
         "drift_monitoring": drift_monitoring,
+        "causal_robustness": causal_robustness,
         "missing_required_checks": missing_required,
         "is_promotion_ready": not missing_required,
         "audit_trail": [
@@ -3679,6 +3689,7 @@ def _evaluate_governance_gate_checks(
     signal_diag_ready = bool(metrics.get("signal_diagnostics_ready", False))
     drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
     drift_within_tolerance = bool(drift_monitoring.get("within_tolerance", False))
+    causal_robustness = governance.get("causal_robustness", {}) if isinstance(governance.get("causal_robustness"), dict) else {}
 
     checks = {
         "dataset_lock": bool(governance.get("dataset_snapshot_lock")),
@@ -3689,8 +3700,49 @@ def _evaluate_governance_gate_checks(
         "approval": str(governance.get("approval_status", "pending")).lower() in {"approved", "waived"},
         "drift_monitoring": drift_within_tolerance,
         "friction_adjusted_edge": float(metrics.get("friction_adjusted_edge", float("-inf"))) >= float(thresholds.get("min_friction_adjusted_edge", 0.0)),
+        "causal_robustness": bool(causal_robustness.get("pass", False)),
     }
     return checks
+
+
+def _evaluate_causal_robustness(*, causal_validation: dict[str, Any], thresholds: dict[str, float]) -> dict[str, Any]:
+    methods = causal_validation.get("methods") if isinstance(causal_validation.get("methods"), list) else []
+    method_results: list[dict[str, Any]] = []
+    for entry in methods:
+        if not isinstance(entry, dict):
+            continue
+        method = str(entry.get("method", "unknown")).strip().lower()
+        effect_tstat = float(entry.get("effect_tstat", 0.0))
+        pretrend_pvalue = float(entry.get("pretrend_pvalue", 0.0))
+        placebo_pvalue = float(entry.get("placebo_pvalue", 0.0))
+        relative_attenuation = float(entry.get("relative_attenuation", 1.0))
+        passed = (
+            effect_tstat >= float(thresholds.get("min_causal_effect_tstat", 1.96))
+            and pretrend_pvalue >= float(thresholds.get("max_pretrend_pvalue", 0.10))
+            and placebo_pvalue >= float(thresholds.get("min_placebo_pvalue", 0.05))
+            and relative_attenuation <= float(thresholds.get("max_relative_attenuation", 0.50))
+        )
+        method_results.append(
+            {
+                "method": method,
+                "effect_tstat": effect_tstat,
+                "pretrend_pvalue": pretrend_pvalue,
+                "placebo_pvalue": placebo_pvalue,
+                "relative_attenuation": relative_attenuation,
+                "pass": bool(passed),
+            }
+        )
+
+    required_methods = {"difference_in_differences", "synthetic_control", "propensity_score_matching"}
+    available = {str(row.get("method", "")).lower() for row in method_results}
+    missing_methods = sorted(required_methods - available)
+    overall_pass = bool(method_results) and not missing_methods and all(bool(row.get("pass", False)) for row in method_results)
+    return {
+        "required_methods": sorted(required_methods),
+        "missing_methods": missing_methods,
+        "method_results": method_results,
+        "pass": overall_pass,
+    }
 
 def _append_experiment_index(entry: dict[str, Any]) -> None:
     append_experiment_entry(BACKTEST_OUTPUT_DIR, entry)
