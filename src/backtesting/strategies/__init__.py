@@ -21,6 +21,9 @@ __all__ = [
     "meta_model_weighting",
     "dynamic_model_weights",
     "rolling_dynamic_ensemble",
+    "RegimeMetaPolicyConfig",
+    "build_regime_weight_schedule",
+    "apply_weight_schedule",
     "AlphaStrategyPlugin",
     "FeatureBatch",
     "LabelSpec",
@@ -39,6 +42,9 @@ __all__ = [
 
 
 from .ensemble import (
+    RegimeMetaPolicyConfig,
+    apply_weight_schedule,
+    build_regime_weight_schedule,
     dynamic_model_weights,
     meta_model_weighting,
     risk_budgeted_blend,

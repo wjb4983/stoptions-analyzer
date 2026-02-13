@@ -66,6 +66,7 @@ from backtesting.regimes import (
     resolve_regime_parameters,
 )
 from backtesting.strategies import CrossSectionalMomentumConfig, build_cross_sectional_momentum_targets
+from backtesting.strategies.ensemble import RegimeMetaPolicyConfig, build_regime_weight_schedule
 from backtesting.walk_forward import (
     build_cpcv_walk_forward_folds,
     build_walk_forward_folds,
@@ -465,6 +466,11 @@ def run_time_series_momentum_backtest(
     metrics["cost_total"] = cost_totals.get("total", 0.0)
 
     regime_pnl_attribution = attribute_pnl_by_regime(pnl=pnl, regime_labels=regime_labels)
+    regime_ensemble_report = _build_regime_ensemble_comparison(
+        prices=prices,
+        missing_mask=arrays.missing_mask,
+        regime_labels=regime_labels,
+    )
 
     governance_payload = _build_governance_metadata(governance_metadata)
 
@@ -575,6 +581,7 @@ def run_time_series_momentum_backtest(
         scenario_payload=scenario_payload,
         regime_labels=regime_labels,
         regime_pnl_attribution=regime_pnl_attribution,
+        regime_ensemble_report=regime_ensemble_report,
         governance=governance_payload,
         corporate_action_splits=arrays.split_factors,
         corporate_action_dividends=arrays.dividends,
@@ -607,7 +614,12 @@ def run_time_series_momentum_backtest(
     (run_dir / "fills.csv").write_text(_fills_csv(fill_rows))
     (run_dir / "fills.json").write_text(json.dumps(fill_rows, indent=2))
 
-    final_report = report_text + "\n\n" + trade_log_summary
+    ensemble_lines = ["Regime Ensemble Comparison:"]
+    for row in regime_ensemble_report.get("comparison", []):
+        ensemble_lines.append(
+            f"- {row['policy']}: total_return={row['total_return']:.6f} sharpe={row['sharpe']:.6f} max_drawdown={row['max_drawdown']:.6f}"
+        )
+    final_report = report_text + "\n\n" + trade_log_summary + "\n\n" + "\n".join(ensemble_lines)
     (run_dir / "report.txt").write_text(final_report)
 
     return final_report + f"\n\nSaved outputs to: {run_dir}"
@@ -2480,6 +2492,128 @@ def _run_stress_scenario_wrappers(*, returns: np.ndarray, prices: np.ndarray, sc
     return rows
 
 
+def _compute_stream_metrics(returns: np.ndarray) -> dict[str, float]:
+    arr = np.asarray(returns, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return {"total_return": 0.0, "mean_return": 0.0, "volatility": 0.0, "sharpe": 0.0, "max_drawdown": 0.0}
+    equity = np.cumprod(1.0 + arr)
+    total = float(equity[-1] - 1.0)
+    mean = float(np.mean(arr))
+    vol = float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0
+    sharpe = float(mean / vol * np.sqrt(252.0)) if vol > 0.0 else 0.0
+    running_peak = np.maximum.accumulate(equity)
+    safe_peak = np.where(running_peak == 0.0, 1.0, running_peak)
+    drawdown = equity / safe_peak - 1.0
+    return {
+        "total_return": total,
+        "mean_return": mean,
+        "volatility": vol,
+        "sharpe": sharpe,
+        "max_drawdown": float(np.min(drawdown)) if drawdown.size else 0.0,
+    }
+
+
+def _build_regime_ensemble_comparison(
+    *,
+    prices: np.ndarray,
+    missing_mask: np.ndarray,
+    regime_labels: np.ndarray,
+) -> dict[str, Any]:
+    px = np.asarray(prices, dtype=float)
+    rets = np.zeros_like(px, dtype=float)
+    rets[1:] = px[1:] / np.where(px[:-1] == 0.0, 1.0, px[:-1]) - 1.0
+    market_ret = np.nanmean(np.where(np.isfinite(rets), rets, 0.0), axis=1)
+
+    strat_defs = [
+        ("ts_momentum", {"lookback_days": 60, "skip_days": 5}),
+        ("ma_trend", {"ma_window": 30}),
+        ("mean_reversion", {"lookback_days": 20, "zscore_threshold": 1.0}),
+    ]
+    strategy_names = tuple(name for name, _ in strat_defs)
+    sleeves = np.zeros((px.shape[0], len(strat_defs)), dtype=float)
+
+    for col, (name, params) in enumerate(strat_defs):
+        entry_cfg = parse_entry_signal_config(name, params, default_lookback_days=60, default_skip_days=5)
+        exit_cfg = parse_exit_signal_config("none", {}, default_lookback_days=60, default_skip_days=5)
+        targets = build_targets(
+            close_prices=px,
+            missing_mask=missing_mask,
+            entry_config=entry_cfg,
+            exit_config=exit_cfg,
+        )
+        sleeves[:, col] = np.nanmean(targets, axis=1) * market_ret
+
+    always_weights = np.full(len(strat_defs), 1.0 / len(strat_defs), dtype=float)
+    always_on = sleeves @ always_weights
+
+    gated_map: dict[str, tuple[float, ...]] = {}
+    weighted_map: dict[str, tuple[float, ...]] = {}
+    for label in sorted(set(str(x) for x in regime_labels.tolist())):
+        is_up = "trend_up" in label and "macro_risk_on" in label
+        is_risk_off = "macro_risk_off" in label or "vol_high" in label
+        if is_up:
+            gated_map[label] = (1.0, 0.0, 0.0)
+            weighted_map[label] = (0.70, 0.20, 0.10)
+        elif is_risk_off:
+            gated_map[label] = (0.0, 0.0, 1.0)
+            weighted_map[label] = (0.15, 0.20, 0.65)
+        else:
+            gated_map[label] = (0.0, 1.0, 0.0)
+            weighted_map[label] = (0.25, 0.55, 0.20)
+
+    gated_cfg = RegimeMetaPolicyConfig(
+        strategy_names=strategy_names,
+        regime_weight_map=gated_map,
+        default_weights=tuple(always_weights.tolist()),
+        turnover_limit=1.0,
+        max_weight=1.0,
+        min_weight=0.0,
+    )
+    gated_schedule, gated_diag = build_regime_weight_schedule(regime_labels=regime_labels, config=gated_cfg)
+    regime_gated = np.sum(sleeves * gated_schedule, axis=1)
+
+    weighted_cfg = RegimeMetaPolicyConfig(
+        strategy_names=strategy_names,
+        regime_weight_map=weighted_map,
+        default_weights=tuple(always_weights.tolist()),
+        turnover_limit=0.25,
+        max_weight=0.70,
+        min_weight=0.05,
+    )
+    weighted_schedule, weighted_diag = build_regime_weight_schedule(regime_labels=regime_labels, config=weighted_cfg)
+    regime_weighted = np.sum(sleeves * weighted_schedule, axis=1)
+
+    series = {
+        "always_on_baseline": always_on,
+        "regime_gated": regime_gated,
+        "regime_weighted": regime_weighted,
+    }
+    comparison_rows = []
+    for name, stream in series.items():
+        row = {"policy": name}
+        row.update(_compute_stream_metrics(stream))
+        comparison_rows.append(row)
+
+    return {
+        "strategy_names": list(strategy_names),
+        "comparison": comparison_rows,
+        "regime_attribution": {
+            name: attribute_pnl_by_regime(pnl=stream, regime_labels=regime_labels)
+            for name, stream in series.items()
+        },
+        "meta_policy_diagnostics": {
+            "gated": {
+                "mean_turnover": float(np.mean(gated_diag.get("meta_turnover", np.array([0.0])))),
+                "max_concentration": float(np.max(gated_diag.get("meta_concentration", np.array([0.0])))),
+            },
+            "weighted": {
+                "mean_turnover": float(np.mean(weighted_diag.get("meta_turnover", np.array([0.0])))),
+                "max_concentration": float(np.max(weighted_diag.get("meta_concentration", np.array([0.0])))),
+            },
+        },
+    }
+
+
 def _persist_backtest_outputs(
     *,
     timestamps: np.ndarray,
@@ -2497,6 +2631,7 @@ def _persist_backtest_outputs(
     scenario_payload: dict[str, Any] | None = None,
     regime_labels: np.ndarray | None = None,
     regime_pnl_attribution: list[dict[str, float | str | int]] | None = None,
+    regime_ensemble_report: dict[str, Any] | None = None,
     governance: dict[str, Any] | None = None,
     corporate_action_splits: np.ndarray | None = None,
     corporate_action_dividends: np.ndarray | None = None,
@@ -2566,6 +2701,8 @@ def _persist_backtest_outputs(
             run_dir=run_dir,
             rows=regime_pnl_attribution,
         )
+    if regime_ensemble_report is not None:
+        _write_regime_ensemble_comparison(run_dir=run_dir, report=regime_ensemble_report)
 
     _write_corporate_actions_applied_csv(
         run_dir=run_dir,
@@ -3526,6 +3663,19 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _write_regime_ensemble_comparison(*, run_dir: Path, report: dict[str, Any]) -> None:
+    comparison = list(report.get("comparison", []))
+    csv_path = run_dir / "regime_ensemble_comparison.csv"
+    fieldnames = ["policy", "total_return", "mean_return", "volatility", "sharpe", "max_drawdown"]
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in comparison:
+            writer.writerow({key: row.get(key, 0.0 if key != "policy" else "") for key in fieldnames})
+    (run_dir / "regime_ensemble_comparison.json").write_text(json.dumps(report, indent=2))
+
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = _build_parser()
@@ -3654,3 +3804,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
