@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import statistics
 from typing import Any
 
 
@@ -85,6 +86,7 @@ def build_guardrails(
     fold_rows: list[dict[str, Any]] | None = None,
     trade_count: int | None = None,
     robustness: dict[str, Any] | None = None,
+    evidence_links: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
     badges: list[dict[str, str]] = []
     sharpe = float(metrics.get("sharpe", 0.0)) if "sharpe" in metrics else None
@@ -117,7 +119,68 @@ def build_guardrails(
 
     if not badges:
         badges.append({"label": "Guardrails OK", "severity": "low", "reason": "No obvious stability alerts."})
+    if evidence_links:
+        for badge in badges:
+            label = str(badge.get("label", "")).lower().replace(" ", "_")
+            link = evidence_links.get(label) or evidence_links.get("default")
+            if link:
+                badge["artifact"] = link
     return badges
+
+
+def fold_variance_rows(base_rows: list[dict[str, Any]], other_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _collect(rows: list[dict[str, Any]]) -> dict[str, list[float]]:
+        collected: dict[str, list[float]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for key, value in row.items():
+                if isinstance(value, (int, float)):
+                    collected.setdefault(str(key), []).append(float(value))
+            diag = row.get("diagnostics")
+            if isinstance(diag, dict):
+                for key, value in diag.items():
+                    if isinstance(value, (int, float)):
+                        collected.setdefault(f"diagnostics.{key}", []).append(float(value))
+        return collected
+
+    left = _collect(base_rows)
+    right = _collect(other_rows)
+    rows: list[dict[str, Any]] = []
+    for metric in sorted(set(left) & set(right)):
+        lvals = left.get(metric, [])
+        rvals = right.get(metric, [])
+        if len(lvals) < 2 or len(rvals) < 2:
+            continue
+        lstd = statistics.pstdev(lvals)
+        rstd = statistics.pstdev(rvals)
+        rows.append(
+            {
+                "metric": metric,
+                "base_mean": statistics.mean(lvals),
+                "compare_mean": statistics.mean(rvals),
+                "delta_mean": statistics.mean(rvals) - statistics.mean(lvals),
+                "base_std": lstd,
+                "compare_std": rstd,
+                "delta_std": rstd - lstd,
+                "base_n": len(lvals),
+                "compare_n": len(rvals),
+            }
+        )
+    rows.sort(key=lambda row: abs(float(row["delta_std"])), reverse=True)
+    return rows
+
+
+def insights_table_schema(rows: list[dict[str, Any]]) -> list[str]:
+    schema: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in row.keys():
+            name = str(key)
+            if name not in schema:
+                schema.append(name)
+    return schema
 
 
 def build_scenario_comparison(base_payload: dict[str, Any], other_payload: dict[str, Any]) -> list[dict[str, Any]]:
