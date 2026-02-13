@@ -83,3 +83,34 @@ def test_scenario_attribution_and_guardrails_emit_rows() -> None:
     assert len(attribution) == 2
     assert len(guardrails) == 2
     assert any(not row["passed"] for row in guardrails)
+
+
+def test_stress_scenario_controls_enable_regime_replay_and_overlays() -> None:
+    definitions = cache_runner._build_stress_scenario_definitions(
+        timestamps=np.arange(_fixture_returns().size, dtype=np.int64),
+        returns=_fixture_returns(),
+        controls={
+            "enable_historical_replay_regimes": True,
+            "historical_replay_window_bars": 3,
+            "synthetic_jump_magnitude": 0.05,
+            "overlay_spread_multiplier": 3.0,
+            "overlay_liquidity_multiplier": 0.3,
+        },
+    )
+    names = {row["name"] for row in definitions}
+    assert "historical_volatility_shock_window" in names
+    assert "synthetic_jump_cluster" in names
+    assert "synthetic_liquidity_spread_overlay" in names
+
+
+def test_stress_gate_summary_flags_failures() -> None:
+    payload = {
+        "scenario_guardrails": [
+            {"scenario": "a", "passed": True},
+            {"scenario": "b", "passed": False},
+        ]
+    }
+    summary = cache_runner._stress_gate_summary(payload)
+    assert summary["stress_passed"] is False
+    assert summary["stress_failed_scenarios"] == 1
+    assert summary["stress_total_scenarios"] == 2
