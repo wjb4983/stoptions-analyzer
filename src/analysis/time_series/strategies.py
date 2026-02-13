@@ -6,6 +6,7 @@ from typing import Callable, Iterable
 import numpy as np
 
 from ..common import estimate_volatility, extract_close_volume, quantile_bucket_sizes
+from ..diagnostics import compute_signal_diagnostics
 from .base import TimeSeriesResult
 from utils.parsing import _coerce_number
 
@@ -385,6 +386,7 @@ def _rank_scores(
     metadata: dict[str, object] | None = None,
 ) -> TimeSeriesResult:
     if not scores:
+        diagnostics = compute_signal_diagnostics(scores={}, weights={}, prices_by_ticker=prices_by_ticker)
         return TimeSeriesResult(
             scores={},
             ranking=[],
@@ -395,6 +397,7 @@ def _rank_scores(
                 **(metadata or {}),
                 "top_quantile": settings.top_quantile,
                 "bottom_quantile": settings.bottom_quantile,
+                "diagnostics": diagnostics,
             },
             skipped=skipped,
         )
@@ -440,6 +443,11 @@ def _rank_scores(
             "use_multi_horizon": settings.use_multi_horizon,
             "use_zscore": settings.use_zscore,
             "winsorize_sigma": settings.winsorize_sigma,
+            "diagnostics": compute_signal_diagnostics(
+                scores={ticker: float(score) for ticker, score in zip(tickers, values)},
+                weights=weights,
+                prices_by_ticker=prices_by_ticker,
+            ),
         },
         skipped=skipped,
         metrics=metrics,

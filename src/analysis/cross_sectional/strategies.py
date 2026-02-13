@@ -6,6 +6,7 @@ from typing import Callable
 import numpy as np
 
 from ..common import extract_close_volume
+from ..diagnostics import compute_signal_diagnostics
 from .base import CrossSectionalResult
 from utils.parsing import _coerce_number
 
@@ -48,7 +49,7 @@ def compute_cross_sectional_low_volatility(
             skipped[ticker] = "invalid_price"
             continue
         scores[ticker] = -vol
-    return _rank_scores(scores, skipped, settings, metadata={"strategy": "low_volatility"})
+    return _rank_scores(scores, skipped, settings, prices_by_ticker, metadata={"strategy": "low_volatility"})
 
 
 def compute_cross_sectional_liquidity(
@@ -69,7 +70,7 @@ def compute_cross_sectional_liquidity(
             skipped[ticker] = "missing_volume"
             continue
         scores[ticker] = float(np.mean(np.log1p(dollar_volume)))
-    return _rank_scores(scores, skipped, settings, metadata={"strategy": "liquidity"})
+    return _rank_scores(scores, skipped, settings, prices_by_ticker, metadata={"strategy": "liquidity"})
 
 
 def compute_cross_sectional_value(
@@ -101,7 +102,7 @@ def compute_cross_sectional_size(
             skipped[ticker] = "missing_market_cap"
             continue
         scores[ticker] = -float(np.log(market_cap))
-    return _rank_scores(scores, skipped, settings, metadata={"strategy": "size"})
+    return _rank_scores(scores, skipped, settings, prices_by_ticker, metadata={"strategy": "size"})
 
 
 def compute_cross_sectional_quality(
@@ -195,7 +196,7 @@ def _missing_data_result(
     strategy: str,
 ) -> CrossSectionalResult:
     skipped = {ticker: reason for ticker in prices_by_ticker}
-    return _rank_scores({}, skipped, settings, metadata={"strategy": strategy})
+    return _rank_scores({}, skipped, settings, prices_by_ticker, metadata={"strategy": strategy})
 
 
 def _latest_close(series: list[float] | list[dict] | tuple[float, ...]) -> float | None:
@@ -210,16 +211,23 @@ def _rank_scores(
     scores: dict[str, float],
     skipped: dict[str, str],
     settings: CrossSectionalSettings,
+    prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
     metadata: dict[str, object] | None = None,
 ) -> CrossSectionalResult:
     if not scores:
+        diagnostics = compute_signal_diagnostics(scores={}, weights={}, prices_by_ticker=prices_by_ticker)
         return CrossSectionalResult(
             scores={},
             ranking=[],
             longs=[],
             shorts=[],
             weights={},
-            metadata={**(metadata or {}), "top_quantile": settings.top_quantile, "bottom_quantile": settings.bottom_quantile},
+            metadata={
+                **(metadata or {}),
+                "top_quantile": settings.top_quantile,
+                "bottom_quantile": settings.bottom_quantile,
+                "diagnostics": diagnostics,
+            },
             skipped=skipped,
         )
     tickers = list(scores.keys())
@@ -240,12 +248,22 @@ def _rank_scores(
         weights.update({ticker: 1.0 / len(longs) for ticker in longs})
     if shorts:
         weights.update({ticker: -1.0 / len(shorts) for ticker in shorts})
+    diagnostics = compute_signal_diagnostics(
+        scores={ticker: float(score) for ticker, score in zip(tickers, values)},
+        weights=weights,
+        prices_by_ticker=prices_by_ticker,
+    )
     return CrossSectionalResult(
         scores=scores,
         ranking=ranking,
         longs=longs,
         shorts=shorts,
         weights=weights,
-        metadata={**(metadata or {}), "top_quantile": settings.top_quantile, "bottom_quantile": settings.bottom_quantile},
+        metadata={
+            **(metadata or {}),
+            "top_quantile": settings.top_quantile,
+            "bottom_quantile": settings.bottom_quantile,
+            "diagnostics": diagnostics,
+        },
         skipped=skipped,
     )
