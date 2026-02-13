@@ -9,6 +9,7 @@ from src.backtesting.optimization import (
     Constraint,
     DiscreteDimension,
     Objective,
+    OverfittingPenaltyConfig,
     TPESampler,
     Trial,
     pareto_frontier,
@@ -236,3 +237,113 @@ def test_run_strategy_optimization_supports_bayesian_sampler(monkeypatch, tmp_pa
     assert manifest["sampler"] == "bayesian"
     assert "search_space" in manifest
     assert "Top robust sets" in output
+
+
+def test_optimize_persists_history_and_transfers_priors(tmp_path) -> None:
+    history = tmp_path / "shared_history.jsonl"
+
+    def evaluate(params: dict[str, object], fraction: float) -> dict[str, float]:
+        x = int(params["x"])
+        return {
+            "sharpe": float(x) * float(fraction),
+            "max_drawdown": -0.2 + 0.05 * x,
+            "turnover_total": float(5 - x),
+            "trade_count": 10.0,
+            "cvar_95": 0.02 * float(6 - x),
+            "train_sharpe": float(x) + 0.2,
+            "validation_sharpe": float(x) * 0.9,
+        }
+
+    optimize(
+        space={"x": [1, 2, 3]},
+        evaluate=evaluate,
+        objectives=[
+            Objective("sharpe", "maximize"),
+            Objective("max_drawdown", "maximize"),
+            Objective("turnover_total", "minimize"),
+            Objective("tail_risk", "minimize"),
+        ],
+        constraints=[Constraint(metric="trade_count", min_value=1.0)],
+        sampler=BayesianSampler(random_fraction=0.0, candidate_pool_size=16),
+        n_trials=6,
+        seed=21,
+        partial_period_fractions=[0.5, 1.0],
+        output_dir=tmp_path / "first",
+        history_path=history,
+        strategy_key="mom_a",
+        objective_weights={"sharpe": 1.0, "tail_risk": 0.5},
+        overfitting_penalty=OverfittingPenaltyConfig(train_validation_gap_weight=0.5),
+    )
+
+    out = optimize(
+        space={"x": [1, 2, 3]},
+        evaluate=evaluate,
+        objectives=[Objective("sharpe", "maximize")],
+        constraints=[Constraint(metric="trade_count", min_value=1.0)],
+        sampler=BayesianSampler(random_fraction=0.0, candidate_pool_size=16),
+        n_trials=4,
+        seed=22,
+        partial_period_fractions=[0.5, 1.0],
+        output_dir=tmp_path / "second",
+        history_path=history,
+        strategy_key="mom_b",
+        prior_strategy_keys=["mom_a"],
+    )
+
+    assert history.exists()
+    lines = [line for line in history.read_text().splitlines() if line.strip()]
+    assert len(lines) >= 10
+
+    metadata = json.loads((tmp_path / "second" / "artifact_metadata.json").read_text())
+    assert metadata["seeded_prior_trials"] > 0
+    assert metadata["prior_strategy_keys"] == ["mom_a"]
+
+    trial_rows = [json.loads(line) for line in (tmp_path / "second" / "trials.jsonl").read_text().splitlines() if line.strip()]
+    assert all("_overfit_penalty" in row["metrics"] for row in trial_rows)
+    assert out["trial_count"] == 4
+
+
+def test_run_strategy_optimization_writes_history_and_manifest_controls(monkeypatch, tmp_path) -> None:
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+
+    def fake_combo(payload: dict[str, object]) -> dict[str, object]:
+        idx = int(payload["combo_index"])
+        frac = float(payload.get("partial_period_fraction", 1.0))
+        return {
+            "sharpe": float(2.0 - abs(idx - 1)) * frac,
+            "turnover_total": float(idx + 1),
+            "max_drawdown": -0.1,
+            "trade_count": 5.0,
+            "cvar_95": 0.01 * float(idx + 1),
+            "train_sharpe": 1.2,
+            "validation_sharpe": 1.0,
+        }
+
+    monkeypatch.setattr(cache_runner, "_execute_sweep_combo", fake_combo)
+    history_path = tmp_path / "shared.jsonl"
+
+    cache_runner.run_strategy_optimization(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 5),
+        cache_root=tmp_path / "cache",
+        entry_grid={"ts_momentum": [{}]},
+        exit_grid={"none": [{}]},
+        core_grid={"lookback_days": [20], "skip_days": [5], "costs_bps": [1.0, 2.0, 3.0]},
+        seed=9,
+        n_trials=5,
+        sampler_name="bayesian",
+        search_space={"combo_index": {"type": "discrete", "values": [0, 1, 2]}},
+        partial_period_fractions=[0.5, 1.0],
+        objective_weights={"sharpe": 1.0, "tail_risk": 0.4},
+        overfitting_penalty={"train_validation_gap_weight": 0.4},
+        strategy_key="strat_b",
+        prior_strategy_keys=["strat_a"],
+        history_path=history_path,
+    )
+
+    run_dir = sorted((tmp_path / "outputs").glob("tsmom_optimize_*"))[0]
+    manifest = json.loads((run_dir / "optimizer_manifest.json").read_text())
+    assert manifest["objective_weights"]["tail_risk"] == 0.4
+    assert manifest["strategy_key"] == "strat_b"
+    assert history_path.exists()
