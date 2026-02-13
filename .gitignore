@@ -3,3 +3,5 @@ src/data/
 .venv
 .vscode
 *.jsonl.gz
+__pycache__/
+reports/benchmark_scorecard.json
