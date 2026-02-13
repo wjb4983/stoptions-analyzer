@@ -1,0 +1,8 @@
+[
+  {"event_timestamp": "2024-01-05T10:00:00Z", "participation_rate": 0.05, "volatility": 0.008, "spread_bps": 4.2, "regime": "calm", "slippage_bps": 1.1},
+  {"event_timestamp": "2024-01-15T10:00:00Z", "participation_rate": 0.10, "volatility": 0.010, "spread_bps": 5.1, "regime": "calm", "slippage_bps": 2.0},
+  {"event_timestamp": "2024-02-03T10:00:00Z", "participation_rate": 0.15, "volatility": 0.012, "spread_bps": 6.0, "regime": "normal", "slippage_bps": 3.2},
+  {"event_timestamp": "2024-02-21T10:00:00Z", "participation_rate": 0.25, "volatility": 0.018, "spread_bps": 8.0, "regime": "normal", "slippage_bps": 4.8},
+  {"event_timestamp": "2024-03-09T10:00:00Z", "participation_rate": 0.08, "volatility": 0.009, "spread_bps": 4.8, "regime": "calm", "slippage_bps": 1.7},
+  {"event_timestamp": "2024-03-19T10:00:00Z", "participation_rate": 0.30, "volatility": 0.022, "spread_bps": 10.0, "regime": "volatile", "slippage_bps": 6.2}
+]

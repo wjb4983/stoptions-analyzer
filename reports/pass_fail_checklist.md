@@ -7,6 +7,6 @@
 
 ## Runtime gate details
 
-- baseline_low_cost_lookback_20: 0.0275s (PASS)
-- baseline_med_cost_lookback_60: 0.0480s (PASS)
-- baseline_high_cost_lookback_120: 0.0415s (PASS)
+- baseline_low_cost_lookback_20: 1.4585s (PASS)
+- baseline_med_cost_lookback_60: 1.0932s (PASS)
+- baseline_high_cost_lookback_120: 0.7712s (PASS)

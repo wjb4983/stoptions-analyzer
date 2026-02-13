@@ -1,0 +1,51 @@
+{
+  "scenarios_compared": 3,
+  "mainline_beats_or_matches_prior_on_sharpe": 3,
+  "rows": [
+    {
+      "scenario": "baseline_high_cost_lookback_120",
+      "mainline": {
+        "sharpe": -3.2420273175146583,
+        "total_return": -0.09765575367842871
+      },
+      "prior_baseline": {
+        "sharpe": -3.2420273175146583,
+        "total_return": -0.09765575367842871
+      },
+      "delta": {
+        "sharpe": 0.0,
+        "total_return": 0.0
+      }
+    },
+    {
+      "scenario": "baseline_low_cost_lookback_20",
+      "mainline": {
+        "sharpe": -1.7935695843168908,
+        "total_return": -0.06079439713098189
+      },
+      "prior_baseline": {
+        "sharpe": -1.7935695843168908,
+        "total_return": -0.06079439713098189
+      },
+      "delta": {
+        "sharpe": 0.0,
+        "total_return": 0.0
+      }
+    },
+    {
+      "scenario": "baseline_med_cost_lookback_60",
+      "mainline": {
+        "sharpe": -2.0145584942722583,
+        "total_return": -0.0675519460029329
+      },
+      "prior_baseline": {
+        "sharpe": -2.0145584942722583,
+        "total_return": -0.0675519460029329
+      },
+      "delta": {
+        "sharpe": 0.0,
+        "total_return": 0.0
+      }
+    }
+  ]
+}

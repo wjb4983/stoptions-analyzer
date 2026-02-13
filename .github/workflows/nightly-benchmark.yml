@@ -1,0 +1,32 @@
+name: nightly-benchmark-report
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  nightly-benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Preserve prior baseline snapshot
+        run: cp reports/baseline_metrics_summary.json reports/prior_baseline_metrics_summary.json
+      - name: Rebuild mainline nightly baseline
+        run: python reports/run_baselines.py
+      - name: Compare mainline vs prior baseline
+        run: python reports/nightly_benchmark_report.py
+      - name: Upload nightly benchmark report artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-benchmark-report
+          path: |
+            reports/nightly_benchmark_report.md
+            reports/nightly_benchmark_comparison.json
+            reports/baseline_metrics_summary.json
+            reports/prior_baseline_metrics_summary.json

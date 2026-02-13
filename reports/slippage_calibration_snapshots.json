@@ -1,10 +1,70 @@
 {
-  "generated_at": null,
+  "generated_at": "2026-02-13T22:34:58.024394Z",
   "default_params": {
     "base_bps": 0.0,
     "impact_coefficient_bps": 20.0,
     "participation_exponent": 1.0,
     "max_participation": 1.0
   },
-  "snapshots": []
+  "snapshots": [
+    {
+      "effective_date": "2024-01-01",
+      "stable": true,
+      "params": {
+        "base_bps": 0.0,
+        "impact_coefficient_bps": 20.399999999999995,
+        "participation_exponent": 1.0,
+        "max_participation": 1.0
+      },
+      "fit_error_mae_bps": 0.05999999999999994,
+      "bucket_metrics": {
+        "p_low|v_low|s_tight|calm": {
+          "count": 1,
+          "mean_slippage_bps": 1.1
+        },
+        "p_mid|v_mid|s_mid|calm": {
+          "count": 1,
+          "mean_slippage_bps": 2.0
+        }
+      }
+    },
+    {
+      "effective_date": "2024-02-01",
+      "stable": true,
+      "params": {
+        "base_bps": 0.0,
+        "impact_coefficient_bps": 19.764705882352942,
+        "participation_exponent": 1.0,
+        "max_participation": 1.0
+      },
+      "fit_error_mae_bps": 0.18823529411764728,
+      "bucket_metrics": {
+        "p_mid|v_mid|s_mid|normal": {
+          "count": 2,
+          "mean_slippage_bps": 4.0
+        }
+      }
+    },
+    {
+      "effective_date": "2024-03-01",
+      "stable": true,
+      "params": {
+        "base_bps": 0.0,
+        "impact_coefficient_bps": 20.70539419087137,
+        "participation_exponent": 1.0,
+        "max_participation": 1.0
+      },
+      "fit_error_mae_bps": 0.027593360995850524,
+      "bucket_metrics": {
+        "p_low|v_low|s_tight|calm": {
+          "count": 1,
+          "mean_slippage_bps": 1.7
+        },
+        "p_high|v_mid|s_mid|volatile": {
+          "count": 1,
+          "mean_slippage_bps": 6.2
+        }
+      }
+    }
+  ]
 }

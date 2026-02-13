@@ -1,0 +1,48 @@
+name: quality-gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run baseline benchmark artifact generation
+        run: python reports/run_baselines.py
+      - name: Run benchmark scorecard gate
+        run: python reports/benchmark_bundle.py
+      - name: Leakage and validation integrity tests
+        run: |
+          pytest tests/test_feature_store.py tests/test_vectorized_no_lookahead.py tests/test_backtest_invariants_and_edge_cases.py tests/test_validation.py -q
+      - name: Calibration checks
+        run: python reports/calibrate_slippage_snapshots.py --fills reports/historical_fills.json
+      - name: Evaluate aggregate merge/deploy quality gates
+        run: python reports/quality_gates.py
+      - name: Generate model and strategy cards
+        run: python reports/generate_cards.py
+      - name: Upload governance artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-artifacts
+          path: |
+            reports/quality_gates_report.json
+            reports/model_card.json
+            reports/strategy_card.json
+            reports/benchmark_scorecard.json
+            reports/calibration_report.json
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [quality-gates]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Quality gates must pass before deploy
+        run: echo "Deploy unblocked: all required quality gates passed."

@@ -1,0 +1,61 @@
+{
+  "card_version": "1.0",
+  "generated_at": "2026-02-13T22:35:23.542857+00:00",
+  "model_name": "stoptions-vectorized-backtest-governance-model",
+  "intended_use": "Promotion gating for systematic strategy deployment readiness.",
+  "validation_summary": {
+    "promotion_gate_pass": true,
+    "failed_critical_dimensions": []
+  },
+  "quality_gates": {
+    "data_quality": {
+      "name": "data_quality",
+      "pass": true,
+      "details": {
+        "scenarios": 3,
+        "all_sharpe_finite": true,
+        "all_turnover_finite": true
+      }
+    },
+    "leakage_tests": {
+      "name": "leakage_tests",
+      "pass": true,
+      "details": {
+        "hash_consistency_ratio": 1.0,
+        "source_dimension": "reproducibility"
+      }
+    },
+    "validation_integrity": {
+      "name": "validation_integrity",
+      "pass": true,
+      "details": {
+        "failed_critical_dimensions": []
+      }
+    },
+    "calibration": {
+      "name": "calibration",
+      "pass": true,
+      "details": {
+        "mae_bps_max": 0.18823529411764728,
+        "impact_coefficient_std_bps": 0.39182744522985447,
+        "thresholds": {
+          "mae_bps_max": 15.0,
+          "impact_coefficient_std_bps": 20.0
+        }
+      }
+    },
+    "friction_adjusted_performance": {
+      "name": "friction_adjusted_performance",
+      "pass": true,
+      "details": {
+        "mean_sharpe": -2.3500517987012692,
+        "mean_turnover": 62.555555555555564
+      }
+    }
+  },
+  "deployment_readiness": true,
+  "limitations": [
+    "Synthetic benchmark data does not replace live production monitoring.",
+    "Calibration coverage depends on available historical fills."
+  ]
+}
