@@ -223,6 +223,8 @@ def test_run_walk_forward_backtest_persists_fold_artifacts(monkeypatch, tmp_path
     assert (fold_dirs[0] / "oos_metrics.json").exists()
     assert (fold_dirs[0] / "oos_equity.csv").exists()
     assert (fold_dirs[0] / "diagnostics.json").exists()
+    assert (run_dirs[0] / "split_metadata.json").exists()
+    assert (run_dirs[0] / "fold_boundaries.csv").exists()
     summary = (run_dirs[0] / "fold_summary.json").read_text()
     assert "excluded_ranges" in summary
     assert "leakage_checks" in summary

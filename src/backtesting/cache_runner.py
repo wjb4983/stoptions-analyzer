@@ -68,6 +68,7 @@ from backtesting.walk_forward import (
     persist_walk_forward_outputs,
     run_walk_forward_optimization,
 )
+from backtesting.validation import generate_combinatorial_purged_cv_splits, generate_purged_kfold_splits
 from backtesting.optimization import (
     Constraint,
     Objective,
@@ -942,6 +943,7 @@ def run_walk_forward_backtest(
     cv_scheme: str = "walk_forward",
     cpcv_n_groups: int = 6,
     cpcv_n_test_groups: int = 2,
+    cv_seed: int = 42,
     governance_metadata: dict[str, Any] | None = None,
     lineage_parent_manifest: str | None = None,
 ) -> str:
@@ -1038,6 +1040,31 @@ def run_walk_forward_backtest(
         )
     if not folds:
         raise ValueError("No folds generated; increase date range or reduce window sizes")
+
+    if cv_scheme == "cpcv":
+        split_rows = [
+            split.to_dict()
+            for split in generate_combinatorial_purged_cv_splits(
+                n_samples=total_bars,
+                n_groups=int(cpcv_n_groups),
+                n_test_groups=int(cpcv_n_test_groups),
+                purge_window_bars=int(purge_window_bars),
+                embargo_window_bars=int(embargo_window_bars),
+                label_horizon_bars=int(label_horizon_bars),
+                seed=int(cv_seed),
+            )
+        ]
+    else:
+        split_rows = [
+            split.to_dict()
+            for split in generate_purged_kfold_splits(
+                n_samples=total_bars,
+                n_splits=max(2, len(folds)),
+                purge_window_bars=int(purge_window_bars),
+                embargo_window_bars=int(embargo_window_bars),
+                label_horizon_bars=int(label_horizon_bars),
+            )
+        ]
 
     def evaluate_segment(candidate: dict[str, Any], start_idx: int, end_idx: int) -> dict[str, Any]:
         if end_idx <= start_idx:
@@ -1136,6 +1163,7 @@ def run_walk_forward_backtest(
                 "cv_scheme": cv_scheme,
                 "cpcv_n_groups": int(cpcv_n_groups),
                 "cpcv_n_test_groups": int(cpcv_n_test_groups),
+                "cv_seed": int(cv_seed),
                 "windowing": {
                     "train_bars": train_bars,
                     "validation_bars": validation_bars,
@@ -1160,6 +1188,25 @@ def run_walk_forward_backtest(
             indent=2,
         )
     )
+    (run_dir / "split_metadata.json").write_text(json.dumps(split_rows, indent=2))
+    with (run_dir / "fold_boundaries.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["split_id", "scheme", "train_ranges", "test_ranges", "purge_window_bars", "embargo_window_bars"],
+        )
+        writer.writeheader()
+        for row in split_rows:
+            metadata = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
+            writer.writerow(
+                {
+                    "split_id": int(row.get("split_id", -1)),
+                    "scheme": str(metadata.get("scheme", cv_scheme)),
+                    "train_ranges": json.dumps(row.get("train_ranges", [])),
+                    "test_ranges": json.dumps(row.get("test_ranges", [])),
+                    "purge_window_bars": int(row.get("purge_window_bars", 0)),
+                    "embargo_window_bars": int(row.get("embargo_window_bars", 0)),
+                }
+            )
     report_text = _format_walk_forward_report(
         folds=wf_result.folds,
         aggregate_metrics=wf_result.aggregate_metrics,
@@ -1200,6 +1247,7 @@ def run_walk_forward_backtest(
         "cv_scheme": cv_scheme,
         "cpcv_n_groups": int(cpcv_n_groups),
         "cpcv_n_test_groups": int(cpcv_n_test_groups),
+        "cv_seed": int(cv_seed),
     }
     manifest = _build_run_manifest(
         run_type="walk_forward",
@@ -3314,6 +3362,10 @@ def _build_parser() -> argparse.ArgumentParser:
     wf_parser.add_argument("--label-horizon-bars", type=int, default=1)
     wf_parser.add_argument("--nested-optimization", action="store_true")
     wf_parser.add_argument("--inner-train-fraction", type=float, default=0.7)
+    wf_parser.add_argument("--cv-scheme", choices=["walk_forward", "cpcv"], default="walk_forward")
+    wf_parser.add_argument("--cpcv-n-groups", type=int, default=6)
+    wf_parser.add_argument("--cpcv-n-test-groups", type=int, default=2)
+    wf_parser.add_argument("--cv-seed", type=int, default=42)
 
     opt_parser = subparsers.add_parser("optimize", help="Run constrained multi-objective optimization.")
     _add_common_args(opt_parser)
@@ -3390,6 +3442,10 @@ def main() -> None:
             label_horizon_bars=int(args.label_horizon_bars),
             nested_optimization=bool(args.nested_optimization),
             inner_train_fraction=float(args.inner_train_fraction),
+            cv_scheme=str(args.cv_scheme),
+            cpcv_n_groups=int(args.cpcv_n_groups),
+            cpcv_n_test_groups=int(args.cpcv_n_test_groups),
+            cv_seed=int(args.cv_seed),
         )
     elif args.command == "optimize":
         output = run_strategy_optimization(

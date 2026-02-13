@@ -335,6 +335,33 @@ class BacktestingPage(ttk.Frame):
         self.wf_step_scale.grid(row=3, column=1, sticky="ew", padx=8, pady=6)
         self.wf_step_fraction_label.grid(row=3, column=2, sticky="e", padx=8, pady=6)
 
+        ttk.Label(self.walk_forward_frame, text="CV Scheme").grid(row=4, column=0, sticky="w", padx=8, pady=6)
+        self.wf_cv_scheme_var = tk.StringVar(value="walk_forward")
+        self.wf_cv_scheme_combo = ttk.Combobox(self.walk_forward_frame, textvariable=self.wf_cv_scheme_var, state="readonly", values=["walk_forward", "cpcv"])
+        self.wf_cv_scheme_combo.grid(row=4, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(self.walk_forward_frame, text="Purge/Embargo Bars").grid(row=5, column=0, sticky="w", padx=8, pady=6)
+        pe_row = ttk.Frame(self.walk_forward_frame)
+        pe_row.grid(row=5, column=1, sticky="ew", padx=8, pady=6)
+        self.wf_purge_bars_var = tk.StringVar(value="0")
+        self.wf_embargo_bars_var = tk.StringVar(value="0")
+        ttk.Entry(pe_row, textvariable=self.wf_purge_bars_var, width=8).pack(side="left")
+        ttk.Label(pe_row, text=" / ").pack(side="left")
+        ttk.Entry(pe_row, textvariable=self.wf_embargo_bars_var, width=8).pack(side="left")
+
+        ttk.Label(self.walk_forward_frame, text="CPCV Groups/Test Groups").grid(row=6, column=0, sticky="w", padx=8, pady=6)
+        cpcv_row = ttk.Frame(self.walk_forward_frame)
+        cpcv_row.grid(row=6, column=1, sticky="ew", padx=8, pady=6)
+        self.wf_cpcv_groups_var = tk.StringVar(value="6")
+        self.wf_cpcv_test_groups_var = tk.StringVar(value="2")
+        ttk.Entry(cpcv_row, textvariable=self.wf_cpcv_groups_var, width=8).pack(side="left")
+        ttk.Label(cpcv_row, text=" / ").pack(side="left")
+        ttk.Entry(cpcv_row, textvariable=self.wf_cpcv_test_groups_var, width=8).pack(side="left")
+
+        ttk.Label(self.walk_forward_frame, text="CV Seed").grid(row=7, column=0, sticky="w", padx=8, pady=6)
+        self.wf_cv_seed_var = tk.StringVar(value="42")
+        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_cv_seed_var).grid(row=7, column=1, sticky="ew", padx=8, pady=6)
+
         row += 1
         self.strategy_specific_container = ttk.Frame(strategy_frame)
         self.strategy_specific_container.grid(row=row, column=0, columnspan=2, sticky="ew", padx=0, pady=0)
@@ -1661,6 +1688,12 @@ class BacktestingPage(ttk.Frame):
         self.wf_validation_fraction_var.set(float(settings.get("wf_validation_fraction", "0.15")))
         self.wf_test_fraction_var.set(float(settings.get("wf_test_fraction", "0.15")))
         self.wf_step_fraction_var.set(float(settings.get("wf_step_fraction", "0.15")))
+        self.wf_cv_scheme_var.set(str(settings.get("wf_cv_scheme", "walk_forward")))
+        self.wf_purge_bars_var.set(str(settings.get("wf_purge_window_bars", "0")))
+        self.wf_embargo_bars_var.set(str(settings.get("wf_embargo_window_bars", "0")))
+        self.wf_cpcv_groups_var.set(str(settings.get("wf_cpcv_n_groups", "6")))
+        self.wf_cpcv_test_groups_var.set(str(settings.get("wf_cpcv_n_test_groups", "2")))
+        self.wf_cv_seed_var.set(str(settings.get("wf_cv_seed", "42")))
         self._refresh_wf_fraction_labels()
 
         selected_entries = self._split_csv_setting(settings.get("selected_entry_signals", "ts_momentum"))
@@ -1753,6 +1786,12 @@ class BacktestingPage(ttk.Frame):
             "wf_validation_fraction": f"{float(self.wf_validation_fraction_var.get()):.2f}",
             "wf_test_fraction": f"{float(self.wf_test_fraction_var.get()):.2f}",
             "wf_step_fraction": f"{float(self.wf_step_fraction_var.get()):.2f}",
+            "wf_cv_scheme": self.wf_cv_scheme_var.get().strip() or "walk_forward",
+            "wf_purge_window_bars": self.wf_purge_bars_var.get().strip() or "0",
+            "wf_embargo_window_bars": self.wf_embargo_bars_var.get().strip() or "0",
+            "wf_cpcv_n_groups": self.wf_cpcv_groups_var.get().strip() or "6",
+            "wf_cpcv_n_test_groups": self.wf_cpcv_test_groups_var.get().strip() or "2",
+            "wf_cv_seed": self.wf_cv_seed_var.get().strip() or "42",
             "portfolio_method": self.portfolio_method_var.get().strip() or "equal_weight",
             "portfolio_vol_lookback_bars": self.portfolio_vol_lookback_var.get().strip() or "20",
             "portfolio_target_volatility": self.portfolio_target_vol_var.get().strip() or "0.10",
@@ -1886,7 +1925,7 @@ class BacktestingPage(ttk.Frame):
                 walk_forward_windows = self._validate_walk_forward_inputs()
                 if walk_forward_windows is None:
                     return
-                train_fraction, validation_fraction, test_fraction, step_fraction = walk_forward_windows
+                train_fraction, validation_fraction, test_fraction, step_fraction, cv_scheme, purge_bars, embargo_bars, cpcv_groups, cpcv_test_groups, cv_seed = walk_forward_windows
                 worker_target = self._run_walk_forward_worker
                 worker_args = (
                     tickers,
@@ -1902,6 +1941,12 @@ class BacktestingPage(ttk.Frame):
                     validation_fraction,
                     test_fraction,
                     step_fraction,
+                    cv_scheme,
+                    purge_bars,
+                    embargo_bars,
+                    cpcv_groups,
+                    cpcv_test_groups,
+                    cv_seed,
                     governance_payload,
                 )
                 status_line = f"Running walk-forward with {len(selected_entries) * len(selected_exits)} candidates...\n"
@@ -2019,7 +2064,7 @@ class BacktestingPage(ttk.Frame):
 
         return float(top_quantile), float(bottom_quantile), int(vol_lookback)
 
-    def _validate_walk_forward_inputs(self) -> tuple[float, float, float, float] | None:
+    def _validate_walk_forward_inputs(self) -> tuple[float, float, float, float, str, int, int, int, int, int] | None:
         train_fraction = float(self.wf_train_fraction_var.get())
         validation_fraction = float(self.wf_validation_fraction_var.get())
         test_fraction = float(self.wf_test_fraction_var.get())
@@ -2036,7 +2081,29 @@ class BacktestingPage(ttk.Frame):
             messagebox.showinfo("Invalid input", "Step fraction must be in (0, 1].")
             return None
 
-        return train_fraction, validation_fraction, test_fraction, step_fraction
+        cv_scheme = self.wf_cv_scheme_var.get().strip() or "walk_forward"
+        purge = parse_float(self.wf_purge_bars_var.get())
+        embargo = parse_float(self.wf_embargo_bars_var.get())
+        n_groups = parse_float(self.wf_cpcv_groups_var.get())
+        n_test_groups = parse_float(self.wf_cpcv_test_groups_var.get())
+        cv_seed = parse_float(self.wf_cv_seed_var.get())
+        if purge is None or purge < 0 or int(purge) != purge:
+            messagebox.showinfo("Invalid input", "Purge bars must be a non-negative integer.")
+            return None
+        if embargo is None or embargo < 0 or int(embargo) != embargo:
+            messagebox.showinfo("Invalid input", "Embargo bars must be a non-negative integer.")
+            return None
+        if n_groups is None or n_groups < 3 or int(n_groups) != n_groups:
+            messagebox.showinfo("Invalid input", "CPCV groups must be an integer >= 3.")
+            return None
+        if n_test_groups is None or n_test_groups < 1 or int(n_test_groups) != n_test_groups:
+            messagebox.showinfo("Invalid input", "CPCV test groups must be an integer >= 1.")
+            return None
+        if cv_seed is None or int(cv_seed) != cv_seed:
+            messagebox.showinfo("Invalid input", "CV seed must be an integer.")
+            return None
+
+        return train_fraction, validation_fraction, test_fraction, step_fraction, cv_scheme, int(purge), int(embargo), int(n_groups), int(n_test_groups), int(cv_seed)
 
     def _run_optimizer_worker(
         self,
@@ -2092,6 +2159,12 @@ class BacktestingPage(ttk.Frame):
         validation_fraction: float,
         test_fraction: float,
         step_fraction: float,
+        cv_scheme: str,
+        purge_window_bars: int,
+        embargo_window_bars: int,
+        cpcv_n_groups: int,
+        cpcv_n_test_groups: int,
+        cv_seed: int,
         governance_payload: dict[str, object],
     ) -> None:
         try:
@@ -2114,6 +2187,12 @@ class BacktestingPage(ttk.Frame):
                 validation_fraction=validation_fraction,
                 test_fraction=test_fraction,
                 step_fraction=step_fraction,
+                cv_scheme=cv_scheme,
+                purge_window_bars=int(purge_window_bars),
+                embargo_window_bars=int(embargo_window_bars),
+                cpcv_n_groups=int(cpcv_n_groups),
+                cpcv_n_test_groups=int(cpcv_n_test_groups),
+                cv_seed=int(cv_seed),
                 governance_metadata=dict(governance_payload),
             )
         except Exception as exc:
