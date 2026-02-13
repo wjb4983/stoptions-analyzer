@@ -23,6 +23,7 @@ from typing import Any, Callable
 import numpy as np
 
 from analysis.attribution import build_attribution_payload
+from analysis.explainability import build_trade_explainability
 from analysis.factor_exposure import build_factor_exposure_model
 from analysis.reporting import (
     build_scenario_attribution_and_guardrails,
@@ -731,6 +732,13 @@ def run_time_series_momentum_backtest(
         costs_bps=costs_bps,
         starting_capital=starting_capital,
     )
+    explainability_rows = _build_trade_explainability_rows(
+        trade_log_rows=trade_log_rows,
+        fill_rows=fill_rows,
+        risk_diagnostics=merged_risk_diagnostics,
+        costs_bps=costs_bps,
+    )
+    explainability_report = _format_explainability_report(explainability_rows)
     trade_log_summary = _format_trade_log_summary(trade_log_rows)
 
     report_text = format_backtest_report(
@@ -747,6 +755,8 @@ def run_time_series_momentum_backtest(
     )
     (run_dir / "trade_log.csv").write_text(_trade_log_csv(trade_log_rows))
     (run_dir / "trade_log.json").write_text(json.dumps(trade_log_rows, indent=2))
+    (run_dir / "trade_explainability.json").write_text(json.dumps(explainability_rows, indent=2))
+    (run_dir / "trade_explainability_report.txt").write_text(explainability_report)
     (run_dir / "fills.csv").write_text(_fills_csv(fill_rows))
     (run_dir / "fills.json").write_text(json.dumps(fill_rows, indent=2))
 
@@ -763,7 +773,7 @@ def run_time_series_momentum_backtest(
             ensemble_lines.append(
                 f"- {row.get('regime', '')}: uplift_pnl_mean={float(row.get('uplift_pnl_mean', 0.0)):.8f} bars={int(row.get('bars', 0))}"
             )
-    final_report = report_text + "\n\n" + trade_log_summary + "\n\n" + "\n".join(ensemble_lines)
+    final_report = report_text + "\n\n" + trade_log_summary + "\n\n" + explainability_report + "\n\n" + "\n".join(ensemble_lines)
     (run_dir / "report.txt").write_text(final_report)
 
     return final_report + f"\n\nSaved outputs to: {run_dir}"
@@ -2921,6 +2931,102 @@ def _build_trade_log_rows(
             )
     return rows
 
+
+
+
+def _build_trade_explainability_rows(
+    *,
+    trade_log_rows: list[dict[str, object]],
+    fill_rows: list[dict[str, object]],
+    risk_diagnostics: dict[str, np.ndarray],
+    costs_bps: float,
+) -> list[dict[str, object]]:
+    explain_rows: list[dict[str, object]] = []
+    fills_by_bar: dict[int, list[dict[str, object]]] = {}
+    for fill in fill_rows:
+        bar = int(fill.get("bar_index", 0))
+        fills_by_bar.setdefault(bar, []).append(fill)
+
+    margin = _to_numpy_1d(risk_diagnostics.get("margin_utilization", np.zeros(0, dtype=float)))
+    model_conf = _to_numpy_1d(risk_diagnostics.get("model_confidence", np.zeros(0, dtype=float)))
+    var_95 = _to_numpy_1d(risk_diagnostics.get("var_95", np.zeros(0, dtype=float)))
+
+    for idx, row in enumerate(trade_log_rows):
+        symbol = str(row.get("symbol", ""))
+        trade = float(row.get("trade", 0.0))
+        shares_delta = float(row.get("shares_delta", 0.0))
+        price = float(row.get("price", 0.0))
+        trade_notional = abs(shares_delta * price)
+
+        feature_values = {
+            "trade_signal": trade,
+            "trade_notional": trade_notional,
+            "trade_cost_bps": float(costs_bps),
+            "running_pnl": float(row.get("running_pnl", 0.0)),
+        }
+        if idx < margin.size:
+            feature_values["margin_utilization"] = float(margin[idx])
+        if idx < model_conf.size:
+            feature_values["model_confidence"] = float(model_conf[idx])
+        if idx < var_95.size:
+            feature_values["var_95"] = float(var_95[idx])
+
+        risk_constraints = {
+            "max_abs_trade": max(1.0, abs(trade) * 1.1),
+            "max_notional": max(1.0, trade_notional * 1.05),
+        }
+        if idx < margin.size:
+            risk_constraints["max_margin_utilization"] = max(0.01, float(margin[idx]))
+
+        artifact = build_trade_explainability(
+            trade_id=f"trade_{idx}",
+            timestamp=str(row.get("timestamp", "")),
+            symbol=symbol,
+            requested_size=trade,
+            sized_trade=trade,
+            feature_values=feature_values,
+            baseline_values={"trade_signal": 0.0, "running_pnl": 0.0, "trade_cost_bps": 0.0},
+            feature_uncertainty={"trade_signal": 0.2, "running_pnl": 0.1, "trade_notional": max(1.0, trade_notional * 0.2)},
+            risk_constraints=risk_constraints,
+        )
+        explain_rows.append(
+            {
+                "trade_id": f"trade_{idx}",
+                "timestamp": row.get("timestamp", ""),
+                "symbol": symbol,
+                "top_drivers": artifact.top_drivers,
+                "uncertainty": artifact.uncertainty,
+                "risk_constraints": artifact.risk_constraints,
+                "decision_trace": artifact.decision_trace,
+                "counterfactual": artifact.counterfactual,
+                "red_flags": artifact.red_flags,
+                "fill_context": fills_by_bar.get(idx, []),
+            }
+        )
+    return explain_rows
+
+
+def _format_explainability_report(rows: list[dict[str, object]], max_rows: int = 30) -> str:
+    lines = ["Explainability Governance Report", "------------------------------"]
+    if not rows:
+        lines.append("No explainability records available.")
+        return "\n".join(lines)
+    lines.append("Template: model governance + debugging")
+    lines.append("fields: top_drivers, uncertainty, risk_constraints, decision_trace, counterfactual, red_flags")
+    red_flagged = 0
+    for row in rows[:max_rows]:
+        flags = row.get("red_flags", [])
+        if isinstance(flags, list) and flags:
+            red_flagged += 1
+        lines.append(
+            f"- {row.get('timestamp', '')} {row.get('symbol', '')}: drivers={len(row.get('top_drivers', []))} red_flags={len(flags) if isinstance(flags, list) else 0}"
+        )
+    if len(rows) > max_rows:
+        lines.append(f"... ({len(rows) - max_rows} more rows)")
+    lines.append(
+        f"Red-flag detector summary: flagged_trades={red_flagged}, flag_rate={(red_flagged / max(1, len(rows))):.2%}"
+    )
+    return "\n".join(lines)
 
 def _format_trade_log_summary(rows: list[dict[str, object]], max_rows: int = 40) -> str:
     lines = ["Trade Log", "---------"]

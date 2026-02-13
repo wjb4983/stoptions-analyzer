@@ -136,6 +136,8 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "metrics.json",
         "trade_log.csv",
         "trade_log.json",
+        "trade_explainability.json",
+        "trade_explainability_report.txt",
         "report.txt",
         "dataset_quality_audit.json",
         "manifest.json",
