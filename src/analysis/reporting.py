@@ -6,6 +6,8 @@ from typing import Iterable
 
 import numpy as np
 
+from backtesting.perf import benjamini_hochberg_adjusted_pvalues, deflated_sharpe_ratio, probabilistic_sharpe_ratio
+
 from .cross_sectional.base import CrossSectionalResult
 from .time_series.base import TimeSeriesResult
 
@@ -392,23 +394,13 @@ def compute_deflated_sharpe_ratio(
     kurtosis: float,
     n_trials: int,
 ) -> float:
-    if n_returns <= 2:
-        return 0.0
-
-    sr = float(observed_sharpe)
-    variance_term = 1.0 - skew * sr + ((kurtosis - 1.0) / 4.0) * (sr**2)
-    sr_std = np.sqrt(max(variance_term, 1e-12) / max(1, n_returns - 1))
-
-    effective_trials = max(1, int(n_trials))
-    if effective_trials == 1:
-        sr_star = 0.0
-    else:
-        norm = NormalDist()
-        q1 = norm.inv_cdf(1.0 - 1.0 / effective_trials)
-        q2 = norm.inv_cdf(1.0 - 1.0 / (effective_trials * np.e))
-        euler_gamma = 0.5772156649
-        sr_star = (1.0 - euler_gamma) * q1 + euler_gamma * q2
-    return float(NormalDist().cdf((sr - sr_star) / max(sr_std, 1e-12)))
+    return deflated_sharpe_ratio(
+        observed_sharpe=observed_sharpe,
+        n_returns=n_returns,
+        skew=skew,
+        kurtosis=kurtosis,
+        n_trials=n_trials,
+    )
 
 
 def build_backtest_robustness_report(
@@ -577,6 +569,7 @@ def build_sweep_robustness_report(
     if scores.size == 0:
         return {
             "deflated_sharpe_ratio": 0.0,
+            "probabilistic_sharpe_ratio": 0.0,
             "pbo_style": {
                 "n_combinations": 0,
                 "n_monte_carlo": int(n_monte_carlo),
@@ -595,6 +588,14 @@ def build_sweep_robustness_report(
                 "n_candidates": 0.0,
                 "n_observations": 0.0,
             },
+            "multiple_testing": {
+                "method": "benjamini_hochberg",
+                "n_hypotheses": 0,
+                "raw_pvalues": [],
+                "bh_adjusted_pvalues": [],
+                "min_raw_pvalue": 1.0,
+                "min_bh_adjusted_pvalue": 1.0,
+            },
         }
 
     centered = scores - float(np.mean(scores))
@@ -602,12 +603,21 @@ def build_sweep_robustness_report(
     skew = float(np.mean(centered**3) / (m2 ** 1.5)) if scores.size > 2 and m2 > 0 else 0.0
     kurt = float(np.mean(centered**4) / (m2**2)) if scores.size > 3 and m2 > 0 else 3.0
 
+    n_trials = int(scores.size)
+    best_sharpe = float(scores[0])
     dsr = compute_deflated_sharpe_ratio(
-        observed_sharpe=float(scores[0]),
+        observed_sharpe=best_sharpe,
         n_returns=max(3, int(scores.size)),
         skew=skew,
         kurtosis=kurt,
-        n_trials=int(scores.size),
+        n_trials=n_trials,
+    )
+    psr = probabilistic_sharpe_ratio(
+        observed_sharpe=best_sharpe,
+        benchmark_sharpe=0.0,
+        n_returns=max(3, int(scores.size)),
+        skew=skew,
+        kurtosis=kurt,
     )
 
     pbo = _compute_pbo_style(ranked_rows=ranked_rows, score_key=score_key, n_monte_carlo=n_monte_carlo, seed=seed)
@@ -626,11 +636,31 @@ def build_sweep_robustness_report(
     white = compute_white_reality_check(candidate_returns=candidate_returns, n_bootstrap=max(200, n_monte_carlo), seed=seed)
     spa = compute_spa_pvalue(candidate_returns=candidate_returns, n_bootstrap=max(200, n_monte_carlo), seed=seed)
 
+    if wr_cols:
+        mean_scores = np.mean(candidate_returns, axis=0)
+        std_scores = np.std(candidate_returns, axis=0, ddof=1)
+        n_obs = max(1, int(candidate_returns.shape[0]))
+        denom = std_scores / np.sqrt(n_obs)
+        t_stats = np.divide(mean_scores, denom, out=np.zeros_like(mean_scores), where=denom > 1e-12)
+        p_values = [float(1.0 - NormalDist().cdf(float(t))) for t in t_stats]
+    else:
+        p_values = [float(np.mean(scores >= s)) for s in scores]
+    bh_adjusted = benjamini_hochberg_adjusted_pvalues(p_values)
+
     return {
         "deflated_sharpe_ratio": dsr,
+        "probabilistic_sharpe_ratio": psr,
         "pbo_style": pbo,
         "white_reality_check": white,
         "spa": spa,
+        "multiple_testing": {
+            "method": "benjamini_hochberg",
+            "n_hypotheses": int(len(p_values)),
+            "raw_pvalues": p_values,
+            "bh_adjusted_pvalues": bh_adjusted,
+            "min_raw_pvalue": float(min(p_values)) if p_values else 1.0,
+            "min_bh_adjusted_pvalue": float(min(bh_adjusted)) if bh_adjusted else 1.0,
+        },
     }
 
 

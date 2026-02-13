@@ -1234,6 +1234,7 @@ class BacktestingPage(ttk.Frame):
             "unstable_params": str(run_dir / "fold_summary.json"),
             "weak_rc": str(run_dir / "robustness_report.json"),
             "weak_spa": str(run_dir / "robustness_report.json"),
+            "alpha_not_robust": str(run_dir / "robustness_report.json"),
             "default": str(run_dir / "manifest.json"),
         }
         badges = build_guardrails(metrics, fold_rows=rows, trade_count=trade_count, robustness=robustness_payload, evidence_links=evidence_links)

@@ -117,6 +117,17 @@ def build_guardrails(
         if spa_p > 0.1:
             badges.append({"label": "Weak SPA", "severity": "medium", "reason": f"SPA p-value {spa_p:.3f}."})
 
+        mt = robustness.get("multiple_testing", {})
+        if isinstance(mt, dict):
+            min_nominal = float(mt.get("min_raw_pvalue", 1.0))
+            min_adjusted = float(mt.get("min_bh_adjusted_pvalue", 1.0))
+            if min_nominal <= 0.05 and min_adjusted > 0.05:
+                badges.append({
+                    "label": "Alpha Not Robust",
+                    "severity": "high",
+                    "reason": f"Nominal p={min_nominal:.3f} but BH-adjusted p={min_adjusted:.3f}.",
+                })
+
     if not badges:
         badges.append({"label": "Guardrails OK", "severity": "low", "reason": "No obvious stability alerts."})
     if evidence_links:
