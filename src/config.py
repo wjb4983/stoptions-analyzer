@@ -4,6 +4,7 @@ from pathlib import Path
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
+HYPOTHESIS_RUBRIC_TEMPLATES_PATH = CONFIG_DIR / "hypothesis_rubric_templates.json"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
 HORIZON_CONFIGS = [
@@ -187,4 +188,76 @@ DEFAULT_MODEL_PARADIGM_CONFIG = {
         {"name": "microstructure_imbalance", "enabled": True, "weight": 1.0},
         {"name": "meta_label_classifier", "enabled": True, "weight": 1.0},
     ]
+}
+
+DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES = {
+    "default_profile": "intraday_alpha",
+    "profiles": {
+        "intraday_alpha": {
+            "label": "Intraday Alpha",
+            "weights": {
+                "novelty": 0.2,
+                "plausibility": 0.3,
+                "complexity_adjusted": 0.15,
+                "expected_capacity": 0.2,
+                "robustness": 0.15,
+            },
+            "thresholds": {
+                "min_total": 3.2,
+                "min_plausibility": 3.0,
+                "min_robustness": 3.0,
+            },
+            "defaults": {
+                "novelty": 3.2,
+                "plausibility": 4.0,
+                "implementation_complexity": 2.5,
+                "expected_capacity": 3.3,
+                "robustness": 3.7,
+            },
+        },
+        "options_volatility": {
+            "label": "Options Volatility",
+            "weights": {
+                "novelty": 0.15,
+                "plausibility": 0.25,
+                "complexity_adjusted": 0.1,
+                "expected_capacity": 0.15,
+                "robustness": 0.35,
+            },
+            "thresholds": {
+                "min_total": 3.25,
+                "min_plausibility": 3.1,
+                "min_robustness": 3.4,
+            },
+            "defaults": {
+                "novelty": 3.0,
+                "plausibility": 3.7,
+                "implementation_complexity": 3.0,
+                "expected_capacity": 3.1,
+                "robustness": 4.1,
+            },
+        },
+        "stat_arb": {
+            "label": "Stat-Arb",
+            "weights": {
+                "novelty": 0.1,
+                "plausibility": 0.3,
+                "complexity_adjusted": 0.2,
+                "expected_capacity": 0.25,
+                "robustness": 0.15,
+            },
+            "thresholds": {
+                "min_total": 3.15,
+                "min_plausibility": 3.2,
+                "min_robustness": 3.0,
+            },
+            "defaults": {
+                "novelty": 2.8,
+                "plausibility": 4.0,
+                "implementation_complexity": 2.7,
+                "expected_capacity": 3.8,
+                "robustness": 3.5,
+            },
+        },
+    },
 }
