@@ -85,3 +85,29 @@ class MetaLabelClassifierModel(BaseParadigmModel):
 
     def required_feature_names(self) -> tuple[str, ...]:
         return ("base_signal", "base_confidence", "risk_filter_score")
+
+
+class OptionsDirectionalModel(BaseParadigmModel):
+    name = "options_directional"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "skew_z",
+            "put_call_flow_imbalance_z",
+            "dealer_positioning_proxy_z",
+            "gamma_exposure_proxy_rank",
+            "unusual_volume_signature_z",
+        )
+
+
+class OptionsVolatilityModel(BaseParadigmModel):
+    name = "options_volatility"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "convexity_z",
+            "term_structure_curvature_z",
+            "local_surface_distortion_z",
+            "oi_changes_z",
+            "unusual_volume_signature_rank",
+        )
