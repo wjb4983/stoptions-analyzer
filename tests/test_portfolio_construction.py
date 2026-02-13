@@ -264,4 +264,78 @@ def test_covariance_regime_and_sample_depth_selection() -> None:
 
     assert estimators[0] == "sample"
     assert estimators[1] == "sample"
-    assert all(est == "shrinkage" for est in estimators[2:])
+    assert all(est in {"shrinkage", "ledoit_wolf"} for est in estimators[2:])
+    assert "ledoit_wolf" in estimators[2:]
+
+
+def test_hrp_and_herc_stability_under_noisy_covariance() -> None:
+    rng = np.random.default_rng(123)
+    periods = 120
+    assets = 8
+    base = np.linspace(100.0, 130.0, periods)[:, None]
+    noise = rng.normal(0.0, 0.8, size=(periods, assets))
+    prices = np.abs(base + np.cumsum(noise, axis=0)) + 20.0
+    raw = np.sign(rng.normal(size=(periods, assets)))
+    symbols = [f"S{i}" for i in range(assets)]
+
+    inv_cfg = PortfolioConstructionConfig(method="inverse_vol", vol_lookback_bars=30, max_symbol_weight=0.6, max_gross_exposure=1.0)
+    hrp_cfg = PortfolioConstructionConfig(
+        method="hrp",
+        vol_lookback_bars=30,
+        covariance_estimator="ledoit_wolf",
+        covariance_shrinkage=0.25,
+        rebalance_frequency_bars=3,
+        clustering_linkage="average",
+        max_symbol_weight=0.6,
+        max_gross_exposure=1.0,
+    )
+    herc_cfg = PortfolioConstructionConfig(
+        method="herc",
+        vol_lookback_bars=30,
+        covariance_estimator="oas",
+        covariance_shrinkage=0.20,
+        rebalance_frequency_bars=3,
+        clustering_linkage="average",
+        max_symbol_weight=0.6,
+        max_gross_exposure=1.0,
+    )
+
+    inv = construct_target_weights(raw_signals=raw, prices=prices, symbol_order=symbols, config=inv_cfg).target_weights
+    hrp = construct_target_weights(raw_signals=raw, prices=prices, symbol_order=symbols, config=hrp_cfg).target_weights
+    herc = construct_target_weights(raw_signals=raw, prices=prices, symbol_order=symbols, config=herc_cfg).target_weights
+
+    inv_turnover = float(np.mean(np.sum(np.abs(np.diff(inv, axis=0)), axis=1)))
+    hrp_turnover = float(np.mean(np.sum(np.abs(np.diff(hrp, axis=0)), axis=1)))
+    herc_turnover = float(np.mean(np.sum(np.abs(np.diff(herc, axis=0)), axis=1)))
+
+    assert hrp_turnover <= inv_turnover + 1e-8
+    assert herc_turnover <= inv_turnover + 1e-8
+
+
+def test_covariance_ledoit_wolf_and_oas_estimators_recorded() -> None:
+    prices = np.array(
+        [
+            [100.0, 90.0, 80.0],
+            [99.5, 90.3, 79.7],
+            [100.1, 89.8, 79.3],
+            [100.3, 89.6, 79.8],
+            [100.0, 89.2, 80.1],
+            [99.8, 88.9, 80.3],
+        ]
+    )
+    raw = np.ones_like(prices)
+    symbols = ["A", "B", "C"]
+
+    lw_cfg = PortfolioConstructionConfig(method="capped_optimization", covariance_estimator="ledoit_wolf", max_symbol_weight=0.8)
+    oas_cfg = PortfolioConstructionConfig(method="capped_optimization", covariance_estimator="oas", max_symbol_weight=0.8)
+
+    lw = construct_target_weights(raw_signals=raw, prices=prices, symbol_order=symbols, config=lw_cfg)
+    oas = construct_target_weights(raw_signals=raw, prices=prices, symbol_order=symbols, config=oas_cfg)
+
+    lw_estimators = [row.get("covariance_estimator") for row in lw.diagnostics["binding_constraints"] if row]
+    oas_estimators = [row.get("covariance_estimator") for row in oas.diagnostics["binding_constraints"] if row]
+
+    assert lw_estimators[:2] == ["sample", "sample"]
+    assert all(est == "ledoit_wolf" for est in lw_estimators[2:])
+    assert oas_estimators[:2] == ["sample", "sample"]
+    assert all(est == "oas" for est in oas_estimators[2:])

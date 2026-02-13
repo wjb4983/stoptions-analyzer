@@ -223,6 +223,9 @@ def run_time_series_momentum_backtest(
     portfolio_target_volatility: float = 0.10,
     portfolio_max_symbol_weight: float = 0.25,
     portfolio_max_sector_weight: float = 0.60,
+    portfolio_rebalance_frequency_bars: int = 1,
+    portfolio_clustering_linkage: str = "single",
+    portfolio_covariance_shrinkage: float = 0.15,
     portfolio_max_gross_exposure: float = 1.0,
     portfolio_min_net_exposure: float = -1.0,
     portfolio_max_net_exposure: float = 1.0,
@@ -371,6 +374,9 @@ def run_time_series_momentum_backtest(
         target_volatility=float(portfolio_target_volatility),
         max_symbol_weight=float(portfolio_max_symbol_weight),
         max_sector_weight=float(portfolio_max_sector_weight),
+        rebalance_frequency_bars=int(portfolio_rebalance_frequency_bars),
+        clustering_linkage=str(portfolio_clustering_linkage),
+        covariance_shrinkage=float(portfolio_covariance_shrinkage),
         max_gross_exposure=float(portfolio_max_gross_exposure),
         min_net_exposure=float(portfolio_min_net_exposure),
         max_net_exposure=float(portfolio_max_net_exposure),
@@ -499,6 +505,9 @@ def run_time_series_momentum_backtest(
         "portfolio_target_volatility": portfolio_target_volatility,
         "portfolio_max_symbol_weight": portfolio_max_symbol_weight,
         "portfolio_max_sector_weight": portfolio_max_sector_weight,
+        "portfolio_rebalance_frequency_bars": portfolio_rebalance_frequency_bars,
+        "portfolio_clustering_linkage": portfolio_clustering_linkage,
+        "portfolio_covariance_shrinkage": portfolio_covariance_shrinkage,
         "portfolio_max_gross_exposure": portfolio_max_gross_exposure,
         "portfolio_min_net_exposure": portfolio_min_net_exposure,
         "portfolio_max_net_exposure": portfolio_max_net_exposure,
@@ -1857,6 +1866,9 @@ def run_multi_signal_backtest(
     portfolio_target_volatility: float = 0.10,
     portfolio_max_symbol_weight: float = 0.25,
     portfolio_max_sector_weight: float = 0.60,
+    portfolio_rebalance_frequency_bars: int = 1,
+    portfolio_clustering_linkage: str = "single",
+    portfolio_covariance_shrinkage: float = 0.15,
     portfolio_max_gross_exposure: float = 1.0,
     portfolio_min_net_exposure: float = -1.0,
     portfolio_max_net_exposure: float = 1.0,
@@ -1907,6 +1919,9 @@ def run_multi_signal_backtest(
                 portfolio_target_volatility=portfolio_target_volatility,
                 portfolio_max_symbol_weight=portfolio_max_symbol_weight,
                 portfolio_max_sector_weight=portfolio_max_sector_weight,
+                portfolio_rebalance_frequency_bars=portfolio_rebalance_frequency_bars,
+                portfolio_clustering_linkage=portfolio_clustering_linkage,
+                portfolio_covariance_shrinkage=portfolio_covariance_shrinkage,
                 portfolio_max_gross_exposure=portfolio_max_gross_exposure,
                 portfolio_min_net_exposure=portfolio_min_net_exposure,
                 portfolio_max_net_exposure=portfolio_max_net_exposure,
@@ -2897,6 +2912,9 @@ def replay_manifest_run(*, manifest_path: Path, cache_root: Path | None = None, 
         portfolio_target_volatility=float(params.get("portfolio_target_volatility", 0.10)),
         portfolio_max_symbol_weight=float(params.get("portfolio_max_symbol_weight", 0.25)),
         portfolio_max_sector_weight=float(params.get("portfolio_max_sector_weight", 0.60)),
+        portfolio_rebalance_frequency_bars=int(params.get("portfolio_rebalance_frequency_bars", 1)),
+        portfolio_clustering_linkage=str(params.get("portfolio_clustering_linkage", "single")),
+        portfolio_covariance_shrinkage=float(params.get("portfolio_covariance_shrinkage", 0.15)),
         portfolio_max_gross_exposure=float(params.get("portfolio_max_gross_exposure", 1.0)),
         portfolio_min_net_exposure=float(params.get("portfolio_min_net_exposure", -1.0)),
         portfolio_max_net_exposure=float(params.get("portfolio_max_net_exposure", 1.0)),
@@ -3435,11 +3453,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--xsmom-bottom-quantile", type=float, default=0.2)
     run_parser.add_argument("--xsmom-long-only", action="store_true")
     run_parser.add_argument("--xsmom-vol-lookback-days", type=int, default=20)
-    run_parser.add_argument("--portfolio-method", choices=["equal_weight", "vol_target", "inverse_vol", "capped_optimization"], default="equal_weight")
+    run_parser.add_argument("--portfolio-method", choices=["equal_weight", "vol_target", "inverse_vol", "capped_optimization", "hrp", "herc"], default="equal_weight")
     run_parser.add_argument("--portfolio-vol-lookback-bars", type=int, default=20)
     run_parser.add_argument("--portfolio-target-volatility", type=float, default=0.10)
     run_parser.add_argument("--portfolio-max-symbol-weight", type=float, default=0.25)
     run_parser.add_argument("--portfolio-max-sector-weight", type=float, default=0.60)
+    run_parser.add_argument("--portfolio-rebalance-frequency-bars", type=int, default=1)
+    run_parser.add_argument("--portfolio-clustering-linkage", choices=["single", "complete", "average", "ward"], default="single")
+    run_parser.add_argument("--portfolio-covariance-shrinkage", type=float, default=0.15)
     run_parser.add_argument("--portfolio-max-gross-exposure", type=float, default=1.0)
     run_parser.add_argument("--portfolio-min-net-exposure", type=float, default=-1.0)
     run_parser.add_argument("--portfolio-max-net-exposure", type=float, default=1.0)
@@ -3618,6 +3639,9 @@ def main() -> None:
             portfolio_target_volatility=float(args.portfolio_target_volatility),
             portfolio_max_symbol_weight=float(args.portfolio_max_symbol_weight),
             portfolio_max_sector_weight=float(args.portfolio_max_sector_weight),
+            portfolio_rebalance_frequency_bars=int(args.portfolio_rebalance_frequency_bars),
+            portfolio_clustering_linkage=str(args.portfolio_clustering_linkage),
+            portfolio_covariance_shrinkage=float(args.portfolio_covariance_shrinkage),
             portfolio_max_gross_exposure=float(args.portfolio_max_gross_exposure),
             portfolio_min_net_exposure=float(args.portfolio_min_net_exposure),
             portfolio_max_net_exposure=float(args.portfolio_max_net_exposure),

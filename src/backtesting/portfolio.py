@@ -6,8 +6,8 @@ from typing import Literal
 import numpy as np
 
 
-PortfolioMethod = Literal["equal_weight", "vol_target", "inverse_vol", "capped_optimization"]
-CovarianceEstimator = Literal["sample", "ewma", "shrinkage", "robust"]
+PortfolioMethod = Literal["equal_weight", "vol_target", "inverse_vol", "capped_optimization", "hrp", "herc"]
+CovarianceEstimator = Literal["sample", "ewma", "shrinkage", "ledoit_wolf", "oas", "robust"]
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,8 @@ class PortfolioConstructionConfig:
     covariance_estimator: CovarianceEstimator = "sample"
     covariance_ewma_halflife: float = 10.0
     covariance_shrinkage: float = 0.15
+    rebalance_frequency_bars: int = 1
+    clustering_linkage: str = "single"
     covariance_regime_overrides: dict[str, CovarianceEstimator] | None = None
     covariance_shrinkage_min_samples: int = 20
     covariance_robust_min_samples: int = 8
@@ -120,13 +122,19 @@ def construct_target_weights(
         tradable = np.isfinite(px[idx]) & (px[idx] > 0.0)
         row[~tradable] = 0.0
 
-        base = _build_base_weights(
-            row=row,
-            prices=px,
-            idx=idx,
-            config=config,
-            tradable=tradable,
-        )
+        rebalance_freq = max(1, int(config.rebalance_frequency_bars))
+        should_rebalance = idx == 0 or (idx % rebalance_freq == 0)
+        if should_rebalance:
+            base = _build_base_weights(
+                row=row,
+                prices=px,
+                idx=idx,
+                config=config,
+                tradable=tradable,
+            )
+        else:
+            base = np.array(prev, dtype=float, copy=True)
+            base[~tradable] = 0.0
 
         diag_row: dict[str, float | int | bool | str] = {}
         if config.method == "capped_optimization":
@@ -293,6 +301,28 @@ def _build_base_weights(
         base[active] = signs[active] * inv_vol[active]
         if np.sum(np.abs(base)) <= 0:
             base[active] = signs[active]
+        return _normalize_gross(base)
+
+    if config.method in {"hrp", "herc"}:
+        cov, _ = _estimate_covariance(
+            prices=prices,
+            idx=idx,
+            lookback=max(2, int(config.vol_lookback_bars)),
+            config=config,
+            regime=None,
+        )
+        active_list = active.tolist()
+        if len(active_list) == 1:
+            base = np.zeros_like(row)
+            base[active_list[0]] = signs[active_list[0]]
+            return base
+        if config.method == "hrp":
+            alloc = _hrp_allocation(cov, active_list, linkage=str(config.clustering_linkage))
+        else:
+            alloc = _herc_allocation(cov, active_list, linkage=str(config.clustering_linkage))
+        base = np.zeros_like(row)
+        for asset_idx, weight in zip(active_list, alloc, strict=False):
+            base[asset_idx] = signs[asset_idx] * weight
         return _normalize_gross(base)
 
     if config.method == "vol_target":
@@ -631,10 +661,19 @@ def _estimate_covariance(
         cov = np.cov(clean, rowvar=False)
     elif est == "ewma":
         cov = _ewma_covariance(clean, halflife=float(config.covariance_ewma_halflife))
-    elif est == "shrinkage":
+    elif est in {"shrinkage", "ledoit_wolf", "oas"}:
         sample = np.cov(clean, rowvar=False)
         diag = np.diag(np.diag(sample))
-        alpha = float(np.clip(config.covariance_shrinkage, 0.0, 1.0))
+        n_samples = max(clean.shape[0], 1)
+        n_assets = max(clean.shape[1], 1)
+        if est == "ledoit_wolf":
+            alpha_auto = float(np.clip((n_assets + 1.0) / (n_samples + n_assets + 1.0), 0.0, 1.0))
+        elif est == "oas":
+            alpha_auto = float(np.clip((2.0 * n_assets + n_samples) / ((n_assets + 1.0) * max(n_samples - 1.0, 1.0)), 0.0, 1.0))
+        else:
+            alpha_auto = float(np.clip(config.covariance_shrinkage, 0.0, 1.0))
+        manual = float(np.clip(config.covariance_shrinkage, 0.0, 1.0))
+        alpha = manual if manual > 0 else alpha_auto
         cov = (1.0 - alpha) * sample + alpha * diag
     elif est == "robust":
         med = np.median(clean, axis=0)
@@ -666,7 +705,7 @@ def _select_covariance_estimator(*, config: PortfolioConstructionConfig, sample_
     if est == "robust" and sample_depth < int(config.covariance_robust_min_samples):
         return "shrinkage"
     if est in {"sample", "ewma"} and sample_depth < int(config.covariance_shrinkage_min_samples):
-        return "shrinkage"
+        return "ledoit_wolf"
     return est
 
 
@@ -882,6 +921,107 @@ def _ewma_covariance(returns: np.ndarray, *, halflife: float) -> np.ndarray:
     if wsum > 0:
         cov /= wsum
     return cov
+
+
+def _correlation_distance(covariance: np.ndarray) -> np.ndarray:
+    cov = np.asarray(covariance, dtype=float)
+    diag = np.clip(np.diag(cov), 1e-12, None)
+    std = np.sqrt(diag)
+    corr = cov / np.outer(std, std)
+    corr = np.clip(corr, -1.0, 1.0)
+    dist = np.sqrt(0.5 * (1.0 - corr))
+    dist = np.nan_to_num(dist, nan=1.0, posinf=1.0, neginf=1.0)
+    np.fill_diagonal(dist, 0.0)
+    return dist
+
+
+def _linkage_pair(distance: np.ndarray, left: tuple[int, ...], right: tuple[int, ...], linkage: str) -> float:
+    vals = [distance[i, j] for i in left for j in right]
+    if not vals:
+        return 0.0
+    if linkage == "complete":
+        return float(np.max(vals))
+    if linkage == "average":
+        return float(np.mean(vals))
+    if linkage == "ward":
+        return float(np.mean(vals))
+    return float(np.min(vals))
+
+
+def _hierarchical_cluster_order(indices: list[int], covariance: np.ndarray, linkage: str) -> list[int]:
+    if len(indices) <= 1:
+        return list(indices)
+    dist = _correlation_distance(covariance)
+    clusters: list[tuple[int, ...]] = [(idx,) for idx in indices]
+    while len(clusters) > 1:
+        best_i = 0
+        best_j = 1
+        best_val = _linkage_pair(dist, clusters[0], clusters[1], linkage)
+        for i in range(len(clusters) - 1):
+            for j in range(i + 1, len(clusters)):
+                score = _linkage_pair(dist, clusters[i], clusters[j], linkage)
+                if score < best_val:
+                    best_i, best_j, best_val = i, j, score
+        merged = clusters[best_i] + clusters[best_j]
+        for k in sorted((best_i, best_j), reverse=True):
+            clusters.pop(k)
+        clusters.append(merged)
+    return list(clusters[0])
+
+
+def _cluster_variance(covariance: np.ndarray, cluster: list[int]) -> float:
+    if not cluster:
+        return 0.0
+    sub = covariance[np.ix_(cluster, cluster)]
+    inv_diag = 1.0 / np.clip(np.diag(sub), 1e-12, None)
+    w = inv_diag / np.sum(inv_diag)
+    return float(w @ sub @ w)
+
+
+def _hrp_allocation(covariance: np.ndarray, indices: list[int], linkage: str) -> np.ndarray:
+    order = _hierarchical_cluster_order(indices, covariance, linkage)
+    weights = {idx: 1.0 for idx in order}
+    queue: list[list[int]] = [order]
+    while queue:
+        cluster = queue.pop(0)
+        if len(cluster) <= 1:
+            continue
+        split = len(cluster) // 2
+        left = cluster[:split]
+        right = cluster[split:]
+        v_left = max(_cluster_variance(covariance, left), 1e-12)
+        v_right = max(_cluster_variance(covariance, right), 1e-12)
+        alpha = 1.0 - v_left / (v_left + v_right)
+        for i in left:
+            weights[i] *= alpha
+        for i in right:
+            weights[i] *= 1.0 - alpha
+        queue.extend([left, right])
+    out = np.array([weights[i] for i in indices], dtype=float)
+    out = np.clip(out, 0.0, None)
+    s = float(np.sum(out))
+    return out / s if s > 0 else np.ones(len(indices)) / len(indices)
+
+
+def _herc_allocation(covariance: np.ndarray, indices: list[int], linkage: str) -> np.ndarray:
+    order = _hierarchical_cluster_order(indices, covariance, linkage)
+    if len(order) <= 2:
+        return _hrp_allocation(covariance, indices, linkage)
+    split = max(1, int(np.sqrt(len(order))))
+    groups: list[list[int]] = [order[i : i + split] for i in range(0, len(order), split)]
+    group_vars = np.array([max(_cluster_variance(covariance, g), 1e-12) for g in groups], dtype=float)
+    inv = 1.0 / group_vars
+    group_w = inv / np.sum(inv)
+    asset_weights = {idx: 0.0 for idx in indices}
+    for g_w, g in zip(group_w, groups, strict=False):
+        sub = covariance[np.ix_(g, g)]
+        inv_diag = 1.0 / np.clip(np.diag(sub), 1e-12, None)
+        local = inv_diag / np.sum(inv_diag)
+        for i, lw in zip(g, local, strict=False):
+            asset_weights[i] = float(g_w * lw)
+    out = np.array([asset_weights[i] for i in indices], dtype=float)
+    s = float(np.sum(out))
+    return out / s if s > 0 else np.ones(len(indices)) / len(indices)
 
 
 def _factor_exposure_for_horizon(
