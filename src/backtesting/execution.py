@@ -261,6 +261,74 @@ class SpreadSlippage:
         return float(price * (1.0 + np.sign(size) * half_spread))
 
 
+class SquareRootImpactSlippage:
+    """Square-root participation impact approximation.
+
+    Impact is modeled as ``impact_bps * sqrt(participation_rate)`` and applied in
+    the trade direction.
+    """
+
+    def __init__(self, impact_bps: float = 15.0, max_participation: float = 1.0) -> None:
+        if impact_bps < 0.0:
+            raise ValueError("impact_bps must be non-negative.")
+        if max_participation <= 0.0:
+            raise ValueError("max_participation must be positive.")
+        self.impact_bps = float(impact_bps)
+        self.max_participation = float(max_participation)
+
+    def apply(self, price: float, size: float, liquidity_context: Any | None = None) -> float:
+        if size == 0.0:
+            return float(price)
+        participation = max(_context_value(liquidity_context, "realized_participation", np.nan), 0.0)
+        if not np.isfinite(participation):
+            available = max(_context_value(liquidity_context, "available_bar_volume", 0.0), 1e-12)
+            participation = min(abs(float(size)) / available, self.max_participation)
+        participation = min(float(participation), self.max_participation)
+        impact = (self.impact_bps * np.sqrt(participation)) / 10_000.0
+        return float(price * (1.0 + np.sign(size) * impact))
+
+
+class LatencyQueueDriftSlippage:
+    """Adverse drift model that penalizes delayed/queued marketable orders."""
+
+    def __init__(
+        self,
+        drift_bps_per_bar: float = 1.0,
+        queue_drift_bps: float = 2.0,
+        latency_ms_per_bar: float = 60_000.0,
+    ) -> None:
+        if drift_bps_per_bar < 0.0 or queue_drift_bps < 0.0:
+            raise ValueError("Latency drift parameters must be non-negative.")
+        if latency_ms_per_bar <= 0.0:
+            raise ValueError("latency_ms_per_bar must be positive.")
+        self.drift_bps_per_bar = float(drift_bps_per_bar)
+        self.queue_drift_bps = float(queue_drift_bps)
+        self.latency_ms_per_bar = float(latency_ms_per_bar)
+
+    def apply(self, price: float, size: float, liquidity_context: Any | None = None) -> float:
+        if size == 0.0:
+            return float(price)
+        latency_bars = max(_context_value(liquidity_context, "latency_bars", 0.0), 0.0)
+        latency_ms = max(_context_value(liquidity_context, "latency_ms", 0.0), 0.0)
+        queue_rank = float(np.clip(_context_value(liquidity_context, "queue_rank_proxy", 0.5), 0.0, 1.0))
+        equivalent_bars = latency_bars + latency_ms / self.latency_ms_per_bar
+        drift_bps = self.drift_bps_per_bar * equivalent_bars + self.queue_drift_bps * queue_rank
+        return float(price * (1.0 + np.sign(size) * drift_bps / 10_000.0))
+
+
+class CompositeSlippage:
+    """Composable slippage stack combining spread/impact/drift modules."""
+
+    def __init__(self, components: list[SlippageModel]) -> None:
+        self.components = list(components)
+
+    def apply(self, price: float, size: float, liquidity_context: Any | None = None) -> float:
+        executed = float(price)
+        for component in self.components:
+            executed = float(component.apply(executed, size, liquidity_context))
+        return executed
+
+
 class ParticipationImpactSlippage:
     """Volume participation slippage model with nonlinear impact."""
 
@@ -510,6 +578,17 @@ class PartialFillModel:
             raise ValueError("max_participation_per_bar must be positive.")
         self.max_participation_per_bar = float(max_participation_per_bar)
 
+    def capped_fill_size(self, requested_size: float, available_volume: float, max_participation: float | None = None) -> float:
+        """Return capped fill size under per-bar participation constraints."""
+
+        if requested_size == 0.0:
+            return 0.0
+        cap_ratio = self.max_participation_per_bar if max_participation is None else max(float(max_participation), 0.0)
+        cap = max(float(available_volume), 0.0) * cap_ratio
+        if cap <= 0.0:
+            return 0.0
+        return float(np.sign(requested_size) * min(abs(float(requested_size)), cap))
+
     def run(
         self,
         requested_trades: np.ndarray,
@@ -541,11 +620,9 @@ class PartialFillModel:
             for asset_idx in range(n_assets):
                 requested = float(pending[asset_idx])
                 bar_volume = max(float(volume[idx, asset_idx]), 0.0)
-                cap = bar_volume * self.max_participation_per_bar
-                cap = max(cap, 0.0)
                 fill_size = 0.0
-                if requested != 0.0 and cap > 0.0:
-                    fill_size = np.sign(requested) * min(abs(requested), cap)
+                if requested != 0.0:
+                    fill_size = self.capped_fill_size(requested, bar_volume)
                     pending[asset_idx] -= fill_size
                 executed[idx, asset_idx] = fill_size
                 residual[idx, asset_idx] = pending[asset_idx]

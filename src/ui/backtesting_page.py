@@ -33,6 +33,7 @@ EXIT_SIGNALS = ["none", "momentum_flip", "trailing_stop", "max_hold"]
 STRATEGIES = ["momentum", "xsmom"]
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization"]
+EXECUTION_MODELS = ["bps", "spread", "participation", "square_root", "latency_drift", "modular", "volatility_scaled"]
 
 TIMEFRAME_HISTORY_DAYS = {"1m": 14, "5m": 30, "15m": 60, "30m": 120, "1h": 365, "1d": 3650}
 GOVERNANCE_PROMOTION_STATES = ["research", "paper", "shadow", "production"]
@@ -157,6 +158,39 @@ class BacktestingPage(ttk.Frame):
         ttk.Label(strategy_frame, text="Costs (bps)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.costs_bps_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.costs_bps_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Execution Model").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        self.execution_model_var = tk.StringVar(value="bps")
+        ttk.Combobox(
+            strategy_frame,
+            textvariable=self.execution_model_var,
+            state="readonly",
+            values=EXECUTION_MODELS,
+        ).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Spread bps / Max Participation").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        execution_row = ttk.Frame(strategy_frame)
+        execution_row.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.execution_spread_bps_var = tk.StringVar(value="2")
+        self.execution_max_participation_var = tk.StringVar(value="1.0")
+        ttk.Entry(execution_row, textvariable=self.execution_spread_bps_var, width=10).pack(side="left")
+        ttk.Label(execution_row, text=" / ").pack(side="left")
+        ttk.Entry(execution_row, textvariable=self.execution_max_participation_var, width=10).pack(side="left")
+
+        row += 1
+        ttk.Label(strategy_frame, text="Impact bps / Latency bars / Latency ms").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        execution_row2 = ttk.Frame(strategy_frame)
+        execution_row2.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.execution_impact_bps_var = tk.StringVar(value="5")
+        self.execution_latency_bars_var = tk.StringVar(value="0")
+        self.execution_latency_ms_var = tk.StringVar(value="0")
+        ttk.Entry(execution_row2, textvariable=self.execution_impact_bps_var, width=8).pack(side="left")
+        ttk.Label(execution_row2, text=" / ").pack(side="left")
+        ttk.Entry(execution_row2, textvariable=self.execution_latency_bars_var, width=8).pack(side="left")
+        ttk.Label(execution_row2, text=" / ").pack(side="left")
+        ttk.Entry(execution_row2, textvariable=self.execution_latency_ms_var, width=10).pack(side="left")
 
         row += 1
         ttk.Label(strategy_frame, text="Starting Capital").grid(row=row, column=0, sticky="w", padx=8, pady=6)
@@ -1670,6 +1704,12 @@ class BacktestingPage(ttk.Frame):
         self.lookback_days_var.set(str(settings.get("lookback_days", "90")))
         self.skip_days_var.set(str(settings.get("skip_days", "5")))
         self.costs_bps_var.set(str(settings.get("costs_bps", "5")))
+        self.execution_model_var.set(str(settings.get("execution_model", "bps")))
+        self.execution_spread_bps_var.set(str(settings.get("execution_spread_bps", "2")))
+        self.execution_max_participation_var.set(str(settings.get("execution_max_participation", "1.0")))
+        self.execution_impact_bps_var.set(str(settings.get("execution_impact_bps", "5")))
+        self.execution_latency_bars_var.set(str(settings.get("execution_latency_bars", "0")))
+        self.execution_latency_ms_var.set(str(settings.get("execution_latency_ms", "0")))
         self.starting_capital_var.set(str(settings.get("starting_capital", "100000")))
         self.bet_sizing_mode_var.set(str(settings.get("bet_sizing_mode", "half_kelly")))
         self.custom_bet_pct_var.set(str(settings.get("custom_bet_pct", "10")))
@@ -1777,6 +1817,12 @@ class BacktestingPage(ttk.Frame):
             "lookback_days": str(int(lookback)),
             "skip_days": str(int(skip)),
             "costs_bps": str(costs_bps),
+            "execution_model": self.execution_model_var.get().strip() or "bps",
+            "execution_spread_bps": self.execution_spread_bps_var.get().strip() or "2",
+            "execution_max_participation": self.execution_max_participation_var.get().strip() or "1.0",
+            "execution_impact_bps": self.execution_impact_bps_var.get().strip() or "5",
+            "execution_latency_bars": self.execution_latency_bars_var.get().strip() or "0",
+            "execution_latency_ms": self.execution_latency_ms_var.get().strip() or "0",
             "starting_capital": str(starting_capital),
             "bet_sizing_mode": self.bet_sizing_mode_var.get().strip() or "half_kelly",
             "custom_bet_pct": str(custom_bet_pct),
@@ -1881,6 +1927,19 @@ class BacktestingPage(ttk.Frame):
             messagebox.showinfo("Invalid input", "Please select a valid portfolio method.")
             return
 
+        execution_model = self.execution_model_var.get().strip() or "bps"
+        if execution_model not in EXECUTION_MODELS:
+            messagebox.showinfo("Invalid input", "Please select a valid execution model.")
+            return
+        execution_model_params = {
+            "spread_bps": float(parse_float(self.execution_spread_bps_var.get()) or 2.0),
+            "max_participation": float(parse_float(self.execution_max_participation_var.get()) or 1.0),
+            "impact_bps": float(parse_float(self.execution_impact_bps_var.get()) or costs_bps),
+            "latency_bars": int(parse_float(self.execution_latency_bars_var.get()) or 0),
+            "latency_ms": int(parse_float(self.execution_latency_ms_var.get()) or 0),
+            "drift_bps_per_bar": float(parse_float(self.execution_impact_bps_var.get()) or 1.0),
+        }
+
         governance_payload = {
             "hypothesis_id": self.gov_hypothesis_id_var.get().strip(),
             "owner": self.gov_owner_var.get().strip(),
@@ -1919,6 +1978,8 @@ class BacktestingPage(ttk.Frame):
                     costs_bps,
                     selected_entries,
                     selected_exits,
+                    execution_model,
+                    execution_model_params,
                     governance_payload,
                 )
                 status_line = f"Running optimizer across {len(selected_entries) * len(selected_exits)} candidates...\n"
@@ -1938,6 +1999,8 @@ class BacktestingPage(ttk.Frame):
                     costs_bps,
                     selected_entries,
                     selected_exits,
+                    execution_model,
+                    execution_model_params,
                     train_fraction,
                     validation_fraction,
                     test_fraction,
@@ -1967,6 +2030,8 @@ class BacktestingPage(ttk.Frame):
                     timeframe,
                     selected_entries,
                     selected_exits,
+                    execution_model,
+                    execution_model_params,
                     portfolio_cfg,
                     governance_payload,
                 )
@@ -1994,6 +2059,8 @@ class BacktestingPage(ttk.Frame):
                 xsmom_bottom_quantile,
                 xsmom_long_only,
                 xsmom_vol_lookback_days,
+                execution_model,
+                execution_model_params,
                 portfolio_cfg,
                 governance_payload,
             )
@@ -2117,6 +2184,8 @@ class BacktestingPage(ttk.Frame):
         costs_bps: float,
         entry_signals: list[str],
         exit_signals: list[str],
+        execution_model: str,
+        execution_model_params: dict[str, object],
         governance_payload: dict[str, object],
     ) -> None:
         try:
@@ -2156,6 +2225,8 @@ class BacktestingPage(ttk.Frame):
         costs_bps: float,
         entry_signals: list[str],
         exit_signals: list[str],
+        execution_model: str,
+        execution_model_params: dict[str, object],
         train_fraction: float,
         validation_fraction: float,
         test_fraction: float,
@@ -2215,6 +2286,8 @@ class BacktestingPage(ttk.Frame):
         timeframe: str,
         entry_signals: list[str],
         exit_signals: list[str],
+        execution_model: str,
+        execution_model_params: dict[str, object],
         portfolio_cfg: dict[str, object],
         governance_payload: dict[str, object],
     ) -> None:
@@ -2227,6 +2300,8 @@ class BacktestingPage(ttk.Frame):
                 lookback_days=lookback,
                 skip_days=skip,
                 costs_bps=costs_bps,
+                execution_model=execution_model,
+                execution_model_params=execution_model_params,
                 starting_capital=starting_capital,
                 bet_sizing_mode=bet_sizing_mode,
                 custom_bet_pct=custom_bet_pct,
@@ -2257,6 +2332,8 @@ class BacktestingPage(ttk.Frame):
         bottom_quantile: float,
         long_only: bool,
         vol_lookback_days: int,
+        execution_model: str,
+        execution_model_params: dict[str, object],
         portfolio_cfg: dict[str, object],
         governance_payload: dict[str, object],
     ) -> None:
@@ -2269,6 +2346,8 @@ class BacktestingPage(ttk.Frame):
                 lookback_days=lookback,
                 skip_days=skip,
                 costs_bps=costs_bps,
+                execution_model=execution_model,
+                execution_model_params=execution_model_params,
                 starting_capital=starting_capital,
                 bet_sizing_mode=bet_sizing_mode,
                 custom_bet_pct=custom_bet_pct,

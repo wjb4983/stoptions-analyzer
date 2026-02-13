@@ -14,6 +14,7 @@ from src.backtesting.signals.config import (
     TrailingStopExitConfig,
     VolatilityCarryEntryConfig,
     parse_entry_signal_config,
+    parse_execution_model_config,
     parse_exit_signal_config,
     parse_strategy_knobs,
 )
@@ -202,3 +203,14 @@ def test_config_parsing_and_validation() -> None:
 
     with pytest.raises(ValueError):
         parse_strategy_knobs("vol_carry", {"short_vol_window": 10, "long_vol_window": 5})
+
+
+def test_parse_execution_model_config_supports_modular_components() -> None:
+    cfg = parse_execution_model_config("modular", {"spread_bps": 3.0, "impact_bps": 7.0})
+    assert cfg.name == "modular"
+    assert float(cfg.params["spread_bps"]) == 3.0
+
+
+def test_parse_execution_model_config_rejects_unknown_model() -> None:
+    with pytest.raises(ValueError):
+        parse_execution_model_config("bogus", {})

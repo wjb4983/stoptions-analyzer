@@ -344,3 +344,17 @@ def parse_strategy_knobs(strategy_name: str, params: Mapping[str, Any] | None) -
             event_window=event_window,
         )
     raise ValueError(f"Unsupported strategy knobs for: {strategy_name}")
+
+
+@dataclass(frozen=True)
+class ExecutionModelConfig:
+    name: str = "bps"
+    params: dict[str, float] | dict[str, object] | None = None
+
+
+def parse_execution_model_config(model_name: str, params: Mapping[str, Any] | None) -> ExecutionModelConfig:
+    payload = dict(params or {})
+    name = str(model_name or "bps").strip().lower()
+    if name in {"bps", "spread", "participation", "volatility_scaled", "square_root", "latency_drift", "modular"}:
+        return ExecutionModelConfig(name=name, params=payload)
+    raise ValueError(f"Unsupported execution model: {model_name}")

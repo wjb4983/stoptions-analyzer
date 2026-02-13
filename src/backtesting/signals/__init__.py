@@ -1,6 +1,7 @@
 from .config import (
     BreakoutEntryConfig,
     EntrySignalConfig,
+    ExecutionModelConfig,
     ExitSignalConfig,
     MaxHoldExitConfig,
     MeanReversionEntryConfig,
@@ -13,6 +14,7 @@ from .config import (
     TrendStrengthRegimeEntryConfig,
     VolatilityCarryEntryConfig,
     parse_entry_signal_config,
+    parse_execution_model_config,
     parse_exit_signal_config,
     parse_strategy_knobs,
     required_lookback_window,
@@ -28,6 +30,7 @@ from .engine import (
 __all__ = [
     "BreakoutEntryConfig",
     "EntrySignalConfig",
+    "ExecutionModelConfig",
     "ExitSignalConfig",
     "MaxHoldExitConfig",
     "MeanReversionEntryConfig",
@@ -40,6 +43,7 @@ __all__ = [
     "TrendStrengthRegimeEntryConfig",
     "VolatilityCarryEntryConfig",
     "parse_entry_signal_config",
+    "parse_execution_model_config",
     "parse_exit_signal_config",
     "parse_strategy_knobs",
     "required_lookback_window",

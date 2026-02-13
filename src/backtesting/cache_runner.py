@@ -32,7 +32,10 @@ from analysis.reporting import (
 from backtesting.execution import (
     AssetClassCarryCost,
     BpsSlippage,
+    CompositeSlippage,
+    LatencyQueueDriftSlippage,
     ParticipationImpactSlippage,
+    SquareRootImpactSlippage,
     ShortBorrowCost,
     SlippageCalibrationSelection,
     SpreadSlippage,
@@ -1830,6 +1833,8 @@ def run_multi_signal_backtest(
     costs_bps: float,
     entry_signals: list[str],
     exit_signals: list[str],
+    execution_model: str = "bps",
+    execution_model_params: dict[str, object] | None = None,
     starting_capital: float = 100_000.0,
     bet_sizing_mode: str = "half_kelly",
     custom_bet_pct: float = 10.0,
@@ -1865,6 +1870,8 @@ def run_multi_signal_backtest(
                 lookback_days=lookback_days,
                 skip_days=skip_days,
                 costs_bps=costs_bps,
+                execution_model=execution_model,
+                execution_model_params=execution_model_params,
                 signal_rebalance_interval=390,
                 starting_capital=starting_capital,
                 bet_sizing_mode=bet_sizing_mode,
@@ -3290,6 +3297,33 @@ def _build_slippage_model(
             max_participation=float(cfg.get("max_participation", 1.0)),
         )
         return model, default_selection
+    if name == "square_root":
+        model = SquareRootImpactSlippage(
+            impact_bps=float(cfg.get("impact_bps", costs_bps)),
+            max_participation=float(cfg.get("max_participation", 1.0)),
+        )
+        return model, default_selection
+    if name == "latency_drift":
+        model = LatencyQueueDriftSlippage(
+            drift_bps_per_bar=float(cfg.get("drift_bps_per_bar", 1.0)),
+            queue_drift_bps=float(cfg.get("queue_drift_bps", 2.0)),
+            latency_ms_per_bar=float(cfg.get("latency_ms_per_bar", 60000.0)),
+        )
+        return model, default_selection
+    if name == "modular":
+        components = [
+            SpreadSlippage(float(cfg.get("spread_bps", 2.0))),
+            SquareRootImpactSlippage(
+                impact_bps=float(cfg.get("impact_bps", costs_bps)),
+                max_participation=float(cfg.get("max_participation", 1.0)),
+            ),
+            LatencyQueueDriftSlippage(
+                drift_bps_per_bar=float(cfg.get("drift_bps_per_bar", 1.0)),
+                queue_drift_bps=float(cfg.get("queue_drift_bps", 2.0)),
+                latency_ms_per_bar=float(cfg.get("latency_ms_per_bar", 60000.0)),
+            ),
+        ]
+        return CompositeSlippage(components), default_selection
     if name == "volatility_scaled":
         model = VolatilityScaledSlippage(
             base_bps=float(cfg.get("base_bps", costs_bps)),
