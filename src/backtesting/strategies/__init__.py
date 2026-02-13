@@ -8,6 +8,21 @@ from .alpha_model import (
     probability_calibrated_position_size,
 )
 from .greek_targets import GreekNeutralTargetRequest, build_greek_neutral_targets, compute_aggregate_greek_exposures
+from .dsl import (
+    BUILTIN_STRATEGY_TEMPLATES,
+    ExecutableStrategy,
+    StrategyDSLValidationError,
+    StrategyDefinition,
+    compile_strategy,
+    compile_template,
+    get_template_payload,
+    list_template_names,
+    load_compiled_strategy,
+    parse_strategy_file,
+    parse_strategy_payload,
+    parse_strategy_text,
+    validate_strategy_payload,
+)
 from .xsmom import (
     CrossSectionalMomentumConfig,
     assign_rank_buckets,
@@ -38,6 +53,19 @@ __all__ = [
     "GreekNeutralTargetRequest",
     "build_greek_neutral_targets",
     "compute_aggregate_greek_exposures",
+    "StrategyDSLValidationError",
+    "StrategyDefinition",
+    "ExecutableStrategy",
+    "validate_strategy_payload",
+    "parse_strategy_payload",
+    "parse_strategy_text",
+    "parse_strategy_file",
+    "compile_strategy",
+    "load_compiled_strategy",
+    "BUILTIN_STRATEGY_TEMPLATES",
+    "list_template_names",
+    "get_template_payload",
+    "compile_template",
 ]
 
 
