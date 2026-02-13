@@ -680,7 +680,7 @@ def run_time_series_momentum_backtest(
         baseline_metrics=metrics,
         scenario_results=scenario_results,
     )
-    scenario_payload.update(_stress_gate_summary(scenario_payload))
+    scenario_payload.update(_stress_gate_summary(scenario_payload, controls=stress_controls))
 
     account_state = result.cost_breakdown.get("account_state", {})
     merged_risk_diagnostics = dict(portfolio_result.diagnostics)
@@ -1898,7 +1898,7 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
     scenario_defs = _build_stress_scenario_definitions(timestamps=np.arange(result.returns.size, dtype=np.int64), returns=_to_numpy_1d(result.returns), controls=dict(payload.get("stress_controls", {})))
     scenario_rows = _run_stress_scenario_wrappers(returns=_to_numpy_1d(result.returns), prices=prices, scenario_definitions=scenario_defs)
     scenario_payload = build_scenario_attribution_and_guardrails(baseline_metrics={k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))}, scenario_results=scenario_rows)
-    stress_gate = _stress_gate_summary(scenario_payload)
+    stress_gate = _stress_gate_summary(scenario_payload, controls=dict(payload.get("stress_controls", {})))
     return {
         "entry_signal": payload["entry_signal"],
         "entry_signal_params": json.dumps(payload.get("entry_signal_params", {}), sort_keys=True),
@@ -2250,7 +2250,7 @@ def run_multi_signal_backtest(
             run_dir = _extract_saved_output_dir(report)
             metrics = _load_metrics_from_run_dir(run_dir)
             stress_payload = _load_stress_payload_from_run_dir(run_dir)
-            stress_gate = _stress_gate_summary(stress_payload)
+            stress_gate = _stress_gate_summary(stress_payload, controls=stress_controls)
             rows.append(
                 {
                     "entry_signal": entry_signal,
@@ -2775,6 +2775,92 @@ def _build_stress_scenario_definitions(
             },
         ]
     )
+    rows.extend(
+        _build_synthetic_regime_switch_paths(
+            returns=np.asarray(returns, dtype=float).reshape(-1),
+            prices=np.asarray(prices_from_returns_proxy(returns), dtype=float),
+            controls=cfg,
+        )
+    )
+    return rows
+
+
+def prices_from_returns_proxy(returns: np.ndarray) -> np.ndarray:
+    arr = np.asarray(returns, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return np.zeros((0, 1), dtype=float)
+    px = np.cumprod(1.0 + arr)
+    return np.column_stack([px, px])
+
+
+def _build_synthetic_regime_switch_paths(
+    *,
+    returns: np.ndarray,
+    prices: np.ndarray,
+    controls: dict[str, Any],
+) -> list[dict[str, Any]]:
+    n_obs = int(returns.size)
+    if n_obs <= 0:
+        return []
+
+    seed = int(controls.get("synthetic_path_seed", 314159))
+    n_paths = max(1, int(controls.get("synthetic_path_count", 3)))
+    jump_mag = float(controls.get("synthetic_jump_magnitude", 0.02))
+    rng = np.random.default_rng(seed)
+    base_vol = float(np.std(returns, ddof=1)) if n_obs > 1 else float(np.std(returns))
+    base_vol = max(base_vol, 1e-4)
+
+    rows: list[dict[str, Any]] = []
+    for idx in range(n_paths):
+        regime_lengths = []
+        total = 0
+        while total < n_obs:
+            seg = int(rng.integers(max(6, n_obs // 12), max(8, n_obs // 4) + 1))
+            regime_lengths.append(seg)
+            total += seg
+
+        path = np.zeros(n_obs, dtype=float)
+        cursor = 0
+        prev = 0.0
+        for regime_id, seg_len in enumerate(regime_lengths):
+            if cursor >= n_obs:
+                break
+            end = min(n_obs, cursor + seg_len)
+            regime_mu = float(rng.normal(loc=-0.0002 * (1 + regime_id), scale=0.0008))
+            regime_vol = float(base_vol * rng.uniform(0.8, 2.5))
+            dof = int(rng.integers(3, 7))
+            for t in range(cursor, end):
+                vol_cluster = regime_vol * (1.0 + 0.65 * min(abs(prev) / base_vol, 2.0))
+                fat_tail = float(rng.standard_t(dof) * vol_cluster)
+                jump = -jump_mag * rng.uniform(0.8, 1.4) if rng.random() < 0.08 else 0.0
+                path[t] = regime_mu + fat_tail + jump
+                prev = path[t]
+            cursor = end
+
+        corr_component = np.zeros_like(path)
+        if np.asarray(prices).ndim == 2 and prices.shape[1] > 1:
+            asset_rets = np.diff(np.asarray(prices, dtype=float), axis=0) / np.where(prices[:-1] == 0.0, 1.0, prices[:-1])
+            if asset_rets.size:
+                dispersion = np.std(asset_rets, axis=1)
+                scale = float(np.mean(dispersion)) if np.mean(dispersion) > 0 else 1.0
+                corr_component[1 : 1 + min(dispersion.size, n_obs - 1)] = (dispersion / scale - 1.0) * 0.0012
+        path = path + corr_component
+
+        rows.append(
+            {
+                "name": f"synthetic_path_regime_switch_{idx + 1}",
+                "type": "synthetic_path",
+                "path_returns": path.tolist(),
+                "stress_characteristics": {
+                    "regime_switches": max(0, len(regime_lengths) - 1),
+                    "volatility_clustering": True,
+                    "fat_tails": True,
+                    "jumps": True,
+                    "liquidity_drought": True,
+                    "correlation_breakdown": True,
+                },
+            }
+        )
     return rows
 
 
@@ -2848,6 +2934,9 @@ def _run_stress_scenario_wrappers(*, returns: np.ndarray, prices: np.ndarray, sc
             start = int(scenario.get("start", 0))
             end = int(scenario.get("end", base_returns.size))
             shocked = base_returns[max(0, start) : max(0, end)]
+        elif kind == "synthetic_path":
+            path_payload = np.asarray(scenario.get("path_returns", []), dtype=float).reshape(-1)
+            shocked = path_payload if path_payload.size else base_returns
         else:
             transforms = scenario.get("transforms", {})
             shocked = _apply_scenario_transforms(
@@ -2863,22 +2952,44 @@ def _run_stress_scenario_wrappers(*, returns: np.ndarray, prices: np.ndarray, sc
                 "observation_count": int(shocked.size),
                 "pnl_total": float(np.sum(shocked)),
                 "metrics": metrics,
+                "stress_characteristics": scenario.get("stress_characteristics", {}),
             }
         )
     return rows
 
 
-def _stress_gate_summary(scenario_payload: dict[str, Any]) -> dict[str, Any]:
+def _stress_gate_summary(scenario_payload: dict[str, Any], controls: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = dict(controls or {})
     checks = scenario_payload.get("scenario_guardrails", []) if isinstance(scenario_payload, dict) else []
+    attributions = scenario_payload.get("scenario_attribution", []) if isinstance(scenario_payload, dict) else []
     if not isinstance(checks, list):
         checks = []
+    if not isinstance(attributions, list):
+        attributions = []
     failed = [row for row in checks if isinstance(row, dict) and not bool(row.get("passed", False))]
+    failed_names = [str(row.get("scenario", "unnamed")) for row in failed]
     total = len(checks)
+    drawdown_shocks = [abs(float(row.get("delta_max_drawdown", 0.0))) for row in attributions if isinstance(row, dict)]
+    sharpe_shocks = [max(0.0, -float(row.get("delta_sharpe", 0.0))) for row in attributions if isinstance(row, dict)]
+    return_shocks = [max(0.0, -float(row.get("delta_total_return", 0.0))) for row in attributions if isinstance(row, dict)]
+    fragility_index = float(
+        0.5 * (float(np.mean(drawdown_shocks)) if drawdown_shocks else 0.0)
+        + 0.3 * (float(np.mean(sharpe_shocks)) if sharpe_shocks else 0.0)
+        + 0.2 * (float(np.mean(return_shocks)) if return_shocks else 0.0)
+    )
+    survivability = max(0.0, min(1.0, (1.0 - fragility_index) * (float((total - len(failed)) / total) if total else 1.0)))
+    threshold = float(cfg.get("stress_survivability_min", 0.55))
+    model_gate_passed = (len(failed) == 0) and (survivability >= threshold)
     return {
         "stress_passed": len(failed) == 0,
         "stress_total_scenarios": int(total),
         "stress_failed_scenarios": int(len(failed)),
         "stress_pass_rate": float((total - len(failed)) / total) if total else 1.0,
+        "stress_failed_scenario_names": failed_names,
+        "stress_fragility_index": fragility_index,
+        "stress_survivability_score": survivability,
+        "stress_survivability_min": threshold,
+        "stress_model_gate_passed": bool(model_gate_passed),
     }
 
 

@@ -114,3 +114,31 @@ def test_stress_gate_summary_flags_failures() -> None:
     assert summary["stress_passed"] is False
     assert summary["stress_failed_scenarios"] == 1
     assert summary["stress_total_scenarios"] == 2
+
+
+def test_stress_scenario_definitions_include_synthetic_regime_switch_paths() -> None:
+    definitions = cache_runner._build_stress_scenario_definitions(
+        timestamps=np.arange(_fixture_returns().size, dtype=np.int64),
+        returns=_fixture_returns(),
+        controls={"synthetic_path_count": 2, "synthetic_path_seed": 7},
+    )
+    synthetic = [row for row in definitions if str(row.get("type")) == "synthetic_path"]
+    assert len(synthetic) == 2
+    assert all("regime_switches" in dict(row.get("stress_characteristics", {})) for row in synthetic)
+
+
+def test_stress_gate_summary_emits_survivability_and_failures() -> None:
+    payload = {
+        "scenario_guardrails": [
+            {"scenario": "a", "passed": True},
+            {"scenario": "b", "passed": False},
+        ],
+        "scenario_attribution": [
+            {"delta_max_drawdown": -0.2, "delta_sharpe": -0.5, "delta_total_return": -0.1},
+            {"delta_max_drawdown": -0.1, "delta_sharpe": -0.2, "delta_total_return": -0.05},
+        ],
+    }
+    summary = cache_runner._stress_gate_summary(payload, controls={"stress_survivability_min": 0.8})
+    assert summary["stress_failed_scenario_names"] == ["b"]
+    assert 0.0 <= summary["stress_survivability_score"] <= 1.0
+    assert summary["stress_model_gate_passed"] is False
