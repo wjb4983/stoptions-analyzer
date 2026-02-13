@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 import numpy as np
 
+from analysis.attribution import build_attribution_payload
 from analysis.reporting import (
     build_scenario_attribution_and_guardrails,
     build_backtest_robustness_report,
@@ -84,6 +85,7 @@ from backtesting.optimization import (
 )
 from backtesting.experiment_registry import append_experiment_entry
 from backtesting.monitoring import evaluate_drift_monitoring
+from backtesting.attribution import write_attribution_artifacts
 
 
 LOGGER = logging.getLogger(__name__)
@@ -91,6 +93,8 @@ CANONICAL_METRIC_SCHEMA_VERSION = "1.0"
 RUN_MANIFEST_SCHEMA_VERSION = "2.0"
 METRIC_TABLE_SCHEMA_VERSIONS: dict[str, str] = {
     "metrics": CANONICAL_METRIC_SCHEMA_VERSION,
+    "attribution_timeseries": CANONICAL_METRIC_SCHEMA_VERSION,
+    "attribution_summary": CANONICAL_METRIC_SCHEMA_VERSION,
     "leaderboard": CANONICAL_METRIC_SCHEMA_VERSION,
     "per_combo_summary": CANONICAL_METRIC_SCHEMA_VERSION,
 }
@@ -481,6 +485,14 @@ def run_time_series_momentum_backtest(
         key: float(value)
         for key, value in result.cost_breakdown.get("totals", {}).items()
     }
+    attribution_payload = build_attribution_payload(
+        timestamps=np.asarray(timestamps),
+        prices=prices,
+        positions=_to_numpy_2d(result.positions),
+        slippage_drag=_to_numpy_1d(result.cost_breakdown.get("slippage", np.zeros_like(returns))),
+        fee_drag=_to_numpy_1d(result.cost_breakdown.get("fees", np.zeros_like(returns))),
+        borrow_drag=_to_numpy_1d(result.cost_breakdown.get("borrow", np.zeros_like(returns))),
+    )
 
     metrics = dict(result.metrics)
     metrics["turnover_total"] = turnover_stats["total"]
@@ -614,6 +626,7 @@ def run_time_series_momentum_backtest(
         governance=governance_payload,
         corporate_action_splits=arrays.split_factors,
         corporate_action_dividends=arrays.dividends,
+        attribution_payload={"time_series": attribution_payload.time_series, "summary": attribution_payload.summary},
     )
 
     trade_log_rows = _build_trade_log_rows(
@@ -2856,6 +2869,7 @@ def _persist_backtest_outputs(
     governance: dict[str, Any] | None = None,
     corporate_action_splits: np.ndarray | None = None,
     corporate_action_dividends: np.ndarray | None = None,
+    attribution_payload: dict[str, Any] | None = None,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
@@ -2943,7 +2957,11 @@ def _persist_backtest_outputs(
         writer.writerows(metrics_rows)
     (run_dir / "metrics.json").write_text(json.dumps(metrics_rows, indent=2))
     (run_dir / "metric_schema_version.txt").write_text(f"{CANONICAL_METRIC_SCHEMA_VERSION}\n")
-    metric_tables = _write_metric_table_manifest(run_dir=run_dir, run_type="backtest", table_names=["metrics"])
+    metric_table_names = ["metrics"]
+    if attribution_payload:
+        write_attribution_artifacts(run_dir=run_dir, payload=attribution_payload)
+        metric_table_names.extend(["attribution_timeseries", "attribution_summary"])
+    metric_tables = _write_metric_table_manifest(run_dir=run_dir, run_type="backtest", table_names=metric_table_names)
 
     if robustness_report is not None:
         _write_robustness_report(run_dir=run_dir, robustness_report=robustness_report)
