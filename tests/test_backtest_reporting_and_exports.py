@@ -154,6 +154,7 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     assert "bootstrap_confidence_intervals" in robustness
     assert "deflated_sharpe_ratio" in robustness
     assert "capacity_diagnostics" in robustness
+    assert "model_drift_diagnostics" in robustness
 
     ci = robustness["bootstrap_confidence_intervals"]
     for metric_name in ["sharpe", "cagr", "max_drawdown"]:
@@ -222,6 +223,14 @@ def test_format_backtest_report_contains_required_sections() -> None:
                     {"participation_rate": 0.01, "expected_slippage_bps": 2.5}
                 ],
             },
+            "model_drift_diagnostics": {
+                "baseline_mean": 0.001,
+                "baseline_vol": 0.01,
+                "current_mean": -0.002,
+                "current_vol": 0.02,
+                "drift_z_score": -0.3,
+                "retraining_triggered": False,
+            },
         },
     )
 
@@ -233,6 +242,7 @@ def test_format_backtest_report_contains_required_sections() -> None:
     assert "Bootstrap Confidence Intervals" in report
     assert "Deflated Sharpe Ratio" in report
     assert "Capacity Diagnostics" in report
+    assert "Model Drift Diagnostics" in report
 
 
 def test_persist_sweep_outputs_writes_robustness_report(tmp_path: Path) -> None:
