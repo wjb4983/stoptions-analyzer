@@ -194,6 +194,46 @@ class BacktestingPage(ttk.Frame):
         ttk.Entry(execution_row2, textvariable=self.execution_latency_ms_var, width=10).pack(side="left")
 
         row += 1
+        ttk.Label(strategy_frame, text="Stress: Replay/Jump/Overlay").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        stress_row = ttk.Frame(strategy_frame)
+        stress_row.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.stress_enable_historical_replay_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(stress_row, text="Historical replay regimes", variable=self.stress_enable_historical_replay_var).pack(side="left")
+
+        row += 1
+        ttk.Label(strategy_frame, text="Stress window frac / replay bars").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        stress_row2 = ttk.Frame(strategy_frame)
+        stress_row2.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.stress_historical_window_fraction_var = tk.StringVar(value="0.20")
+        self.stress_historical_replay_window_bars_var = tk.StringVar(value="20")
+        ttk.Entry(stress_row2, textvariable=self.stress_historical_window_fraction_var, width=8).pack(side="left")
+        ttk.Label(stress_row2, text=" / ").pack(side="left")
+        ttk.Entry(stress_row2, textvariable=self.stress_historical_replay_window_bars_var, width=8).pack(side="left")
+
+        row += 1
+        ttk.Label(strategy_frame, text="Stress jump mag / interval / vol cluster").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        stress_row3 = ttk.Frame(strategy_frame)
+        stress_row3.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.stress_synthetic_jump_magnitude_var = tk.StringVar(value="0.02")
+        self.stress_synthetic_jump_interval_var = tk.StringVar(value="7")
+        self.stress_synthetic_vol_cluster_multiplier_var = tk.StringVar(value="1.6")
+        ttk.Entry(stress_row3, textvariable=self.stress_synthetic_jump_magnitude_var, width=8).pack(side="left")
+        ttk.Label(stress_row3, text=" / ").pack(side="left")
+        ttk.Entry(stress_row3, textvariable=self.stress_synthetic_jump_interval_var, width=8).pack(side="left")
+        ttk.Label(stress_row3, text=" / ").pack(side="left")
+        ttk.Entry(stress_row3, textvariable=self.stress_synthetic_vol_cluster_multiplier_var, width=8).pack(side="left")
+
+        row += 1
+        ttk.Label(strategy_frame, text="Stress overlay spread / liquidity").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        stress_row4 = ttk.Frame(strategy_frame)
+        stress_row4.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.stress_overlay_spread_multiplier_var = tk.StringVar(value="2.5")
+        self.stress_overlay_liquidity_multiplier_var = tk.StringVar(value="0.4")
+        ttk.Entry(stress_row4, textvariable=self.stress_overlay_spread_multiplier_var, width=8).pack(side="left")
+        ttk.Label(stress_row4, text=" / ").pack(side="left")
+        ttk.Entry(stress_row4, textvariable=self.stress_overlay_liquidity_multiplier_var, width=8).pack(side="left")
+
+        row += 1
         ttk.Label(strategy_frame, text="Starting Capital").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.starting_capital_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.starting_capital_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
@@ -1818,6 +1858,14 @@ class BacktestingPage(ttk.Frame):
         self.execution_impact_bps_var.set(str(settings.get("execution_impact_bps", "5")))
         self.execution_latency_bars_var.set(str(settings.get("execution_latency_bars", "0")))
         self.execution_latency_ms_var.set(str(settings.get("execution_latency_ms", "0")))
+        self.stress_enable_historical_replay_var.set(bool(settings.get("stress_enable_historical_replay_regimes", True)))
+        self.stress_historical_window_fraction_var.set(str(settings.get("stress_historical_window_fraction", "0.20")))
+        self.stress_historical_replay_window_bars_var.set(str(settings.get("stress_historical_replay_window_bars", "20")))
+        self.stress_synthetic_jump_magnitude_var.set(str(settings.get("stress_synthetic_jump_magnitude", "0.02")))
+        self.stress_synthetic_jump_interval_var.set(str(settings.get("stress_synthetic_jump_interval", "7")))
+        self.stress_synthetic_vol_cluster_multiplier_var.set(str(settings.get("stress_synthetic_vol_cluster_multiplier", "1.6")))
+        self.stress_overlay_spread_multiplier_var.set(str(settings.get("stress_overlay_spread_multiplier", "2.5")))
+        self.stress_overlay_liquidity_multiplier_var.set(str(settings.get("stress_overlay_liquidity_multiplier", "0.4")))
         self.starting_capital_var.set(str(settings.get("starting_capital", "100000")))
         self.bet_sizing_mode_var.set(str(settings.get("bet_sizing_mode", "half_kelly")))
         self.custom_bet_pct_var.set(str(settings.get("custom_bet_pct", "10")))
@@ -1937,6 +1985,14 @@ class BacktestingPage(ttk.Frame):
             "execution_impact_bps": self.execution_impact_bps_var.get().strip() or "5",
             "execution_latency_bars": self.execution_latency_bars_var.get().strip() or "0",
             "execution_latency_ms": self.execution_latency_ms_var.get().strip() or "0",
+            "stress_enable_historical_replay_regimes": bool(self.stress_enable_historical_replay_var.get()),
+            "stress_historical_window_fraction": self.stress_historical_window_fraction_var.get().strip() or "0.20",
+            "stress_historical_replay_window_bars": self.stress_historical_replay_window_bars_var.get().strip() or "20",
+            "stress_synthetic_jump_magnitude": self.stress_synthetic_jump_magnitude_var.get().strip() or "0.02",
+            "stress_synthetic_jump_interval": self.stress_synthetic_jump_interval_var.get().strip() or "7",
+            "stress_synthetic_vol_cluster_multiplier": self.stress_synthetic_vol_cluster_multiplier_var.get().strip() or "1.6",
+            "stress_overlay_spread_multiplier": self.stress_overlay_spread_multiplier_var.get().strip() or "2.5",
+            "stress_overlay_liquidity_multiplier": self.stress_overlay_liquidity_multiplier_var.get().strip() or "0.4",
             "starting_capital": str(starting_capital),
             "bet_sizing_mode": self.bet_sizing_mode_var.get().strip() or "half_kelly",
             "custom_bet_pct": str(custom_bet_pct),
@@ -2070,6 +2126,16 @@ class BacktestingPage(ttk.Frame):
             "latency_ms": int(parse_float(self.execution_latency_ms_var.get()) or 0),
             "drift_bps_per_bar": float(parse_float(self.execution_impact_bps_var.get()) or 1.0),
         }
+        stress_controls = {
+            "enable_historical_replay_regimes": bool(self.stress_enable_historical_replay_var.get()),
+            "historical_window_fraction": float(parse_float(self.stress_historical_window_fraction_var.get()) or 0.20),
+            "historical_replay_window_bars": int(parse_float(self.stress_historical_replay_window_bars_var.get()) or 20),
+            "synthetic_jump_magnitude": float(parse_float(self.stress_synthetic_jump_magnitude_var.get()) or 0.02),
+            "synthetic_jump_interval": int(parse_float(self.stress_synthetic_jump_interval_var.get()) or 7),
+            "synthetic_vol_cluster_multiplier": float(parse_float(self.stress_synthetic_vol_cluster_multiplier_var.get()) or 1.6),
+            "overlay_spread_multiplier": float(parse_float(self.stress_overlay_spread_multiplier_var.get()) or 2.5),
+            "overlay_liquidity_multiplier": float(parse_float(self.stress_overlay_liquidity_multiplier_var.get()) or 0.4),
+        }
 
         governance_payload = {
             "hypothesis_id": self.gov_hypothesis_id_var.get().strip(),
@@ -2112,6 +2178,7 @@ class BacktestingPage(ttk.Frame):
                     execution_model,
                     execution_model_params,
                     governance_payload,
+                    stress_controls,
                 )
                 status_line = f"Running optimizer across {len(selected_entries) * len(selected_exits)} candidates...\n"
             elif bool(self.use_walk_forward_var.get()):
@@ -2143,6 +2210,7 @@ class BacktestingPage(ttk.Frame):
                     cpcv_test_groups,
                     cv_seed,
                     governance_payload,
+                    stress_controls,
                 )
                 status_line = f"Running walk-forward with {len(selected_entries) * len(selected_exits)} candidates...\n"
             else:
@@ -2165,6 +2233,7 @@ class BacktestingPage(ttk.Frame):
                     execution_model_params,
                     portfolio_cfg,
                     governance_payload,
+                    stress_controls,
                 )
                 status_line = f"Running {len(selected_entries) * len(selected_exits)} momentum entry/exit combinations...\n"
         else:
@@ -2194,6 +2263,7 @@ class BacktestingPage(ttk.Frame):
                 execution_model_params,
                 portfolio_cfg,
                 governance_payload,
+                stress_controls,
             )
             status_line = "Running cross-sectional momentum backtest...\n"
 
@@ -2318,6 +2388,7 @@ class BacktestingPage(ttk.Frame):
         execution_model: str,
         execution_model_params: dict[str, object],
         governance_payload: dict[str, object],
+        stress_controls: dict[str, object],
     ) -> None:
         try:
             entry_grid = {signal: [{}] for signal in entry_signals}
@@ -2340,6 +2411,7 @@ class BacktestingPage(ttk.Frame):
                 sampler_name="tpe",
                 partial_period_fractions=[0.33, 0.66, 1.0],
                 governance_metadata=dict(governance_payload),
+                stress_controls=dict(stress_controls),
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
@@ -2369,6 +2441,7 @@ class BacktestingPage(ttk.Frame):
         cpcv_n_test_groups: int,
         cv_seed: int,
         governance_payload: dict[str, object],
+        stress_controls: dict[str, object],
     ) -> None:
         try:
             entry_grid = {signal: [{}] for signal in entry_signals}
@@ -2397,6 +2470,7 @@ class BacktestingPage(ttk.Frame):
                 cpcv_n_test_groups=int(cpcv_n_test_groups),
                 cv_seed=int(cv_seed),
                 governance_metadata=dict(governance_payload),
+                stress_controls=dict(stress_controls),
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
@@ -2421,6 +2495,7 @@ class BacktestingPage(ttk.Frame):
         execution_model_params: dict[str, object],
         portfolio_cfg: dict[str, object],
         governance_payload: dict[str, object],
+        stress_controls: dict[str, object],
     ) -> None:
         try:
             output_text = run_multi_signal_backtest(
@@ -2441,6 +2516,7 @@ class BacktestingPage(ttk.Frame):
                 exit_signals=exit_signals,
                 **portfolio_cfg,
                 governance_metadata=dict(governance_payload),
+                stress_controls=dict(stress_controls),
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
@@ -2467,6 +2543,7 @@ class BacktestingPage(ttk.Frame):
         execution_model_params: dict[str, object],
         portfolio_cfg: dict[str, object],
         governance_payload: dict[str, object],
+        stress_controls: dict[str, object],
     ) -> None:
         try:
             output_text = run_time_series_momentum_backtest(
@@ -2490,6 +2567,7 @@ class BacktestingPage(ttk.Frame):
                 timeframe=timeframe,
                 **portfolio_cfg,
                 governance_metadata=dict(governance_payload),
+                stress_controls=dict(stress_controls),
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"

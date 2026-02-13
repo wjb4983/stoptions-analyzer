@@ -240,6 +240,7 @@ def run_time_series_momentum_backtest(
     regime_risk_map: dict[str, dict[str, float]] | None = None,
     regime_cost_multipliers: dict[str, float] | None = None,
     governance_metadata: dict[str, Any] | None = None,
+    stress_controls: dict[str, Any] | None = None,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     entry_cfg = parse_entry_signal_config(
@@ -528,6 +529,7 @@ def run_time_series_momentum_backtest(
         "regime_cost_multipliers": dict(regime_cost_multipliers or {}),
         "cache_root": str(cache_root),
         "governance": governance_payload,
+        "stress_controls": dict(stress_controls or {}),
     }
 
     fill_rows = list(result.fills)
@@ -542,6 +544,7 @@ def run_time_series_momentum_backtest(
     scenario_definitions = _build_stress_scenario_definitions(
         timestamps=timestamps,
         returns=returns,
+        controls=stress_controls,
     )
     scenario_results = _run_stress_scenario_wrappers(
         returns=returns,
@@ -552,6 +555,7 @@ def run_time_series_momentum_backtest(
         baseline_metrics=metrics,
         scenario_results=scenario_results,
     )
+    scenario_payload.update(_stress_gate_summary(scenario_payload))
 
     account_state = result.cost_breakdown.get("account_state", {})
     merged_risk_diagnostics = dict(portfolio_result.diagnostics)
@@ -912,7 +916,7 @@ def run_parameter_sweep(
     finally:
         adapter.shutdown()
 
-    ranked_rows = sorted(rows, key=lambda row: float(row["sharpe"]), reverse=True)
+    ranked_rows = sorted(rows, key=lambda row: (bool(row.get("stress_passed", False)), float(row["sharpe"])), reverse=True)
     run_dir = _persist_sweep_outputs(
         ranked_rows=ranked_rows,
         invalid_rows=invalid_rows,
@@ -986,6 +990,7 @@ def run_walk_forward_backtest(
     cv_seed: int = 42,
     governance_metadata: dict[str, Any] | None = None,
     lineage_parent_manifest: str | None = None,
+    stress_controls: dict[str, Any] | None = None,
 ) -> str:
     combos, invalid_rows = generate_sweep_combinations(
         entry_grid=entry_grid,
@@ -1362,6 +1367,7 @@ def run_strategy_optimization(
     min_trades: float | None = None,
     partial_period_fractions: list[float] | None = None,
     governance_metadata: dict[str, Any] | None = None,
+    stress_controls: dict[str, Any] | None = None,
 ) -> str:
     combos, invalid_rows = generate_sweep_combinations(
         entry_grid=entry_grid,
@@ -1411,6 +1417,7 @@ def run_strategy_optimization(
                 "end_date": end_date.isoformat(),
                 "cache_root": str(cache_root),
                 "partial_period_fraction": float(period_fraction),
+                "stress_controls": dict(stress_controls or {}),
                 **combo,
             }
         )
@@ -1472,6 +1479,7 @@ def run_strategy_optimization(
                 "constraints": [constraint.__dict__ for constraint in constraints],
                 "partial_period_fractions": partial_period_fractions,
                 "governance": governance_payload,
+                "stress_controls": dict(stress_controls or {}),
             },
             indent=2,
             sort_keys=True,
@@ -1657,6 +1665,10 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         for key, value in result.cost_breakdown.get("totals", {}).items()
     }
     metrics = dict(result.metrics)
+    scenario_defs = _build_stress_scenario_definitions(timestamps=np.arange(result.returns.size, dtype=np.int64), returns=_to_numpy_1d(result.returns), controls=dict(payload.get("stress_controls", {})))
+    scenario_rows = _run_stress_scenario_wrappers(returns=_to_numpy_1d(result.returns), prices=prices, scenario_definitions=scenario_defs)
+    scenario_payload = build_scenario_attribution_and_guardrails(baseline_metrics={k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))}, scenario_results=scenario_rows)
+    stress_gate = _stress_gate_summary(scenario_payload)
     return {
         "entry_signal": payload["entry_signal"],
         "entry_signal_params": json.dumps(payload.get("entry_signal_params", {}), sort_keys=True),
@@ -1682,6 +1694,7 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         "turnover_total": float(np.sum(turnover)) if turnover.size else 0.0,
         "trade_count": float(np.sum(np.abs(trades) > 1e-12)) if trades.size else 0.0,
         "cost_total": cost_totals.get("total", 0.0),
+        **stress_gate,
     }
 
 
@@ -1924,6 +1937,7 @@ def run_multi_signal_backtest(
     portfolio_max_abs_delta_per_underlying: float | None = None,
     portfolio_sector_map: dict[str, str] | None = None,
     governance_metadata: dict[str, Any] | None = None,
+    stress_controls: dict[str, Any] | None = None,
 ) -> str:
     """Run all selected entry/exit combinations with shared core parameters."""
 
@@ -1974,9 +1988,12 @@ def run_multi_signal_backtest(
                 portfolio_max_net_exposure=portfolio_max_net_exposure,
                 portfolio_sector_map=portfolio_sector_map,
                 governance_metadata=governance_metadata,
+                stress_controls=stress_controls,
             )
             run_dir = _extract_saved_output_dir(report)
             metrics = _load_metrics_from_run_dir(run_dir)
+            stress_payload = _load_stress_payload_from_run_dir(run_dir)
+            stress_gate = _stress_gate_summary(stress_payload)
             rows.append(
                 {
                     "entry_signal": entry_signal,
@@ -1996,13 +2013,14 @@ def run_multi_signal_backtest(
                     "turnover_total": float(metrics.get("turnover_total", 0.0)),
                     "cost_total": float(metrics.get("cost_total", 0.0)),
                     "run_dir": str(run_dir),
+                    **stress_gate,
                 }
             )
             combo_reports.append(
                 f"entry={entry_signal} exit={exit_signal}\n{report}\n"
             )
 
-    ranked_rows = sorted(rows, key=lambda row: float(row["sharpe"]), reverse=True)
+    ranked_rows = sorted(rows, key=lambda row: (bool(row.get("stress_passed", False)), float(row["sharpe"])), reverse=True)
     leaderboard_dir = _persist_multi_signal_outputs(ranked_rows)
 
     summary_lines = [
@@ -2048,6 +2066,18 @@ def _load_metrics_from_run_dir(run_dir: Path) -> dict[str, float]:
     return metrics
 
 
+
+
+def _load_stress_payload_from_run_dir(run_dir: Path) -> dict[str, Any]:
+    path = run_dir / "stress_scenarios.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
 def _persist_multi_signal_outputs(rows: list[dict[str, Any]]) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_multi_signal_{timestamp}"
@@ -2070,6 +2100,10 @@ def _persist_multi_signal_outputs(rows: list[dict[str, Any]]) -> Path:
         "rolling_drawdown_worst",
         "turnover_total",
         "cost_total",
+        "stress_passed",
+        "stress_total_scenarios",
+        "stress_failed_scenarios",
+        "stress_pass_rate",
         "run_dir",
     ]
     with (run_dir / "leaderboard.csv").open("w", newline="") as handle:
@@ -2410,15 +2444,31 @@ def _fills_csv(rows: list[dict[str, object]]) -> str:
     ]
     return "\n".join([header, *body]) + "\n"
 
-def _build_stress_scenario_definitions(*, timestamps: np.ndarray, returns: np.ndarray) -> list[dict[str, Any]]:
+def _build_stress_scenario_definitions(
+    *,
+    timestamps: np.ndarray,
+    returns: np.ndarray,
+    controls: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     n_obs = int(np.asarray(returns).size)
     if n_obs <= 0:
         return rows
 
-    window = max(1, min(n_obs, int(max(5, n_obs * 0.2))))
+    cfg = dict(controls or {})
+    window_frac = float(cfg.get("historical_window_fraction", 0.2))
+    window = max(1, min(n_obs, int(max(5, n_obs * window_frac))))
     rows.append({"name": "historical_recent_window", "type": "historical_window", "start": max(0, n_obs - window), "end": n_obs})
     rows.append({"name": "historical_first_window", "type": "historical_window", "start": 0, "end": window})
+
+    if bool(cfg.get("enable_historical_replay_regimes", True)):
+        abs_rets = np.abs(np.asarray(returns, dtype=float))
+        vol_window = max(2, min(n_obs, int(cfg.get("historical_replay_window_bars", 20))))
+        rolling = np.convolve(abs_rets, np.ones(vol_window, dtype=float) / vol_window, mode="valid") if abs_rets.size >= vol_window else abs_rets
+        if rolling.size:
+            peak_idx = int(np.argmax(rolling))
+            start = max(0, min(peak_idx, n_obs - vol_window))
+            rows.append({"name": "historical_volatility_shock_window", "type": "historical_window", "start": start, "end": min(n_obs, start + vol_window)})
 
     rows.extend(
         [
@@ -2446,6 +2496,24 @@ def _build_stress_scenario_definitions(*, timestamps: np.ndarray, returns: np.nd
                 "name": "synthetic_correlation_breakdown",
                 "type": "synthetic_shock",
                 "transforms": {"correlation_breakdown": 1.0, "returns_multiplier": 0.8},
+            },
+            {
+                "name": "synthetic_jump_cluster",
+                "type": "synthetic_shock",
+                "transforms": {
+                    "jump_magnitude": float(cfg.get("synthetic_jump_magnitude", 0.02)),
+                    "jump_interval": int(cfg.get("synthetic_jump_interval", 7)),
+                    "vol_cluster_multiplier": float(cfg.get("synthetic_vol_cluster_multiplier", 1.6)),
+                },
+            },
+            {
+                "name": "synthetic_liquidity_spread_overlay",
+                "type": "synthetic_shock",
+                "transforms": {
+                    "spread_multiplier": float(cfg.get("overlay_spread_multiplier", 2.5)),
+                    "liquidity_multiplier": float(cfg.get("overlay_liquidity_multiplier", 0.4)),
+                    "returns_multiplier": 0.85,
+                },
             },
         ]
     )
@@ -2494,6 +2562,21 @@ def _apply_scenario_transforms(*, base_returns: np.ndarray, prices: np.ndarray, 
             dispersion_effect[1 : 1 + min(dispersion.size, shocked.size - 1)] = (dispersion / scale - 1.0) * 0.0005 * corr_break
             shocked = shocked + dispersion_effect
 
+    jump_mag = float(transforms.get("jump_magnitude", 0.0))
+    jump_interval = max(1, int(transforms.get("jump_interval", 0) or 1))
+    if jump_mag > 0.0 and shocked.size:
+        jump_mask = (np.arange(shocked.size) % jump_interval) == 0
+        shocked[jump_mask] = shocked[jump_mask] - jump_mag
+
+    cluster_mult = float(transforms.get("vol_cluster_multiplier", 1.0))
+    if cluster_mult > 1.0 and shocked.size > 2:
+        rolling_abs = np.abs(shocked)
+        if rolling_abs.size > 1:
+            local = np.zeros_like(rolling_abs)
+            local[1:] = 0.5 * (rolling_abs[:-1] + rolling_abs[1:])
+            scale = np.mean(local[1:]) if np.mean(local[1:]) > 0 else 1.0
+            shocked = shocked * (1.0 + (cluster_mult - 1.0) * np.clip(local / scale - 1.0, 0.0, 2.0))
+
     return shocked
 
 
@@ -2525,6 +2608,20 @@ def _run_stress_scenario_wrappers(*, returns: np.ndarray, prices: np.ndarray, sc
             }
         )
     return rows
+
+
+def _stress_gate_summary(scenario_payload: dict[str, Any]) -> dict[str, Any]:
+    checks = scenario_payload.get("scenario_guardrails", []) if isinstance(scenario_payload, dict) else []
+    if not isinstance(checks, list):
+        checks = []
+    failed = [row for row in checks if isinstance(row, dict) and not bool(row.get("passed", False))]
+    total = len(checks)
+    return {
+        "stress_passed": len(failed) == 0,
+        "stress_total_scenarios": int(total),
+        "stress_failed_scenarios": int(len(failed)),
+        "stress_pass_rate": float((total - len(failed)) / total) if total else 1.0,
+    }
 
 
 def _compute_stream_metrics(returns: np.ndarray) -> dict[str, float]:
