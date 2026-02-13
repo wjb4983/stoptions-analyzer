@@ -723,6 +723,63 @@ def build_scenario_attribution_and_guardrails(
         "scenario_attribution": attribution,
         "scenario_guardrails": guardrails,
     }
+
+
+def export_stress_harness_report(
+    *,
+    scenario_replays: list[dict[str, object]],
+) -> dict[str, object]:
+    """Export per-scenario stress attribution and worst-case decomposition."""
+
+    scenario_rows: list[dict[str, object]] = []
+    worst_case: dict[str, object] = {
+        "scenario": None,
+        "max_drawdown": 0.0,
+        "cvar_95": 0.0,
+        "liquidity_breach_count": 0,
+        "worst_bar": 0,
+        "worst_bar_contribution_by_asset": [],
+    }
+    worst_score = -np.inf
+
+    for row in scenario_replays:
+        name = str(row.get("scenario", row.get("name", "unnamed")))
+        max_drawdown = float(row.get("max_drawdown", 0.0))
+        cvar_95 = float(row.get("cvar_95", 0.0))
+        liquidity_breach_count = int(row.get("liquidity_breach_count", 0))
+        attribution = np.asarray(row.get("attribution_by_asset", []), dtype=float)
+        worst_bar = int(row.get("worst_bar", 0))
+        worst_bar_contrib = np.asarray(row.get("worst_bar_contribution_by_asset", []), dtype=float)
+
+        scenario_rows.append(
+            {
+                "scenario": name,
+                "max_drawdown": max_drawdown,
+                "cvar_95": cvar_95,
+                "liquidity_breach_count": liquidity_breach_count,
+                "attribution_by_asset": attribution.tolist(),
+                "worst_bar": worst_bar,
+                "worst_bar_contribution_by_asset": worst_bar_contrib.tolist(),
+            }
+        )
+
+        score = abs(max_drawdown) + cvar_95 + 0.01 * liquidity_breach_count
+        if score > worst_score:
+            worst_score = score
+            worst_case = {
+                "scenario": name,
+                "max_drawdown": max_drawdown,
+                "cvar_95": cvar_95,
+                "liquidity_breach_count": liquidity_breach_count,
+                "worst_bar": worst_bar,
+                "worst_bar_contribution_by_asset": worst_bar_contrib.tolist(),
+            }
+
+    return {
+        "scenario_reports": scenario_rows,
+        "worst_case_decomposition": worst_case,
+    }
+
 def _compute_pbo_style(
     *,
     ranked_rows: list[dict[str, object]],

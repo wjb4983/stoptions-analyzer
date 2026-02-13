@@ -117,6 +117,101 @@ class BacktestResult:
     execution_events: list[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class StressShockVector:
+    """Linear shock controls applied to asset returns."""
+
+    returns_multiplier_by_asset: tuple[float, ...] = ()
+    returns_shift_by_asset: tuple[float, ...] = ()
+
+
+@dataclass(frozen=True)
+class StressCorrelationBreak:
+    """Correlation break assumptions for stress replay."""
+
+    break_strength: float = 0.0
+    idiosyncratic_amplifier: float = 1.0
+
+
+@dataclass(frozen=True)
+class StressVolatilityJump:
+    """Volatility jump assumptions for stress replay."""
+
+    jump_multiplier: float = 1.0
+    trigger_quantile: float = 0.75
+
+
+@dataclass(frozen=True)
+class StressLiquidityDrought:
+    """Liquidity drought assumptions for stress replay."""
+
+    available_volume_multiplier: float = 1.0
+    spread_multiplier: float = 1.0
+    max_participation_multiplier: float = 1.0
+
+
+@dataclass(frozen=True)
+class StressScenario:
+    """Scenario schema for stress harness."""
+
+    name: str
+    shock_vector: StressShockVector = StressShockVector()
+    correlation_break: StressCorrelationBreak = StressCorrelationBreak()
+    volatility_jump: StressVolatilityJump = StressVolatilityJump()
+    liquidity_drought: StressLiquidityDrought = StressLiquidityDrought()
+
+
+def apply_stress_scenario(
+    *,
+    asset_returns: Any,
+    scenario: StressScenario,
+    liquidity_context: dict[str, np.ndarray] | None = None,
+) -> dict[str, np.ndarray]:
+    """Apply a stress scenario to an asset-return panel and liquidity context."""
+
+    returns = _ensure_2d(np.asarray(asset_returns, dtype=float))
+    periods, assets = returns.shape
+    shocked = returns.copy()
+
+    mult = _resolve_asset_schedule(scenario.shock_vector.returns_multiplier_by_asset, (periods, assets), default=1.0)
+    shift = _resolve_asset_schedule(scenario.shock_vector.returns_shift_by_asset, (periods, assets), default=0.0)
+    shocked = shocked * mult + shift
+
+    break_strength = max(0.0, float(scenario.correlation_break.break_strength))
+    idio_amp = max(0.0, float(scenario.correlation_break.idiosyncratic_amplifier))
+    if break_strength > 0.0 and assets > 1:
+        cross_mean = np.mean(shocked, axis=1, keepdims=True)
+        residual = shocked - cross_mean
+        shocked = cross_mean * (1.0 - break_strength) + residual * idio_amp
+
+    jump_mult = max(0.0, float(scenario.volatility_jump.jump_multiplier))
+    trigger_q = float(np.clip(scenario.volatility_jump.trigger_quantile, 0.0, 1.0))
+    if jump_mult > 1.0 and periods:
+        abs_row = np.mean(np.abs(shocked), axis=1)
+        threshold = float(np.quantile(abs_row, trigger_q)) if abs_row.size else 0.0
+        stress_mask = abs_row >= threshold
+        shocked[stress_mask] = shocked[stress_mask] * jump_mult
+
+    adjusted_liquidity: dict[str, np.ndarray] = {}
+    if liquidity_context:
+        for key, values in liquidity_context.items():
+            adjusted_liquidity[key] = np.asarray(values, dtype=float).copy()
+        if "available_bar_volume" in adjusted_liquidity:
+            adjusted_liquidity["available_bar_volume"] *= max(0.0, float(scenario.liquidity_drought.available_volume_multiplier))
+        if "spread_bps" in adjusted_liquidity:
+            adjusted_liquidity["spread_bps"] *= max(0.0, float(scenario.liquidity_drought.spread_multiplier))
+        if "max_participation_per_bar" in adjusted_liquidity:
+            adjusted_liquidity["max_participation_per_bar"] *= max(
+                0.0,
+                float(scenario.liquidity_drought.max_participation_multiplier),
+            )
+
+    return {
+        "asset_returns": shocked,
+        "liquidity": adjusted_liquidity,
+    }
+
+
 def backtest_vectorized(
     prices: Any,
     signals: Any,
