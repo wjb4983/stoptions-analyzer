@@ -7,8 +7,10 @@ import json
 import numpy as np
 
 from src.analysis.reporting import (
+    build_backtest_robustness_report,
     build_drawdown_rows,
     build_sweep_robustness_report,
+    compute_capacity_frontier,
     compute_spa_pvalue,
     compute_white_reality_check,
     format_backtest_report,
@@ -134,6 +136,8 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "robustness_report.csv",
         "capacity_frontier.json",
         "capacity_frontier.csv",
+        "capacity_frontier_series.json",
+        "capacity_frontier_series.csv",
         "regimes.csv",
         "regimes.json",
     ]:
@@ -258,6 +262,42 @@ def test_format_backtest_report_contains_required_sections() -> None:
     assert "Deflated Sharpe Ratio" in report
     assert "Capacity Diagnostics" in report
     assert "Model Drift Diagnostics" in report
+
+
+def test_capacity_frontier_has_monotonic_cost_pressure_with_aum() -> None:
+    frontier = compute_capacity_frontier(
+        expected_alpha_bps=120.0,
+        realized_slippage_bps=4.0,
+        average_participation_rate=0.02,
+        turnover_total=1.25,
+        observed_sharpe=1.1,
+        observed_volatility=0.2,
+        realized_total_cost_bps=5.0,
+        scales=np.array([0.5, 1.0, 2.0, 4.0], dtype=float),
+    )
+
+    slippages = [float(row["projected_slippage_bps"]) for row in frontier]
+    total_costs = [float(row["projected_total_cost_bps"]) for row in frontier]
+    sharpes = [float(row["projected_post_cost_sharpe"]) for row in frontier]
+
+    assert all(curr >= prev for prev, curr in zip(slippages, slippages[1:], strict=False))
+    assert all(curr >= prev for prev, curr in zip(total_costs, total_costs[1:], strict=False))
+    assert all(curr <= prev for prev, curr in zip(sharpes, sharpes[1:], strict=False))
+
+
+def test_capacity_diagnostics_fail_fast_on_participation_threshold() -> None:
+    with np.testing.assert_raises(ValueError):
+        build_backtest_robustness_report(
+            returns=np.array([0.01, -0.005, 0.007], dtype=float),
+            metrics={"sharpe": 1.0, "cagr": 0.1, "volatility": 0.2, "turnover_adjusted_return": 0.08},
+            turnover_stats={"total": 1.0, "mean": 0.1, "max": 0.2},
+            cost_totals={"total": 0.001, "slippage": 0.001, "fees": 0.0, "borrow": 0.0},
+            fills=[{"participation_rate": 0.02}],
+            capacity_scales=np.array([1.0, 2.0], dtype=float),
+            max_participation_rate=0.03,
+            n_bootstrap=10,
+            seed=1,
+        )
 
 
 def test_persist_sweep_outputs_writes_robustness_report(tmp_path: Path) -> None:

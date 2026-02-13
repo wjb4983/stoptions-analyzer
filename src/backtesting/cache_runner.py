@@ -242,6 +242,8 @@ def run_time_series_momentum_backtest(
     regime_cost_multipliers: dict[str, float] | None = None,
     governance_metadata: dict[str, Any] | None = None,
     stress_controls: dict[str, Any] | None = None,
+    capacity_aum_scales: list[float] | None = None,
+    max_participation_rate: float | None = None,
     random_seed: int = 42,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -555,6 +557,8 @@ def run_time_series_momentum_backtest(
         turnover_stats=turnover_stats,
         cost_totals=cost_totals,
         fills=fill_rows,
+        capacity_scales=None if capacity_aum_scales is None else np.asarray(capacity_aum_scales, dtype=float),
+        max_participation_rate=max_participation_rate,
     )
 
     scenario_definitions = _build_stress_scenario_definitions(
@@ -1655,6 +1659,8 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
     lookback_days = int(payload["lookback_days"])
     skip_days = int(payload["skip_days"])
     costs_bps = float(payload["costs_bps"])
+    aum_scale = max(float(payload.get("aum_scale", payload.get("notional_scale", 1.0))), 1e-6)
+    max_participation_rate = payload.get("max_participation_rate")
 
     entry_cfg = parse_entry_signal_config(
         str(payload["entry_signal"]),
@@ -1701,11 +1707,25 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
 
     turnover = _to_numpy_1d(result.turnover)
     trades = _to_numpy_2d(result.trades)
+    fills = list(result.fills)
     cost_totals = {
         key: float(value)
         for key, value in result.cost_breakdown.get("totals", {}).items()
     }
     metrics = dict(result.metrics)
+    turnover_total = float(np.sum(turnover)) if turnover.size else 0.0
+    avg_participation = float(np.mean(np.array([float(row.get("participation_rate", 0.0)) for row in fills], dtype=float))) if fills else 0.0
+    scaled_participation = avg_participation * aum_scale
+    if max_participation_rate is not None and scaled_participation > float(max_participation_rate):
+        raise ValueError(
+            f"Capacity fail-fast triggered in sweep combo: scaled_participation={scaled_participation:.6f} exceeds max_participation_rate={float(max_participation_rate):.6f}"
+        )
+    impact_scale = float(np.sqrt(max(aum_scale, 1e-12)))
+    scaled_slippage = float(cost_totals.get("slippage", 0.0)) * aum_scale * impact_scale
+    non_slippage = max(float(cost_totals.get("total", 0.0)) - float(cost_totals.get("slippage", 0.0)), 0.0)
+    scaled_cost_total = scaled_slippage + non_slippage * aum_scale
+    vol = max(float(metrics.get("volatility", 0.0)), 1e-12)
+    post_cost_sharpe = float(metrics.get("sharpe", 0.0)) - ((scaled_cost_total - float(cost_totals.get("total", 0.0))) / vol)
     scenario_defs = _build_stress_scenario_definitions(timestamps=np.arange(result.returns.size, dtype=np.int64), returns=_to_numpy_1d(result.returns), controls=dict(payload.get("stress_controls", {})))
     scenario_rows = _run_stress_scenario_wrappers(returns=_to_numpy_1d(result.returns), prices=prices, scenario_definitions=scenario_defs)
     scenario_payload = build_scenario_attribution_and_guardrails(baseline_metrics={k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))}, scenario_results=scenario_rows)
@@ -1718,8 +1738,11 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         "lookback_days": lookback_days,
         "skip_days": skip_days,
         "costs_bps": costs_bps,
+        "aum_scale": aum_scale,
+        "notional_scale": aum_scale,
         "total_return": float(metrics.get("total_return", 0.0)),
         "sharpe": float(metrics.get("sharpe", 0.0)),
+        "post_cost_sharpe": float(post_cost_sharpe),
         "cagr": float(metrics.get("cagr", 0.0)),
         "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
         "calmar": float(metrics.get("calmar", 0.0)),
@@ -1732,9 +1755,14 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         "turnover_adjusted_return": float(metrics.get("turnover_adjusted_return", 0.0)),
         "rolling_sharpe_mean": float(metrics.get("rolling_sharpe_mean", 0.0)),
         "rolling_drawdown_worst": float(metrics.get("rolling_drawdown_worst", 0.0)),
-        "turnover_total": float(np.sum(turnover)) if turnover.size else 0.0,
+        "turnover_total": turnover_total,
+        "turnover_total_scaled": float(turnover_total * aum_scale),
+        "average_participation_rate": avg_participation,
+        "scaled_participation_rate": scaled_participation,
+        "slippage_total_scaled": scaled_slippage,
         "trade_count": float(np.sum(np.abs(trades) > 1e-12)) if trades.size else 0.0,
         "cost_total": cost_totals.get("total", 0.0),
+        "cost_total_scaled": scaled_cost_total,
         **stress_gate,
     }
 
@@ -3016,6 +3044,23 @@ def _write_capacity_frontier_artifacts(*, run_dir: Path, robustness_report: dict
         for row in normalized:
             writer.writerow(row)
 
+    chart_series = capacity.get("capacity_chart_series", {}) if isinstance(capacity, dict) else {}
+    if isinstance(chart_series, dict) and chart_series:
+        (run_dir / "capacity_frontier_series.json").write_text(json.dumps(chart_series, indent=2))
+        series_rows: list[dict[str, object]] = []
+        series_keys = [str(key) for key, value in chart_series.items() if isinstance(value, list)]
+        length = max((len(chart_series[key]) for key in series_keys), default=0)
+        for idx in range(length):
+            row: dict[str, object] = {"index": idx}
+            for key in series_keys:
+                values = chart_series.get(key, [])
+                row[key] = values[idx] if idx < len(values) else None
+            series_rows.append(row)
+        with (run_dir / "capacity_frontier_series.csv").open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["index", *series_keys])
+            writer.writeheader()
+            writer.writerows(series_rows)
+
 
 def _write_robustness_report(*, run_dir: Path, robustness_report: dict[str, Any]) -> None:
     (run_dir / "robustness_report.json").write_text(json.dumps(robustness_report, indent=2))
@@ -3841,6 +3886,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--portfolio-max-net-gamma", type=float, default=None)
     run_parser.add_argument("--portfolio-max-abs-vega-bucket", type=float, default=None)
     run_parser.add_argument("--portfolio-max-abs-delta-per-underlying", type=float, default=None)
+    run_parser.add_argument("--capacity-aum-scales", default="", help="Optional JSON array of AUM/notional scales for capacity frontier.")
+    run_parser.add_argument("--capacity-max-participation-rate", type=float, default=None, help="Fail-fast when projected participation exceeds this threshold.")
 
     sweep_parser = subparsers.add_parser("sweep", help="Run parameter sweep across signal/core grids.")
     _add_common_args(sweep_parser)
@@ -4037,6 +4084,8 @@ def main() -> None:
             portfolio_max_net_gamma=float(args.portfolio_max_net_gamma) if args.portfolio_max_net_gamma is not None else None,
             portfolio_max_abs_vega_bucket=float(args.portfolio_max_abs_vega_bucket) if args.portfolio_max_abs_vega_bucket is not None else None,
             portfolio_max_abs_delta_per_underlying=float(args.portfolio_max_abs_delta_per_underlying) if args.portfolio_max_abs_delta_per_underlying is not None else None,
+            capacity_aum_scales=[float(v) for v in _parse_json_array(args.capacity_aum_scales)] if str(args.capacity_aum_scales).strip() else None,
+            max_participation_rate=float(args.capacity_max_participation_rate) if args.capacity_max_participation_rate is not None else None,
         )
     print(output)
 
