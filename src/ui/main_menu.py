@@ -73,6 +73,13 @@ class MainMenu(ttk.Frame):
             width=30,
         ).grid(row=4, column=0, pady=10)
 
+        ttk.Button(
+            button_frame,
+            text="Research Lab",
+            command=lambda: controller.show_frame("ResearchLabPage"),
+            width=30,
+        ).grid(row=5, column=0, pady=10)
+
     def refresh(self) -> None:
         self.api_key_var.set(self.controller.api_key)
 
