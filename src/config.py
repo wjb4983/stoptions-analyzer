@@ -178,6 +178,8 @@ DEFAULT_MODEL_PARADIGM_CONFIG = {
         {"name": "macro_regime_conditioned", "enabled": True, "weight": 1.0},
         {"name": "event_driven", "enabled": True, "weight": 1.0},
         {"name": "options_flow_driven", "enabled": True, "weight": 1.0},
+        {"name": "options_directional", "enabled": True, "weight": 1.0},
+        {"name": "options_volatility", "enabled": True, "weight": 1.0},
         {"name": "microstructure_imbalance", "enabled": True, "weight": 1.0},
         {"name": "meta_label_classifier", "enabled": True, "weight": 1.0},
     ]

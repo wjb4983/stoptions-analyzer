@@ -14,6 +14,8 @@ from .paradigms import (
     MicrostructureImbalanceModel,
     MomentumModel,
     OptionsFlowDrivenModel,
+    OptionsDirectionalModel,
+    OptionsVolatilityModel,
     StatArbPairSpreadModel,
     TermStructureSlopeModel,
     VolatilityCarryModel,
@@ -30,6 +32,8 @@ MODEL_REGISTRY: dict[str, type[ModelInterface]] = {
     MacroRegimeConditionedModel.name: MacroRegimeConditionedModel,
     EventDrivenModel.name: EventDrivenModel,
     OptionsFlowDrivenModel.name: OptionsFlowDrivenModel,
+    OptionsDirectionalModel.name: OptionsDirectionalModel,
+    OptionsVolatilityModel.name: OptionsVolatilityModel,
     MicrostructureImbalanceModel.name: MicrostructureImbalanceModel,
     MetaLabelClassifierModel.name: MetaLabelClassifierModel,
 }
