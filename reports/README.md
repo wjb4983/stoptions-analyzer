@@ -46,3 +46,33 @@ python reports/benchmark_bundle.py
 This writes a single artifact per run:
 
 - `benchmark_scorecard.json`: robust OOS, statistical significance, execution realism, stress resilience, and reproducibility checks with a promotion gate that fails when any critical dimension fails.
+
+## Merge/deploy quality gates and cards
+
+Evaluate the required merge/deploy gates (data quality, leakage tests, validation integrity, calibration, friction-adjusted performance), then generate standardized cards:
+
+```bash
+python reports/quality_gates.py
+python reports/generate_cards.py
+```
+
+Artifacts written in `reports/`:
+
+- `quality_gates_report.json`
+- `model_card.json`
+- `strategy_card.json`
+
+## Nightly benchmark comparison
+
+Compare newly generated mainline baseline metrics against the prior baseline snapshot:
+
+```bash
+cp reports/baseline_metrics_summary.json reports/prior_baseline_metrics_summary.json
+python reports/run_baselines.py
+python reports/nightly_benchmark_report.py
+```
+
+Artifacts written in `reports/`:
+
+- `nightly_benchmark_comparison.json`
+- `nightly_benchmark_report.md`

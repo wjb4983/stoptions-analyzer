@@ -1,13 +1,13 @@
 {
-  "generated_at": null,
+  "generated_at": "2026-02-13T22:34:58.024394Z",
   "fills_path": "reports/historical_fills.json",
-  "snapshot_count": 0,
+  "snapshot_count": 3,
   "fit_error": {
-    "mae_bps_mean": 0.0,
-    "mae_bps_max": 0.0
+    "mae_bps_mean": 0.09194288503783259,
+    "mae_bps_max": 0.18823529411764728
   },
   "stability": {
-    "impact_coefficient_std_bps": 0.0,
-    "impact_coefficient_range_bps": 0.0
+    "impact_coefficient_std_bps": 0.39182744522985447,
+    "impact_coefficient_range_bps": 0.9406883085184283
   }
 }

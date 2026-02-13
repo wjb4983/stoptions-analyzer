@@ -1,0 +1,50 @@
+{
+  "all_gates_pass": true,
+  "required_for_merge_and_deploy": true,
+  "gates": {
+    "data_quality": {
+      "name": "data_quality",
+      "pass": true,
+      "details": {
+        "scenarios": 3,
+        "all_sharpe_finite": true,
+        "all_turnover_finite": true
+      }
+    },
+    "leakage_tests": {
+      "name": "leakage_tests",
+      "pass": true,
+      "details": {
+        "hash_consistency_ratio": 1.0,
+        "source_dimension": "reproducibility"
+      }
+    },
+    "validation_integrity": {
+      "name": "validation_integrity",
+      "pass": true,
+      "details": {
+        "failed_critical_dimensions": []
+      }
+    },
+    "calibration": {
+      "name": "calibration",
+      "pass": true,
+      "details": {
+        "mae_bps_max": 0.18823529411764728,
+        "impact_coefficient_std_bps": 0.39182744522985447,
+        "thresholds": {
+          "mae_bps_max": 15.0,
+          "impact_coefficient_std_bps": 20.0
+        }
+      }
+    },
+    "friction_adjusted_performance": {
+      "name": "friction_adjusted_performance",
+      "pass": true,
+      "details": {
+        "mean_sharpe": -2.3500517987012692,
+        "mean_turnover": 62.555555555555564
+      }
+    }
+  }
+}
