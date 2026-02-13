@@ -142,6 +142,10 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "capacity_frontier.csv",
         "capacity_frontier_series.json",
         "capacity_frontier_series.csv",
+        "attribution_timeseries.csv",
+        "attribution_timeseries.json",
+        "attribution_summary.csv",
+        "attribution_summary.json",
         "regimes.csv",
         "regimes.json",
     ]:
