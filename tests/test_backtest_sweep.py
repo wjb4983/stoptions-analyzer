@@ -478,3 +478,109 @@ def test_run_parameter_sweep_retries_failures_deterministically(tmp_path) -> Non
     second_text = leaderboard_two.read_text()
 
     assert first_text == second_text
+
+
+def test_run_experiment_grid_records_speedup_and_deduped_artifacts(tmp_path) -> None:
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+    entry_grid = {"ts_momentum": [{"lookback_days": 20, "skip_days": 5}]}
+    exit_grid = {"none": [{}]}
+    core_grid = {"lookback_days": [20], "skip_days": [5], "costs_bps": [1.0, 2.0]}
+    model_grid = {"baseline": [{}], "xgb": [{"depth": 3}]}
+
+    def fake_eval(payload: dict[str, object]) -> dict[str, object]:
+        return {
+            "entry_signal": payload["entry_signal"],
+            "entry_signal_params": "{}",
+            "exit_signal": payload["exit_signal"],
+            "exit_signal_params": "{}",
+            "lookback_days": int(payload["lookback_days"]),
+            "skip_days": int(payload["skip_days"]),
+            "costs_bps": float(payload["costs_bps"]),
+            "total_return": 0.2,
+            "sharpe": float(payload["worker_seed"]),
+            "cagr": 0.02,
+            "max_drawdown": -0.1,
+            "calmar": 0.2,
+            "volatility": 0.2,
+            "sortino": 0.6,
+            "downside_deviation": 0.1,
+            "hit_rate": 0.6,
+            "profit_factor": 1.3,
+            "exposure_time": 0.8,
+            "turnover_adjusted_return": 0.03,
+            "rolling_sharpe_mean": 1.1,
+            "rolling_drawdown_worst": -0.05,
+            "turnover_total": 1.0,
+            "trade_count": 5.0,
+            "cost_total": 0.01,
+            "artifacts": {"metrics": {"curve": [1, 2, 3], "name": "shared"}},
+        }
+
+    out = cache_runner.run_experiment_grid(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        entry_grid=entry_grid,
+        exit_grid=exit_grid,
+        core_grid=core_grid,
+        model_grid=model_grid,
+        evaluator=fake_eval,
+        seed=9,
+        max_workers=2,
+    )
+
+    assert "Experiment grid complete" in out
+    run_dir = sorted((tmp_path / "outputs").glob("tsmom_sweep_*"))[-1]
+    manifest = __import__("json").loads((run_dir / "manifest.json").read_text())
+    speedup = manifest["lineage"]["speedup_metrics"]
+    assert speedup["speedup_vs_single_node"] > 0
+    artifact_files = list((tmp_path / "outputs" / "artifact_store").glob("*.json"))
+    assert len(artifact_files) == 1
+    leaderboard = (run_dir / "leaderboard.csv").read_text()
+    assert "model_name" in leaderboard
+
+
+def test_get_experiment_grid_status(tmp_path) -> None:
+    state_path = tmp_path / "resume_state.json"
+    cache_runner._persist_resume_state(
+        state_path=state_path,
+        job_id="abc",
+        seed=1,
+        queued_indices=[1, 2],
+        completed_rows=[{"sharpe": 1.0}],
+        invalid_rows=[],
+        errors=[{"error": "boom"}],
+        retry_counts={1: 2},
+    )
+
+    status = cache_runner.get_experiment_grid_status(state_path=state_path)
+    assert status["status"] == "running"
+    assert status["queued"] == 2
+    assert status["completed"] == 1
+    assert status["errors"] == 1
+
+
+def test_build_parser_includes_experiment_grid_and_monitor_commands() -> None:
+    parser = cache_runner._build_parser()
+    args = parser.parse_args([
+        "experiment_grid",
+        "--tickers",
+        "AAA",
+        "--start-date",
+        "2024-01-01",
+        "--end-date",
+        "2024-01-02",
+        "--entry-grid",
+        '{"ts_momentum":[{"lookback_days":20,"skip_days":5}]}',
+        "--exit-grid",
+        '{"none":[{}]}',
+        "--core-grid",
+        '{"lookback_days":[20],"skip_days":[5],"costs_bps":[1.0]}',
+        "--model-grid",
+        '{"baseline":[{}]}',
+    ])
+    assert args.command == "experiment_grid"
+
+    args2 = parser.parse_args(["monitor_grid", "--state-path", "state.json"])
+    assert args2.command == "monitor_grid"

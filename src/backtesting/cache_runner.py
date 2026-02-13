@@ -888,6 +888,7 @@ def _persist_resume_state(
 
 def _persist_partial_leaderboard(path: Path, rows: list[dict[str, Any]]) -> None:
     ranked = sorted(rows, key=lambda row: float(row.get("sharpe", 0.0)), reverse=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(ranked, indent=2))
 
 
@@ -1097,6 +1098,237 @@ def run_parameter_sweep(
         f"{len(invalid_rows)} skipped, {len(errors)} failed. "
         f"Saved outputs to: {run_dir}"
     )
+
+
+def _normalize_model_grid(model_grid: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    variants: list[dict[str, Any]] = []
+    for model_name, param_rows in sorted(model_grid.items()):
+        rows = list(param_rows or [{}])
+        if not rows:
+            rows = [{}]
+        for params in rows:
+            variants.append({"model_name": str(model_name), "model_params": dict(params or {})})
+    return variants
+
+
+def _persist_deduped_artifacts(*, rows: list[dict[str, Any]], artifact_store_dir: Path) -> None:
+    artifact_store_dir.mkdir(parents=True, exist_ok=True)
+    hash_to_ref: dict[str, str] = {}
+    for row in rows:
+        artifacts = row.pop("artifacts", None)
+        if not isinstance(artifacts, dict) or not artifacts:
+            continue
+        refs: dict[str, str] = {}
+        for name, payload in artifacts.items():
+            blob = json.dumps(payload, sort_keys=True, default=str)
+            digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+            ref = hash_to_ref.get(digest)
+            if ref is None:
+                target = artifact_store_dir / f"{digest}.json"
+                if not target.exists():
+                    target.write_text(blob)
+                ref = str(target)
+                hash_to_ref[digest] = ref
+            refs[str(name)] = ref
+        if refs:
+            row["artifact_refs"] = refs
+
+
+def get_experiment_grid_status(*, state_path: Path) -> dict[str, Any]:
+    state = _load_resume_state(state_path)
+    if state is None:
+        return {
+            "state_path": str(state_path),
+            "status": "missing",
+            "queued": 0,
+            "completed": 0,
+            "errors": 0,
+            "retry_counts": {},
+        }
+    queued = len(list(state.get("queued_indices", [])))
+    completed = len(list(state.get("completed_rows", [])))
+    errors = len(list(state.get("errors", [])))
+    return {
+        "state_path": str(state_path),
+        "status": "running" if queued else "finalizing",
+        "job_id": str(state.get("job_id", "")),
+        "queued": queued,
+        "completed": completed,
+        "errors": errors,
+        "retry_counts": dict(state.get("retry_counts", {})),
+        "updated_at": str(state.get("updated_at", "")),
+    }
+
+
+def run_experiment_grid(
+    *,
+    tickers: list[str],
+    start_date: date,
+    end_date: date,
+    cache_root: Path,
+    entry_grid: dict[str, list[dict[str, Any]]],
+    exit_grid: dict[str, list[dict[str, Any]]],
+    core_grid: dict[str, list[Any]],
+    model_grid: dict[str, list[dict[str, Any]]],
+    seed: int = 42,
+    max_workers: int | None = None,
+    evaluator: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    resume_state_path: Path | None = None,
+    worker_config: SweepWorkerConfig | None = None,
+    retry_policy: SweepRetryPolicy | None = None,
+    fail_fast: bool = False,
+    continue_on_error: bool = True,
+) -> str:
+    """Run model-comparison experiment grids with resumable orchestration metadata."""
+
+    combos, invalid_rows = generate_sweep_combinations(entry_grid=entry_grid, exit_grid=exit_grid, core_grid=core_grid)
+    if not combos:
+        raise ValueError("No valid combinations generated for experiment grid")
+    model_variants = _normalize_model_grid(model_grid)
+    if not model_variants:
+        raise ValueError("No model variants provided")
+
+    all_tasks: list[dict[str, Any]] = []
+    for model in model_variants:
+        for combo in combos:
+            all_tasks.append({**model, **combo})
+
+    n_workers = max_workers or min(8, max(1, os.cpu_count() or 1))
+    worker_cfg = worker_config or SweepWorkerConfig(mode="local", max_workers=n_workers)
+    retry_cfg = retry_policy or SweepRetryPolicy(max_attempts=2, stale_worker_timeout_seconds=120.0)
+    worker = evaluator or _execute_sweep_combo
+
+    job_id = _stable_fingerprint(
+        {
+            "kind": "experiment_grid",
+            "tickers": list(tickers),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "entry_grid": entry_grid,
+            "exit_grid": exit_grid,
+            "core_grid": core_grid,
+            "model_grid": model_grid,
+            "seed": int(seed),
+        }
+    )
+    state_path = resume_state_path or (BACKTEST_OUTPUT_DIR / f"experiment_grid_state_{job_id}.json")
+    partial_results_path = state_path.with_suffix(".partial.json")
+    prior_state = _load_resume_state(state_path)
+
+    queued_indices = list(range(len(all_tasks)))
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    retry_counts: dict[int, int] = {}
+    resumed_from_manifest: str | None = None
+    if prior_state and str(prior_state.get("job_id")) == job_id:
+        queued_indices = [int(i) for i in prior_state.get("queued_indices", [])]
+        rows = list(prior_state.get("completed_rows", []))
+        errors = list(prior_state.get("errors", []))
+        retry_counts = {int(k): int(v) for k, v in dict(prior_state.get("retry_counts", {})).items()}
+        resumed_from_manifest = str(state_path)
+
+    adapter = _resolve_executor_adapter(worker_config=worker_cfg, use_process_pool=False)
+    in_flight: dict[Future[dict[str, Any]], tuple[int, float]] = {}
+    total_task_runtime = 0.0
+    started_at = time.monotonic()
+    try:
+        while queued_indices or in_flight:
+            while queued_indices and len(in_flight) < max(1, int(worker_cfg.max_workers)):
+                idx = queued_indices.pop(0)
+                payload = {
+                    "combo_index": idx,
+                    "worker_seed": int(seed) + int(idx),
+                    "job_id": job_id,
+                    "tickers": list(tickers),
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "cache_root": cache_root,
+                    **all_tasks[idx],
+                }
+                fut = adapter.submit(worker, payload)
+                in_flight[fut] = (idx, time.monotonic())
+
+            done, _ = wait(list(in_flight.keys()), timeout=0.25, return_when=FIRST_COMPLETED)
+            now = time.monotonic()
+            stale = [f for f, (_, started) in in_flight.items() if (now - started) > retry_cfg.stale_worker_timeout_seconds]
+            for future in stale:
+                idx, _ = in_flight.pop(future)
+                attempts = retry_counts.get(idx, 0) + 1
+                retry_counts[idx] = attempts
+                errors.append({"error": "stale_worker_timeout", "task": all_tasks[idx], "attempt": attempts})
+                if attempts < retry_cfg.max_attempts:
+                    queued_indices.append(idx)
+
+            for future in done:
+                idx, task_started = in_flight.pop(future)
+                elapsed = max(0.0, time.monotonic() - task_started)
+                total_task_runtime += elapsed
+                try:
+                    row = future.result()
+                    row["model_name"] = str(all_tasks[idx]["model_name"])
+                    row["model_params"] = json.dumps(all_tasks[idx]["model_params"], sort_keys=True)
+                    row["task_runtime_seconds"] = elapsed
+                    rows.append(row)
+                except Exception as exc:
+                    attempts = retry_counts.get(idx, 0) + 1
+                    retry_counts[idx] = attempts
+                    errors.append({"error": str(exc), "task": all_tasks[idx], "attempt": attempts})
+                    if attempts < retry_cfg.max_attempts:
+                        queued_indices.append(idx)
+                    elif fail_fast or not continue_on_error:
+                        raise
+
+            _persist_partial_leaderboard(partial_results_path, rows)
+            _persist_resume_state(
+                state_path=state_path,
+                job_id=job_id,
+                seed=seed,
+                queued_indices=queued_indices,
+                completed_rows=rows,
+                invalid_rows=invalid_rows,
+                errors=errors,
+                retry_counts=retry_counts,
+            )
+    finally:
+        adapter.shutdown()
+
+    elapsed_parallel = max(1e-9, time.monotonic() - started_at)
+    _persist_deduped_artifacts(rows=rows, artifact_store_dir=BACKTEST_OUTPUT_DIR / "artifact_store")
+    ranked_rows = sorted(rows, key=lambda row: float(row.get("sharpe", 0.0)), reverse=True)
+    run_dir = _persist_sweep_outputs(
+        ranked_rows=ranked_rows,
+        invalid_rows=invalid_rows,
+        errors=errors,
+        top_n=10,
+        parameters={
+            "tickers": list(tickers),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "cache_root": str(cache_root),
+            "entry_grid": entry_grid,
+            "exit_grid": exit_grid,
+            "core_grid": core_grid,
+            "model_grid": model_grid,
+            "max_workers": int(worker_cfg.max_workers),
+        },
+        random_seed=seed,
+        governance=None,
+        lineage={
+            "job_id": job_id,
+            "resume_state_path": str(state_path),
+            "resumed_from": resumed_from_manifest,
+            "partial_results_path": str(partial_results_path),
+            "retry_counts": retry_counts,
+            "speedup_metrics": {
+                "parallel_elapsed_seconds": elapsed_parallel,
+                "single_node_baseline_seconds": total_task_runtime,
+                "speedup_vs_single_node": total_task_runtime / elapsed_parallel,
+            },
+        },
+    )
+    if state_path.exists():
+        state_path.unlink()
+    return f"Experiment grid complete: {len(ranked_rows)} tasks finished. Saved outputs to: {run_dir}"
 
 
 def run_walk_forward_backtest(
@@ -4399,6 +4631,20 @@ def _build_parser() -> argparse.ArgumentParser:
     replay_parser.add_argument("--cache-root", default=None, help="Optional cache root override for replay.")
     replay_parser.add_argument("--non-strict", action="store_true", help="Disable strict compatibility checks.")
 
+    grid_parser = subparsers.add_parser("experiment_grid", help="Launch distributed parameter/model experiment grid.")
+    _add_common_args(grid_parser)
+    grid_parser.add_argument("--entry-grid", required=True, help="JSON mapping signal->list[params].")
+    grid_parser.add_argument("--exit-grid", required=True, help="JSON mapping signal->list[params].")
+    grid_parser.add_argument("--core-grid", required=True, help="JSON mapping core param->list[values].")
+    grid_parser.add_argument("--model-grid", required=True, help="JSON mapping model->list[params].")
+    grid_parser.add_argument("--seed", type=int, default=42)
+    grid_parser.add_argument("--max-workers", type=int, default=None)
+    grid_parser.add_argument("--fail-fast", action="store_true")
+    grid_parser.add_argument("--continue-on-error", action="store_true")
+
+    monitor_parser = subparsers.add_parser("monitor_grid", help="Read resumable state for a grid job.")
+    monitor_parser.add_argument("--state-path", required=True, help="Path to resume state JSON.")
+
     parser.set_defaults(command="run")
     return parser
 
@@ -4425,7 +4671,7 @@ def main() -> None:
     start_date: date | None = None
     end_date: date | None = None
     cache_root = Path(args.cache_root) if getattr(args, "cache_root", None) else BACKTEST_CACHE_DIR
-    if args.command != "replay":
+    if args.command not in {"replay", "monitor_grid"}:
         tickers = [part.strip() for part in args.tickers.split(",") if part.strip()]
         start_date = date.fromisoformat(args.start_date)
         end_date = date.fromisoformat(args.end_date)
@@ -4498,6 +4744,23 @@ def main() -> None:
             cache_root=Path(args.cache_root) if args.cache_root else None,
             strict=not bool(args.non_strict),
         )
+    elif args.command == "experiment_grid":
+        output = run_experiment_grid(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            cache_root=cache_root,
+            entry_grid={str(k): list(v) for k, v in _parse_json_object(args.entry_grid).items()},
+            exit_grid={str(k): list(v) for k, v in _parse_json_object(args.exit_grid).items()},
+            core_grid={str(k): list(v) for k, v in _parse_json_object(args.core_grid).items()},
+            model_grid={str(k): list(v) for k, v in _parse_json_object(args.model_grid).items()},
+            seed=int(args.seed),
+            max_workers=args.max_workers,
+            fail_fast=bool(args.fail_fast),
+            continue_on_error=bool(args.continue_on_error),
+        )
+    elif args.command == "monitor_grid":
+        output = json.dumps(get_experiment_grid_status(state_path=Path(args.state_path)), indent=2)
     else:
         output = run_time_series_momentum_backtest(
             tickers=tickers,
