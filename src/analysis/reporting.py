@@ -285,6 +285,26 @@ def format_backtest_report(
                         )
             lines.append("")
 
+        drift = robustness_report.get("model_drift_diagnostics", {})
+        if isinstance(drift, dict) and drift:
+            lines.append("Model Drift Diagnostics:")
+            lines.append(
+                "  - baseline_mean={base_mean:.6f}, baseline_vol={base_vol:.6f}, "
+                "current_mean={curr_mean:.6f}, current_vol={curr_vol:.6f}".format(
+                    base_mean=float(drift.get("baseline_mean", 0.0)),
+                    base_vol=float(drift.get("baseline_vol", 0.0)),
+                    curr_mean=float(drift.get("current_mean", 0.0)),
+                    curr_vol=float(drift.get("current_vol", 0.0)),
+                )
+            )
+            lines.append(
+                "  - drift_z_score={z:.6f}, retraining_triggered={trigger}".format(
+                    z=float(drift.get("drift_z_score", 0.0)),
+                    trigger=bool(drift.get("retraining_triggered", False)),
+                )
+            )
+            lines.append("")
+
     return "\n".join(lines)
 
 
@@ -424,15 +444,61 @@ def build_backtest_robustness_report(
         cost_totals=cost_totals,
         fills=fills,
     )
+    drift = compute_model_drift_diagnostics(returns=_to_1d_float(returns))
     return {
         "bootstrap_confidence_intervals": ci,
         "deflated_sharpe_ratio": dsr,
         "capacity_diagnostics": capacity,
+        "model_drift_diagnostics": drift,
     }
 
 
 
 
+
+
+def compute_model_drift_diagnostics(
+    *,
+    returns: np.ndarray,
+    baseline_mean: float | None = None,
+    baseline_vol: float | None = None,
+    drift_z_threshold: float = 2.0,
+) -> dict[str, object]:
+    samples = _to_1d_float(returns)
+    if samples.size == 0:
+        return {
+            "baseline_mean": 0.0,
+            "baseline_vol": 0.0,
+            "current_mean": 0.0,
+            "current_vol": 0.0,
+            "drift_z_score": 0.0,
+            "retraining_triggered": False,
+        }
+
+    split = max(1, samples.size // 2)
+    base = samples[:split]
+    current = samples[split:] if split < samples.size else samples
+
+    base_mean = float(np.mean(base)) if baseline_mean is None else float(baseline_mean)
+    base_vol = float(np.std(base, ddof=1)) if base.size > 1 else 0.0
+    if baseline_vol is not None:
+        base_vol = float(baseline_vol)
+
+    current_mean = float(np.mean(current)) if current.size else 0.0
+    current_vol = float(np.std(current, ddof=1)) if current.size > 1 else 0.0
+
+    denom = max(base_vol, 1e-12)
+    drift_z = (current_mean - base_mean) / denom
+    retrain = bool(abs(drift_z) >= float(drift_z_threshold))
+
+    return {
+        "baseline_mean": base_mean,
+        "baseline_vol": base_vol,
+        "current_mean": current_mean,
+        "current_vol": current_vol,
+        "drift_z_score": float(drift_z),
+        "retraining_triggered": retrain,
+    }
 def compute_white_reality_check(
     *,
     candidate_returns: np.ndarray,
