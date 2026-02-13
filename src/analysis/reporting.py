@@ -410,6 +410,8 @@ def build_backtest_robustness_report(
     turnover_stats: dict[str, float],
     cost_totals: dict[str, float],
     fills: list[dict[str, object]],
+    capacity_scales: np.ndarray | None = None,
+    max_participation_rate: float | None = None,
     n_bootstrap: int = 500,
     seed: int = 42,
 ) -> dict[str, object]:
@@ -435,6 +437,8 @@ def build_backtest_robustness_report(
         turnover_stats=turnover_stats,
         cost_totals=cost_totals,
         fills=fills,
+        scales=capacity_scales,
+        max_participation_rate=max_participation_rate,
     )
     drift = compute_model_drift_diagnostics(returns=_to_1d_float(returns))
     return {
@@ -763,6 +767,9 @@ def compute_capacity_frontier(
     average_participation_rate: float,
     base_aum: float = 1_000_000.0,
     turnover_total: float = 1.0,
+    observed_sharpe: float = 0.0,
+    observed_volatility: float = 0.0,
+    realized_total_cost_bps: float = 0.0,
     scales: np.ndarray | None = None,
 ) -> list[dict[str, float]]:
     """Compute a capacity frontier: expected alpha net of trading costs by AUM scale."""
@@ -776,22 +783,34 @@ def compute_capacity_frontier(
     base_slippage = max(float(realized_slippage_bps), 0.0)
     alpha = float(expected_alpha_bps)
     turnover = max(float(turnover_total), 0.0)
+    base_total_cost_bps = max(float(realized_total_cost_bps), 0.0)
+    base_non_slippage_cost_bps = max(base_total_cost_bps - base_slippage, 0.0)
+    vol = max(float(observed_volatility), 1e-12)
+    baseline_sharpe = float(observed_sharpe)
 
     rows: list[dict[str, float]] = []
     for scale in levels:
         aum = float(base_aum) * float(scale)
+        scaled_turnover = turnover * float(scale)
         scaled_participation = base_participation * float(scale)
         impact_scale = np.sqrt(max(scaled_participation, 1e-12) / base_participation)
         projected_slippage_bps = base_slippage * impact_scale
-        net_alpha_bps = alpha - projected_slippage_bps * turnover
+        projected_total_cost_bps = projected_slippage_bps + base_non_slippage_cost_bps
+        post_cost_alpha_bps = alpha - projected_total_cost_bps * turnover
+        sharpe_penalty = ((projected_total_cost_bps - base_total_cost_bps) / 10_000.0) / vol
+        projected_post_cost_sharpe = baseline_sharpe - sharpe_penalty
         rows.append(
             {
                 "aum": float(aum),
                 "aum_scale": float(scale),
+                "notional_scale": float(scale),
+                "turnover_total": float(scaled_turnover),
                 "participation_rate": float(scaled_participation),
                 "expected_alpha_bps": float(alpha),
                 "projected_slippage_bps": float(projected_slippage_bps),
-                "expected_alpha_net_cost_bps": float(net_alpha_bps),
+                "projected_total_cost_bps": float(projected_total_cost_bps),
+                "expected_alpha_net_cost_bps": float(post_cost_alpha_bps),
+                "projected_post_cost_sharpe": float(projected_post_cost_sharpe),
             }
         )
     return rows
@@ -801,6 +820,8 @@ def _build_capacity_diagnostics(
     turnover_stats: dict[str, float],
     cost_totals: dict[str, float],
     fills: list[dict[str, object]],
+    scales: np.ndarray | None = None,
+    max_participation_rate: float | None = None,
 ) -> dict[str, object]:
     realized_parts = np.array([float(row.get("participation_rate", 0.0)) for row in fills], dtype=float)
     avg_participation = float(np.mean(realized_parts)) if realized_parts.size else 0.0
@@ -808,6 +829,7 @@ def _build_capacity_diagnostics(
 
     turnover_total = max(float(turnover_stats.get("total", 0.0)), 1e-12)
     realized_slippage_bps = float(cost_totals.get("slippage", 0.0)) / turnover_total * 10_000.0
+    realized_total_cost_bps = float(cost_totals.get("total", 0.0)) / turnover_total * 10_000.0
     cagr = float(metrics.get("cagr", 0.0))
 
     levels = np.array([0.01, 0.02, 0.05, 0.10, 0.20, 0.40], dtype=float)
@@ -832,15 +854,46 @@ def _build_capacity_diagnostics(
         realized_slippage_bps=realized_slippage_bps,
         average_participation_rate=avg_participation,
         turnover_total=float(turnover_stats.get("total", 0.0)),
+        observed_sharpe=float(metrics.get("sharpe", 0.0)),
+        observed_volatility=float(metrics.get("volatility", 0.0)),
+        realized_total_cost_bps=realized_total_cost_bps,
+        scales=scales,
     )
+
+    if max_participation_rate is not None:
+        cap = float(max_participation_rate)
+        breaches = [
+            row
+            for row in frontier
+            if float(row.get("participation_rate", 0.0)) > cap
+        ]
+        if breaches:
+            raise ValueError(
+                "Capacity fail-fast triggered: participation rate breaches threshold "
+                f"({cap:.6f}) at scales {[float(row.get('aum_scale', 0.0)) for row in breaches]}"
+            )
+
+    chart_series = {
+        "aum": [float(row.get("aum", 0.0)) for row in frontier],
+        "aum_scale": [float(row.get("aum_scale", 0.0)) for row in frontier],
+        "notional_scale": [float(row.get("notional_scale", 0.0)) for row in frontier],
+        "turnover_total": [float(row.get("turnover_total", 0.0)) for row in frontier],
+        "participation_rate": [float(row.get("participation_rate", 0.0)) for row in frontier],
+        "projected_slippage_bps": [float(row.get("projected_slippage_bps", 0.0)) for row in frontier],
+        "projected_total_cost_bps": [float(row.get("projected_total_cost_bps", 0.0)) for row in frontier],
+        "projected_post_cost_sharpe": [float(row.get("projected_post_cost_sharpe", 0.0)) for row in frontier],
+        "expected_alpha_net_cost_bps": [float(row.get("expected_alpha_net_cost_bps", 0.0)) for row in frontier],
+    }
 
     return {
         "average_participation_rate": avg_participation,
         "realized_slippage_bps": realized_slippage_bps,
+        "realized_total_cost_bps": realized_total_cost_bps,
         "expected_alpha_bps": realized_alpha_bps,
         "expected_slippage_curve": slippage_curve,
         "performance_degradation_curve": degradation_curve,
         "capacity_frontier": frontier,
+        "capacity_chart_series": chart_series,
     }
 
 
