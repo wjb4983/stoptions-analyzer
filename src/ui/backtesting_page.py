@@ -748,6 +748,13 @@ class BacktestingPage(ttk.Frame):
             row=4, column=0, sticky="ew", padx=10, pady=(4, 8)
         )
 
+        inplace_compare_frame = ttk.Labelframe(leaderboard_tab, text="Selected Pair Delta Snapshot")
+        inplace_compare_frame.grid(row=5, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        inplace_compare_frame.columnconfigure(0, weight=1)
+        inplace_compare_frame.rowconfigure(0, weight=1)
+        self.inplace_compare_tree = ttk.Treeview(inplace_compare_frame, show="headings", height=6)
+        self.inplace_compare_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
         browser_tab = ttk.Frame(self.section_notebook)
         browser_tab.columnconfigure(0, weight=1)
         browser_tab.rowconfigure(1, weight=1)
@@ -1017,10 +1024,12 @@ class BacktestingPage(ttk.Frame):
         if len(selected) == 1:
             self._render_single_run(selected[0])
             self.delta_summary_var.set("Select at least two runs for delta metrics.")
+            self._set_tree_data(self.inplace_compare_tree, [])
             self._render_guardrails(selected[0])
             return
         if len(selected) < 2:
             self.delta_summary_var.set("Select at least two runs for delta metrics.")
+            self._set_tree_data(self.inplace_compare_tree, [])
             return
         metric_maps = [self._load_metric_map(run_dir) for run_dir in selected]
         common_keys = sorted(set.intersection(*(set(metrics.keys()) for metrics in metric_maps if metrics))) if metric_maps else []
@@ -1036,10 +1045,91 @@ class BacktestingPage(ttk.Frame):
                 deltas.append(f"{key}: {delta:+.6f}")
             lines.append(f"vs {run_dir.name} -> " + ", ".join(deltas))
         self.delta_summary_var.set("\n".join(lines))
+        self._render_inplace_pair_comparison(selected[0], selected[1])
         self._update_equity_overlap(selected)
         self._populate_run_compare_combos(selected)
         self._render_selected_run_comparison()
         self._render_guardrails(selected[0])
+
+    def _extract_stress_penalty(self, run_dir: Path, metrics: dict[str, float] | None = None) -> float:
+        metric_map = metrics if isinstance(metrics, dict) else self._load_metric_map(run_dir)
+        if "stress_fragility_index" in metric_map:
+            return float(metric_map["stress_fragility_index"])
+        stress_payload = read_stress_scenarios(run_dir)
+        rows = stress_payload.get("scenario_attribution", []) if isinstance(stress_payload, dict) else []
+        if not isinstance(rows, list):
+            return 0.0
+        penalties: list[float] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sharpe_drag = max(0.0, -float(row.get("delta_sharpe", 0.0)))
+            drawdown_drag = max(0.0, -float(row.get("delta_max_drawdown", 0.0)))
+            penalties.append((0.6 * sharpe_drag) + (0.4 * drawdown_drag))
+        return float(sum(penalties) / len(penalties)) if penalties else 0.0
+
+    def _extract_governance_readiness(self, run_dir: Path) -> float:
+        manifest = self._read_json(run_dir / "manifest.json")
+        if not isinstance(manifest, dict):
+            return 0.0
+        governance = manifest.get("governance", {}) if isinstance(manifest.get("governance"), dict) else {}
+        gate_checks = governance.get("gate_checks", {}) if isinstance(governance.get("gate_checks"), dict) else {}
+        if gate_checks:
+            total = len(gate_checks)
+            passed = sum(1 for value in gate_checks.values() if bool(value))
+            return float(passed / total) if total else 0.0
+        if "is_promotion_ready" in governance:
+            return 1.0 if bool(governance.get("is_promotion_ready", False)) else 0.0
+        return 0.0
+
+    def _render_inplace_pair_comparison(self, base_run: Path, other_run: Path) -> None:
+        base_metrics = self._load_metric_map(base_run)
+        other_metrics = self._load_metric_map(other_run)
+        metric_rows = metric_deltas(base_metrics, other_metrics)
+        metric_lookup = {str(row.get("metric", "")): row for row in metric_rows if isinstance(row, dict)}
+
+        drawdown_row = metric_lookup.get("max_drawdown") or metric_lookup.get("rolling_drawdown_worst")
+        turnover_row = metric_lookup.get("turnover_total") or metric_lookup.get("turnover")
+        sharpe_row = metric_lookup.get("sharpe")
+
+        base_stress_penalty = self._extract_stress_penalty(base_run, base_metrics)
+        other_stress_penalty = self._extract_stress_penalty(other_run, other_metrics)
+        base_readiness = self._extract_governance_readiness(base_run)
+        other_readiness = self._extract_governance_readiness(other_run)
+
+        rows = [
+            {
+                "metric": "Sharpe",
+                "base": float(sharpe_row.get("base", 0.0)) if isinstance(sharpe_row, dict) else 0.0,
+                "compare": float(sharpe_row.get("compare", 0.0)) if isinstance(sharpe_row, dict) else 0.0,
+                "delta": float(sharpe_row.get("delta", 0.0)) if isinstance(sharpe_row, dict) else 0.0,
+            },
+            {
+                "metric": "Drawdown",
+                "base": float(drawdown_row.get("base", 0.0)) if isinstance(drawdown_row, dict) else 0.0,
+                "compare": float(drawdown_row.get("compare", 0.0)) if isinstance(drawdown_row, dict) else 0.0,
+                "delta": float(drawdown_row.get("delta", 0.0)) if isinstance(drawdown_row, dict) else 0.0,
+            },
+            {
+                "metric": "Turnover",
+                "base": float(turnover_row.get("base", 0.0)) if isinstance(turnover_row, dict) else 0.0,
+                "compare": float(turnover_row.get("compare", 0.0)) if isinstance(turnover_row, dict) else 0.0,
+                "delta": float(turnover_row.get("delta", 0.0)) if isinstance(turnover_row, dict) else 0.0,
+            },
+            {
+                "metric": "Stress penalty",
+                "base": base_stress_penalty,
+                "compare": other_stress_penalty,
+                "delta": other_stress_penalty - base_stress_penalty,
+            },
+            {
+                "metric": "Governance readiness",
+                "base": base_readiness,
+                "compare": other_readiness,
+                "delta": other_readiness - base_readiness,
+            },
+        ]
+        self._set_tree_data(self.inplace_compare_tree, rows)
 
     def _update_equity_overlap(self, run_dirs: list[Path]) -> None:
         self._last_equity_run_dirs = list(run_dirs)
