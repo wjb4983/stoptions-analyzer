@@ -1595,6 +1595,7 @@ def run_walk_forward_backtest(
     prior_strategy_keys: list[str] | None = None,
     history_path: Path | None = None,
     cancellation_token: CancellationToken | None = None,
+    run_namespace: str | None = None,
 ) -> str:
     cancellation = cancellation_token or CancellationToken()
     cancellation.checkpoint("run_walk_forward_backtest:start")
@@ -1824,7 +1825,8 @@ def run_walk_forward_backtest(
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_walk_forward_{timestamp}"
+    namespace_prefix = f"{run_namespace}_" if run_namespace else ""
+    run_dir = BACKTEST_OUTPUT_DIR / f"{namespace_prefix}tsmom_walk_forward_{timestamp}"
     persist_walk_forward_outputs(run_dir=run_dir, result=wf_result)
     (run_dir / "skipped_invalid_combos.json").write_text(json.dumps(invalid_rows, indent=2))
     (run_dir / "audit_inputs.json").write_text(
@@ -2051,6 +2053,7 @@ def run_strategy_optimization(
     min_completed_for_pruning: int = 5,
     staged_budgets: list[dict[str, Any]] | None = None,
     cancellation_token: CancellationToken | None = None,
+    run_namespace: str | None = None,
 ) -> str:
     cancellation = cancellation_token or CancellationToken()
     cancellation.checkpoint("run_strategy_optimization:start")
@@ -2067,7 +2070,8 @@ def run_strategy_optimization(
     governance_payload = _build_governance_metadata(governance_metadata)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_optimize_{timestamp}"
+    namespace_prefix = f"{run_namespace}_" if run_namespace else ""
+    run_dir = BACKTEST_OUTPUT_DIR / f"{namespace_prefix}tsmom_optimize_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     objective_defs = objectives or [
@@ -2903,6 +2907,7 @@ def run_multi_signal_backtest(
     scenario_packs: list[str] | None = None,
     benchmarks: list[str] | None = None,
     cancellation_token: CancellationToken | None = None,
+    run_namespace: str | None = None,
 ) -> str:
     """Run all selected entry/exit combinations with shared core parameters."""
 
@@ -3005,7 +3010,7 @@ def run_multi_signal_backtest(
             )
 
     ranked_rows = sorted(rows, key=lambda row: (bool(row.get("stress_passed", False)), float(row["sharpe"])), reverse=True)
-    leaderboard_dir = _persist_multi_signal_outputs(ranked_rows)
+    leaderboard_dir = _persist_multi_signal_outputs(ranked_rows, run_namespace=run_namespace)
     (leaderboard_dir / "cancellation.json").write_text(json.dumps(cancellation.snapshot(), indent=2), encoding="utf-8")
 
     summary_lines = [
@@ -3098,9 +3103,10 @@ def _load_stress_payload_from_run_dir(run_dir: Path) -> dict[str, Any]:
     except Exception:
         return {}
 
-def _persist_multi_signal_outputs(rows: list[dict[str, Any]]) -> Path:
+def _persist_multi_signal_outputs(rows: list[dict[str, Any]], *, run_namespace: str | None = None) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_multi_signal_{timestamp}"
+    namespace_prefix = f"{run_namespace}_" if run_namespace else ""
+    run_dir = BACKTEST_OUTPUT_DIR / f"{namespace_prefix}tsmom_multi_signal_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
