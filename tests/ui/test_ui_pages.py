@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 import pytest
@@ -286,3 +287,63 @@ def test_navigation_smoke_all_pages_non_interactive(monkeypatch):
         page.controller = controller
         page.api_client = None
         page.load_market_data()
+
+
+def test_research_lab_funnel_kpi_metrics_expand_beyond_acceptance_rate(tmp_path):
+    lab = research_lab_page.ResearchLabPage.__new__(research_lab_page.ResearchLabPage)
+    lab._research_lab_dir = tmp_path
+
+    events = [
+        {
+            "hypothesis_id": "h1",
+            "date": "2024-01-03",
+            "submitted_at": "2024-01-01",
+            "decision_at": "2024-01-03",
+            "strategy_family": "trend",
+            "decision": "accept",
+            "promotion_state": "promoted_to_experiment",
+        },
+        {
+            "hypothesis_id": "h1",
+            "date": "2024-02-01",
+            "submitted_at": "2024-01-01",
+            "decision_at": "2024-02-01",
+            "strategy_family": "trend",
+            "decision": "reject",
+            "promotion_state": "rejected",
+        },
+        {
+            "hypothesis_id": "h2",
+            "date": "2024-01-11",
+            "submitted_at": "2024-01-10",
+            "decision_at": "2024-01-11",
+            "strategy_family": "mean_reversion",
+            "decision": "accept",
+            "promotion_state": "promoted_to_experiment",
+        },
+        {
+            "hypothesis_id": "h3",
+            "date": "2024-01-19",
+            "submitted_at": "2024-01-15",
+            "decision_at": "2024-01-19",
+            "strategy_family": "trend",
+            "decision": "reject",
+            "promotion_state": "rejected",
+        },
+    ]
+    event_path = tmp_path / "idea_funnel_events.jsonl"
+    event_path.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+
+    metrics = lab._compute_funnel_metrics()
+
+    assert metrics["acceptance_rate_pct"] == pytest.approx(50.0)
+    assert metrics["median_time_to_decision_days"] == pytest.approx(3.0)
+    assert metrics["false_positive_rate_pct"] == pytest.approx(50.0)
+
+    strategy_rates = {row["strategy_family"]: row for row in metrics["pass_rates_by_strategy_family"]}
+    assert strategy_rates["trend"]["acceptance_rate_pct"] == pytest.approx(100 / 3)
+    assert strategy_rates["mean_reversion"]["acceptance_rate_pct"] == pytest.approx(100.0)
+
+    month_conversion = {row["month"]: row for row in metrics["promotion_conversion_by_month"]}
+    assert month_conversion["2024-01"]["promotion_conversion_pct"] == pytest.approx(200 / 3)
+    assert month_conversion["2024-02"]["promotion_conversion_pct"] == pytest.approx(0.0)
