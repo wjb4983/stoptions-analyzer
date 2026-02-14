@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import math
 from dataclasses import dataclass
@@ -378,6 +379,96 @@ class BayesianSampler:
         return self._fit_predict(trials=trials, space=space, params=params)
 
 
+class CMASampler:
+    """Small CMA-ES-inspired sampler for mixed spaces."""
+
+    def __init__(self, *, elite_fraction: float = 0.3, sigma_decay: float = 0.98, min_sigma: float = 0.03) -> None:
+        self.elite_fraction = float(elite_fraction)
+        self.sigma_decay = float(sigma_decay)
+        self.min_sigma = float(min_sigma)
+
+    def sample(self, *, trials: list[Trial], space: dict[str, SearchDimension], rng: np.random.Generator) -> dict[str, Any]:
+        observed = [t for t in trials if not t.stopped_early and t.metrics.get("_scalar_score") is not None]
+        if len(observed) < 5:
+            return RandomSampler().sample(trials=trials, space=space, rng=rng)
+
+        ranked = sorted(observed, key=lambda t: float(t.metrics.get("_scalar_score", -math.inf)), reverse=True)
+        n_elites = max(2, int(math.ceil(len(ranked) * self.elite_fraction)))
+        elites = ranked[:n_elites]
+
+        sampled: dict[str, Any] = {}
+        for key, dim in space.items():
+            if isinstance(dim, DiscreteDimension):
+                counts = {repr(v): 1.0 for v in dim.values}
+                mapping = {repr(v): v for v in dim.values}
+                for trial in elites:
+                    value = repr(trial.params.get(key))
+                    counts[value] = counts.get(value, 1.0) + 2.0
+                labels = list(counts.keys())
+                probs = np.array([counts[label] for label in labels], dtype=float)
+                probs /= probs.sum()
+                sampled[key] = mapping[str(rng.choice(labels, p=probs))]
+                continue
+
+            elite_values = np.array([float(trial.params.get(key, dim.low)) for trial in elites], dtype=float)
+            center = float(np.mean(elite_values))
+            spread = float(max(np.std(elite_values), self.min_sigma * (dim.high - dim.low))) * self.sigma_decay
+            spread = max(self.min_sigma * (dim.high - dim.low), spread)
+            value = float(rng.normal(loc=center, scale=spread))
+            value = float(min(dim.high, max(dim.low, value)))
+            if dim.step and dim.step > 0:
+                n_steps = round((value - dim.low) / dim.step)
+                value = dim.low + (n_steps * dim.step)
+                value = float(min(dim.high, max(dim.low, value)))
+            sampled[key] = value
+
+        return sampled
+
+    def predict(self, *, trials: list[Trial], space: dict[str, SearchDimension], params: dict[str, Any]) -> tuple[float, float] | None:
+        return BayesianSampler().predict(trials=trials, space=space, params=params)
+
+
+class GridSampler:
+    """Deterministic cartesian traversal for discrete spaces."""
+
+    def __init__(self) -> None:
+        self._cursor = 0
+        self._grid_cache: tuple[tuple[str, tuple[Any, ...]], ...] | None = None
+        self._grid_rows: list[dict[str, Any]] = []
+
+    def _rebuild_if_needed(self, space: dict[str, SearchDimension]) -> None:
+        signature: tuple[tuple[str, tuple[Any, ...]], ...] = tuple(
+            (key, tuple(dim.values) if isinstance(dim, DiscreteDimension) else tuple()) for key, dim in sorted(space.items())
+        )
+        if self._grid_cache == signature and self._grid_rows:
+            return
+        if any(not isinstance(dim, DiscreteDimension) for dim in space.values()):
+            self._grid_cache = signature
+            self._grid_rows = []
+            self._cursor = 0
+            return
+
+        keys = list(space.keys())
+        dims = [space[key] for key in keys]
+        rows: list[dict[str, Any]] = []
+        for values in itertools.product(*[dim.values for dim in dims]):
+            rows.append({key: value for key, value in zip(keys, values)})
+        self._grid_cache = signature
+        self._grid_rows = rows
+        self._cursor = 0
+
+    def sample(self, *, trials: list[Trial], space: dict[str, SearchDimension], rng: np.random.Generator) -> dict[str, Any]:
+        self._rebuild_if_needed(space)
+        if not self._grid_rows:
+            return RandomSampler().sample(trials=trials, space=space, rng=rng)
+        sampled = dict(self._grid_rows[self._cursor % len(self._grid_rows)])
+        self._cursor += 1
+        return sampled
+
+    def predict(self, *, trials: list[Trial], space: dict[str, SearchDimension], params: dict[str, Any]) -> tuple[float, float] | None:
+        return None
+
+
 def compute_scalar_score(
     metrics: dict[str, float],
     objectives: list[Objective],
@@ -535,6 +626,10 @@ def optimize(
     history_path: Path | None = None,
     strategy_key: str | None = None,
     prior_strategy_keys: list[str] | None = None,
+    enable_pruning: bool = True,
+    prune_on_constraint_violation: bool = True,
+    prune_on_lcb: bool = True,
+    min_completed_for_pruning: int = 5,
 ) -> dict[str, Any]:
     risk_beta = 1.5
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -589,11 +684,11 @@ def optimize(
                     observed_scores=fold_scores,
                     risk_beta=risk_beta,
                 )
-                if not feasible and period_fraction < 1.0:
+                if enable_pruning and prune_on_constraint_violation and not feasible and period_fraction < 1.0:
                     stopped_early = True
                     break
-                if period_fraction < 1.0:
-                    reference_lcb = _pruning_reference_lcb(trials=trials, risk_beta=risk_beta)
+                if enable_pruning and prune_on_lcb and period_fraction < 1.0:
+                    reference_lcb = _pruning_reference_lcb(trials=trials, risk_beta=risk_beta, min_completed=max(1, int(min_completed_for_pruning)))
                     current_lcb = None if uncertainty is None else uncertainty.get("lcb")
                     if reference_lcb is not None and current_lcb is not None and float(current_lcb) < float(reference_lcb):
                         stopped_early = True
@@ -702,6 +797,12 @@ def optimize(
                 "seeded_prior_trials": len(seeded_trials),
                 "strategy_key": strategy_key,
                 "prior_strategy_keys": list(prior_strategy_keys or []),
+                "pruning": {
+                    "enabled": bool(enable_pruning),
+                    "prune_on_constraint_violation": bool(prune_on_constraint_violation),
+                    "prune_on_lcb": bool(prune_on_lcb),
+                    "min_completed_for_pruning": int(min_completed_for_pruning),
+                },
             },
             indent=2,
             sort_keys=True,

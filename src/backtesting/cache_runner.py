@@ -82,6 +82,8 @@ from backtesting.optimization import (
     Constraint,
     Objective,
     BayesianSampler,
+    CMASampler,
+    GridSampler,
     OverfittingPenaltyConfig,
     RandomSampler,
     TPESampler,
@@ -1793,6 +1795,11 @@ def run_strategy_optimization(
     strategy_key: str | None = None,
     prior_strategy_keys: list[str] | None = None,
     history_path: Path | None = None,
+    enable_pruning: bool = True,
+    prune_on_constraint_violation: bool = True,
+    prune_on_lcb: bool = True,
+    min_completed_for_pruning: int = 5,
+    staged_budgets: list[dict[str, Any]] | None = None,
 ) -> str:
     random.seed(int(seed))
     np.random.seed(int(seed))
@@ -1825,13 +1832,17 @@ def run_strategy_optimization(
     if min_trades is not None:
         constraints.append(Constraint(metric="trade_count", min_value=float(min_trades)))
 
-    sampler_key = sampler_name.lower()
-    if sampler_key == "bayesian":
-        sampler = BayesianSampler()
-    elif sampler_key == "tpe":
-        sampler = TPESampler()
-    else:
-        sampler = RandomSampler()
+    def _build_sampler(name: str):
+        sampler_key = str(name).strip().lower()
+        if sampler_key == "bayesian":
+            return BayesianSampler()
+        if sampler_key == "tpe":
+            return TPESampler()
+        if sampler_key in {"cma-es", "cma_es", "cma"}:
+            return CMASampler()
+        if sampler_key == "grid":
+            return GridSampler()
+        return RandomSampler()
 
     def _evaluate(params: dict[str, Any], period_fraction: float) -> dict[str, float]:
         combo = combos[int(params["combo_index"])]
@@ -1852,23 +1863,64 @@ def run_strategy_optimization(
 
     effective_space = search_space or {"combo_index": {"type": "discrete", "values": list(range(len(combos)))}}
 
-    result = optimize(
-        space=effective_space,
-        evaluate=_evaluate,
-        objectives=objective_specs,
-        constraints=constraints,
-        sampler=sampler,
-        n_trials=int(n_trials),
-        seed=int(seed),
-        partial_period_fractions=partial_period_fractions,
-        output_dir=run_dir,
-        objective_weights=objective_weights,
-        overfitting_penalty=OverfittingPenaltyConfig(**(overfitting_penalty or {})),
-        use_walk_forward_objective_metrics=True,
-        history_path=history_path if history_path is not None else run_dir / "optimization_history.jsonl",
-        strategy_key=strategy_key,
-        prior_strategy_keys=prior_strategy_keys,
-    )
+    optimization_history_path = history_path if history_path is not None else run_dir / "optimization_history.jsonl"
+    stages = list(staged_budgets or [])
+    if not stages:
+        stages = [{
+            "label": "single_stage",
+            "n_trials": int(n_trials),
+            "sampler": sampler_name,
+            "partial_period_fractions": partial_period_fractions,
+        }]
+
+    stage_summaries: list[dict[str, Any]] = []
+    result: dict[str, Any] = {}
+    for stage_idx, stage in enumerate(stages):
+        stage_label = str(stage.get("label", f"stage_{stage_idx + 1}"))
+        stage_trials = int(stage.get("n_trials", n_trials))
+        if stage_trials <= 0:
+            continue
+        stage_sampler_name = str(stage.get("sampler", sampler_name))
+        stage_sampler = _build_sampler(stage_sampler_name)
+        stage_space = stage.get("search_space") if isinstance(stage.get("search_space"), dict) else effective_space
+        stage_fractions = stage.get("partial_period_fractions")
+        if isinstance(stage_fractions, list):
+            parsed_stage_fractions = [float(v) for v in stage_fractions]
+        else:
+            parsed_stage_fractions = partial_period_fractions
+
+        result = optimize(
+            space=stage_space,
+            evaluate=_evaluate,
+            objectives=objective_specs,
+            constraints=constraints,
+            sampler=stage_sampler,
+            n_trials=stage_trials,
+            seed=int(seed) + stage_idx,
+            partial_period_fractions=parsed_stage_fractions,
+            output_dir=run_dir,
+            objective_weights=objective_weights,
+            overfitting_penalty=OverfittingPenaltyConfig(**(overfitting_penalty or {})),
+            use_walk_forward_objective_metrics=True,
+            history_path=optimization_history_path,
+            strategy_key=strategy_key,
+            prior_strategy_keys=prior_strategy_keys,
+            enable_pruning=bool(stage.get("enable_pruning", enable_pruning)),
+            prune_on_constraint_violation=bool(stage.get("prune_on_constraint_violation", prune_on_constraint_violation)),
+            prune_on_lcb=bool(stage.get("prune_on_lcb", prune_on_lcb)),
+            min_completed_for_pruning=int(stage.get("min_completed_for_pruning", min_completed_for_pruning)),
+        )
+        stage_summaries.append({
+            "label": stage_label,
+            "n_trials": stage_trials,
+            "sampler": stage_sampler_name,
+            "partial_period_fractions": parsed_stage_fractions,
+            "search_space": stage_space,
+            "trial_count": int(result.get("trial_count", 0)),
+            "feasible_count": int(result.get("feasible_count", 0)),
+            "pareto_count": int(result.get("pareto_count", 0)),
+            "best_scalar": float(result.get("best_scalar", float("-inf"))),
+        })
 
     best_metrics: dict[str, float] = {}
     pareto_trials = result.get("pareto_trials", [])
@@ -1908,6 +1960,9 @@ def run_strategy_optimization(
                 "random_seeds": {"run_seed": int(seed), "python_random_seed": int(seed), "numpy_random_seed": int(seed)},
                 "n_trials": n_trials,
                 "sampler": sampler_name,
+                "staged_budgets": stages,
+                "stage_summaries": stage_summaries,
+                "pruning": {"enabled": bool(enable_pruning), "prune_on_constraint_violation": bool(prune_on_constraint_violation), "prune_on_lcb": bool(prune_on_lcb), "min_completed_for_pruning": int(min_completed_for_pruning)},
                 "search_space": effective_space,
                 "objectives": objective_defs,
                 "constraints": [constraint.__dict__ for constraint in constraints],
@@ -1918,7 +1973,7 @@ def run_strategy_optimization(
                 "overfitting_penalty": dict(overfitting_penalty or {}),
                 "strategy_key": strategy_key,
                 "prior_strategy_keys": list(prior_strategy_keys or []),
-                "history_path": str(history_path) if history_path is not None else str(run_dir / "optimization_history.jsonl"),
+                "history_path": str(optimization_history_path),
             },
             indent=2,
             sort_keys=True,
@@ -1938,6 +1993,9 @@ def run_strategy_optimization(
             "seed": seed,
             "n_trials": n_trials,
             "sampler": sampler_name,
+                "staged_budgets": stages,
+                "stage_summaries": stage_summaries,
+                "pruning": {"enabled": bool(enable_pruning), "prune_on_constraint_violation": bool(prune_on_constraint_violation), "prune_on_lcb": bool(prune_on_lcb), "min_completed_for_pruning": int(min_completed_for_pruning)},
             "search_space": effective_space,
             "objectives": objective_defs,
             "constraints": [constraint.__dict__ for constraint in constraints],
@@ -1991,7 +2049,7 @@ def run_strategy_optimization(
 
     return (
         f"Optimization complete: {result['trial_count']} trials, {result['feasible_count']} feasible, "
-        f"{result['pareto_count']} Pareto-optimal. "
+        f"{result['pareto_count']} Pareto-optimal across {len(stage_summaries)} stage(s). "
         f"Top robust sets: {len(result.get('best_robust_params', []))}. Saved outputs to: {run_dir}"
     )
 
@@ -4902,13 +4960,19 @@ def _build_parser() -> argparse.ArgumentParser:
     opt_parser.add_argument("--core-grid", required=True, help="JSON mapping core param->list[values].")
     opt_parser.add_argument("--seed", type=int, default=42)
     opt_parser.add_argument("--n-trials", type=int, default=30)
-    opt_parser.add_argument("--sampler", choices=["tpe", "random", "bayesian"], default="tpe")
+    opt_parser.add_argument("--sampler", choices=["tpe", "random", "bayesian", "cma-es", "grid"], default="tpe")
     opt_parser.add_argument("--search-space", default=None, help="Optional JSON search space with discrete/continuous dimensions.")
     opt_parser.add_argument("--objectives", default='[{"name":"sharpe","sense":"maximize"},{"name":"turnover_total","sense":"minimize"},{"name":"max_drawdown","sense":"maximize"}]')
     opt_parser.add_argument("--max-turnover", type=float, default=None)
     opt_parser.add_argument("--max-drawdown-floor", type=float, default=None)
     opt_parser.add_argument("--min-trades", type=float, default=None)
     opt_parser.add_argument("--partial-period-fractions", default='[0.33,0.66,1.0]')
+    opt_parser.add_argument("--enable-pruning", action="store_true", help="Enable early stopping/pruning on partial-budget evaluations.")
+    opt_parser.add_argument("--disable-pruning", action="store_true", help="Disable all early stopping/pruning.")
+    opt_parser.add_argument("--disable-prune-constraint", action="store_true", help="Disable pruning on early constraint violations.")
+    opt_parser.add_argument("--disable-prune-lcb", action="store_true", help="Disable uncertainty/LCB pruning between budget stages.")
+    opt_parser.add_argument("--min-completed-for-pruning", type=int, default=5)
+    opt_parser.add_argument("--staged-budgets", default=None, help="Optional JSON list of staged budget dicts {n_trials,sampler,partial_period_fractions,...}.")
 
     replay_parser = subparsers.add_parser("replay", help="Strictly replay a prior backtest from a manifest.")
     replay_parser.add_argument("--manifest-path", required=True, help="Path to manifest.json to replay.")
@@ -5021,6 +5085,11 @@ def main() -> None:
             max_drawdown_floor=args.max_drawdown_floor,
             min_trades=args.min_trades,
             partial_period_fractions=[float(v) for v in _parse_json_array(args.partial_period_fractions)],
+            enable_pruning=bool(args.enable_pruning) or not bool(args.disable_pruning),
+            prune_on_constraint_violation=not bool(args.disable_prune_constraint),
+            prune_on_lcb=not bool(args.disable_prune_lcb),
+            min_completed_for_pruning=int(args.min_completed_for_pruning),
+            staged_budgets=None if args.staged_budgets is None else list(_parse_json_array(args.staged_budgets)),
         )
     elif args.command == "replay":
         output = replay_manifest_run(
