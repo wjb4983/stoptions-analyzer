@@ -388,6 +388,7 @@ class ResearchLabPage(ttk.Frame):
             task.workflow_output = output_text
             self._append_output(f"[{task.label}] Succeeded.")
             self._refresh_governance_dashboard_from_output(output_text)
+            self._append_explainability_cards(task, output_text)
             pack_path = self._emit_research_pack(task, output_text)
             if pack_path is not None:
                 task.research_pack_path = str(pack_path)
@@ -397,6 +398,159 @@ class ResearchLabPage(ttk.Frame):
         self._active_task_id = None
         self._refresh_task_queue_ui()
         self._run_next_task()
+
+    def _append_explainability_cards(self, task: ResearchTask, output_text: str) -> None:
+        manifest_path = self._extract_manifest_path_from_output(output_text)
+        run_dir = manifest_path.parent if manifest_path is not None else None
+        if run_dir is None:
+            return
+
+        explain_path = run_dir / "trade_explainability.json"
+        if not explain_path.exists():
+            return
+        try:
+            explain_rows = json.loads(explain_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(explain_rows, list) or not explain_rows:
+            return
+
+        regime_by_timestamp = self._load_regime_by_timestamp(run_dir)
+        loss_card = self._build_top_loss_contributors_card(explain_rows)
+        failure_card = self._build_regime_failure_windows_card(explain_rows, regime_by_timestamp)
+        slippage_card = self._build_slippage_sensitivity_card(explain_rows)
+
+        cards = [
+            f"[{task.label}] Explainability highlights:",
+            f"• {loss_card}",
+            f"• {failure_card}",
+            f"• {slippage_card}",
+        ]
+        for line in cards:
+            self._append_output(line)
+            task.logs.append(line)
+
+    def _load_regime_by_timestamp(self, run_dir: Path) -> dict[str, str]:
+        regimes_path = run_dir / "regimes.json"
+        if not regimes_path.exists():
+            return {}
+        try:
+            payload = json.loads(regimes_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(payload, list):
+            return {}
+        mapping: dict[str, str] = {}
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            ts = str(row.get("timestamp", "")).strip()
+            regime = str(row.get("regime", "")).strip() or "unknown"
+            if ts:
+                mapping[ts] = regime
+        return mapping
+
+    def _build_top_loss_contributors_card(self, explain_rows: list[dict[str, Any]]) -> str:
+        contributors: dict[str, float] = {}
+        for row in explain_rows:
+            top_drivers = row.get("top_drivers", [])
+            if not isinstance(top_drivers, list):
+                continue
+            for driver in top_drivers:
+                if not isinstance(driver, dict):
+                    continue
+                feature = str(driver.get("feature", "unknown")).strip() or "unknown"
+                score = float(driver.get("attribution_score", 0.0))
+                if score < 0.0:
+                    contributors[feature] = contributors.get(feature, 0.0) + abs(score)
+        if not contributors:
+            return "Top loss contributors: none detected from negative attribution drivers."
+        ranked = sorted(contributors.items(), key=lambda item: item[1], reverse=True)[:3]
+        summary = ", ".join(f"{feature} ({value:.2f})" for feature, value in ranked)
+        return f"Top loss contributors: {summary}."
+
+    def _build_regime_failure_windows_card(
+        self,
+        explain_rows: list[dict[str, Any]],
+        regime_by_timestamp: dict[str, str],
+    ) -> str:
+        windows_by_regime: dict[str, list[tuple[str, str, int]]] = {}
+        current_regime: str | None = None
+        start_ts = ""
+        end_ts = ""
+        current_count = 0
+
+        def flush() -> None:
+            nonlocal current_regime, start_ts, end_ts, current_count
+            if current_regime is None or current_count <= 0:
+                return
+            windows_by_regime.setdefault(current_regime, []).append((start_ts, end_ts, current_count))
+            current_regime = None
+            start_ts = ""
+            end_ts = ""
+            current_count = 0
+
+        for row in explain_rows:
+            flags = row.get("red_flags", [])
+            ts = str(row.get("timestamp", "")).strip()
+            regime = regime_by_timestamp.get(ts, "unknown")
+            flagged = isinstance(flags, list) and len(flags) > 0
+            if not flagged:
+                flush()
+                continue
+            if current_regime == regime:
+                end_ts = ts
+                current_count += 1
+            else:
+                flush()
+                current_regime = regime
+                start_ts = ts
+                end_ts = ts
+                current_count = 1
+        flush()
+
+        if not windows_by_regime:
+            return "Regime-specific failure windows: none (no red-flag windows)."
+        top_windows = []
+        for regime, windows in windows_by_regime.items():
+            largest = max(windows, key=lambda item: item[2])
+            top_windows.append((regime, largest[0], largest[1], largest[2]))
+        ranked = sorted(top_windows, key=lambda item: item[3], reverse=True)[:2]
+        desc = "; ".join(
+            f"{regime}: {count} flagged trades ({start} → {end})"
+            for regime, start, end, count in ranked
+        )
+        return f"Regime-specific failure windows: {desc}."
+
+    def _build_slippage_sensitivity_card(self, explain_rows: list[dict[str, Any]]) -> str:
+        slices: dict[str, list[float]] = {"low": [], "mid": [], "high": []}
+        for row in explain_rows:
+            fills = row.get("fill_context", [])
+            if not isinstance(fills, list):
+                continue
+            for fill in fills:
+                if not isinstance(fill, dict):
+                    continue
+                requested = abs(float(fill.get("requested_size", 0.0)))
+                if requested <= 1e-9:
+                    continue
+                residual = abs(float(fill.get("residual_size", 0.0)))
+                participation = float(fill.get("participation_rate", 0.0))
+                residual_ratio = residual / requested
+                if participation < 0.25:
+                    slices["low"].append(residual_ratio)
+                elif participation < 0.6:
+                    slices["mid"].append(residual_ratio)
+                else:
+                    slices["high"].append(residual_ratio)
+        populated = {k: v for k, v in slices.items() if v}
+        if not populated:
+            return "Slippage sensitivity slices: unavailable (no fill context)."
+        parts = [
+            f"{bucket} participation residual={sum(vals) / len(vals):.2%}"
+            for bucket, vals in populated.items()
+        ]
+        return "Slippage sensitivity slices: " + ", ".join(parts) + "."
 
     def export_research_pack(self) -> None:
         task = self._selected_task()
