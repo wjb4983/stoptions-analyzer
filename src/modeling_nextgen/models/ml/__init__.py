@@ -9,6 +9,7 @@ from .panel_baselines import (
     RandomForestBaseline,
     TreeBoostingBaseline,
 )
+from .multitask import CalibrationArtifact, MultiTaskRiskModel, TaskSpec
 
 
 @dataclass
@@ -22,6 +23,9 @@ __all__ = [
     "LogitBaseline",
     "TreeBoostingBaseline",
     "RandomForestBaseline",
+    "TaskSpec",
+    "CalibrationArtifact",
+    "MultiTaskRiskModel",
     "PanelSplit",
     "PanelWalkForwardSplitter",
 ]
