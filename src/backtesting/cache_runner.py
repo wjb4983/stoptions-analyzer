@@ -15,7 +15,7 @@ import subprocess
 import sys
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from itertools import product
 from pathlib import Path
 from typing import Any, Callable
@@ -257,6 +257,7 @@ def run_time_series_momentum_backtest(
     capacity_aum_scales: list[float] | None = None,
     max_participation_rate: float | None = None,
     random_seed: int = 42,
+    preflight_config: PreflightValidationConfig | None = None,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     random.seed(int(random_seed))
@@ -288,6 +289,15 @@ def run_time_series_momentum_backtest(
     )
     arrays = _resample_engine_bundle_from_1m(arrays, timeframe=timeframe)
     dataset_contracts = validate_engine_dataset_contracts(arrays)
+    _run_preflight_or_raise(
+        arrays=arrays,
+        requested_tickers=tickers,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        timeframe=timeframe,
+        config=preflight_config or PreflightValidationConfig(),
+        workflow_label="run",
+    )
 
     prices = _fill_missing_prices(arrays.close_prices)
     bet_fraction = _resolve_bet_fraction(
@@ -835,6 +845,20 @@ class SweepWorkerConfig:
     remote_endpoints: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class PreflightValidationConfig:
+    """Configurable checks run before backtest workflow execution."""
+
+    max_missing_bars_ratio: float = 1.0
+    min_symbol_coverage_ratio: float = 1.0
+    critical_checks: tuple[str, ...] = (
+        "timestamp_consistency",
+        "adjustment_flags",
+        "symbol_coverage",
+    )
+    block_on_critical: bool = True
+
+
 class _SweepExecutorAdapter:
     def submit(self, fn: Callable[[dict[str, Any]], dict[str, Any]], payload: dict[str, Any]) -> Future[dict[str, Any]]:
         raise NotImplementedError
@@ -944,6 +968,7 @@ def run_parameter_sweep(
     worker_config: SweepWorkerConfig | None = None,
     retry_policy: SweepRetryPolicy | None = None,
     lineage_parent_manifest: str | None = None,
+    preflight_config: PreflightValidationConfig | None = None,
 ) -> str:
     """Run a parallel sweep over signal/core-parameter combinations."""
 
@@ -966,12 +991,17 @@ def run_parameter_sweep(
     worker_cfg = worker_config or SweepWorkerConfig(mode="local", max_workers=n_workers)
     retry_cfg = retry_policy or SweepRetryPolicy()
 
+    resolved_preflight = preflight_config or PreflightValidationConfig()
     base_payload = {
         "seed": int(seed),
         "tickers": tickers,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
         "cache_root": str(cache_root),
+        "preflight_max_missing_bars_ratio": float(resolved_preflight.max_missing_bars_ratio),
+        "preflight_min_symbol_coverage_ratio": float(resolved_preflight.min_symbol_coverage_ratio),
+        "preflight_critical_checks": ",".join(resolved_preflight.critical_checks),
+        "preflight_block_on_critical": bool(resolved_preflight.block_on_critical),
     }
     queued_indices = list(range(len(combos)))
     rows: list[dict[str, Any]] = []
@@ -2282,6 +2312,20 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
         timeframe="1m",
         lookback_window=required_lookback_window(entry_cfg, exit_cfg),
     )
+    _run_preflight_or_raise(
+        arrays=arrays,
+        requested_tickers=tickers,
+        start_dt=datetime.combine(start_date, datetime.min.time()),
+        end_dt=datetime.combine(end_date, datetime.max.time()),
+        timeframe="1m",
+        config=PreflightValidationConfig(
+            max_missing_bars_ratio=float(payload.get("preflight_max_missing_bars_ratio", 1.0)),
+            min_symbol_coverage_ratio=float(payload.get("preflight_min_symbol_coverage_ratio", 1.0)),
+            critical_checks=_parse_preflight_critical_checks(payload.get("preflight_critical_checks")),
+            block_on_critical=bool(payload.get("preflight_block_on_critical", True)),
+        ),
+        workflow_label="sweep",
+    )
     prices = _fill_missing_prices(arrays.close_prices)
     partial_fraction = float(payload.get("partial_period_fraction", 1.0))
     if partial_fraction < 1.0:
@@ -2867,6 +2911,106 @@ def load_backtest_engine_arrays(
         validate_split_adjustment=True,
     )
 
+
+
+def _parse_preflight_critical_checks(raw: str | None) -> tuple[str, ...]:
+    if raw is None or not str(raw).strip():
+        return ("timestamp_consistency", "adjustment_flags", "symbol_coverage")
+    checks = [item.strip() for item in str(raw).split(",") if item.strip()]
+    return tuple(dict.fromkeys(checks))
+
+
+def _run_preflight_or_raise(
+    *,
+    arrays: EngineArrayBundle,
+    requested_tickers: list[str],
+    start_dt: datetime,
+    end_dt: datetime,
+    timeframe: str,
+    config: PreflightValidationConfig,
+    workflow_label: str,
+) -> dict[str, Any]:
+    normalized_requested = [str(t).strip().upper() for t in requested_tickers if str(t).strip()]
+    symbol_order = sorted(arrays.metadata.symbol_to_column.items(), key=lambda item: item[1])
+
+    bars_total = int(arrays.date_index.size)
+    missing_counts: dict[str, int] = {}
+    missing_ratios: dict[str, float] = {}
+    coverage_ratios: dict[str, float] = {}
+    for symbol, col in symbol_order:
+        ratio = float(arrays.metadata.missingness_by_symbol.get(symbol, 1.0))
+        missing_ratios[symbol] = ratio
+        missing_counts[symbol] = int(np.sum(arrays.missing_mask[:, col])) if arrays.missing_mask.size else 0
+        coverage_ratios[symbol] = float(arrays.metadata.coverage_by_symbol.get(symbol, 0.0))
+
+    monotonic_diffs = np.diff(arrays.date_index) if arrays.date_index.size > 1 else np.array([], dtype=np.int64)
+    duplicate_count = int(np.sum(monotonic_diffs == 0)) if monotonic_diffs.size else 0
+    non_monotonic_count = int(np.sum(monotonic_diffs < 0)) if monotonic_diffs.size else 0
+    timestamp_ok = duplicate_count == 0 and non_monotonic_count == 0
+
+    adjustment_violations = dict(arrays.metadata.adjustment_violations_by_symbol)
+    symbols_with_adjustment_flags = sorted([sym for sym, count in adjustment_violations.items() if int(count) > 0])
+
+    missing_bars_failed = sorted([sym for sym, ratio in missing_ratios.items() if ratio > float(config.max_missing_bars_ratio)])
+    coverage_failed = sorted([sym for sym in normalized_requested if coverage_ratios.get(sym, 0.0) < float(config.min_symbol_coverage_ratio)])
+    missing_symbols = sorted([sym for sym in normalized_requested if sym not in arrays.metadata.symbol_to_column])
+
+    checks = {
+        "missing_bars": {
+            "status": "fail" if missing_bars_failed else "pass",
+            "threshold": float(config.max_missing_bars_ratio),
+            "failed_symbols": missing_bars_failed,
+        },
+        "timestamp_consistency": {
+            "status": "pass" if timestamp_ok else "fail",
+            "duplicate_timestamps": duplicate_count,
+            "non_monotonic_steps": non_monotonic_count,
+        },
+        "adjustment_flags": {
+            "status": "fail" if symbols_with_adjustment_flags else "pass",
+            "failed_symbols": symbols_with_adjustment_flags,
+            "violations_by_symbol": adjustment_violations,
+        },
+        "symbol_coverage": {
+            "status": "fail" if (coverage_failed or missing_symbols) else "pass",
+            "min_required": float(config.min_symbol_coverage_ratio),
+            "failed_symbols": coverage_failed,
+            "missing_symbols": missing_symbols,
+        },
+    }
+
+    critical = list(config.critical_checks)
+    critical_failures = [name for name in critical if checks.get(name, {}).get("status") == "fail"]
+    status = "blocked" if (critical_failures and config.block_on_critical) else ("warn" if critical_failures else "pass")
+
+    report = {
+        "schema_version": "1.0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "workflow": workflow_label,
+        "timeframe": timeframe,
+        "window": {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
+        "requested_symbols": normalized_requested,
+        "loaded_symbols": [sym for sym, _ in symbol_order],
+        "bars_total": bars_total,
+        "checks": checks,
+        "critical_checks": critical,
+        "critical_failures": critical_failures,
+        "status": status,
+        "summary": {
+            "missing_counts_by_symbol": missing_counts,
+            "missing_ratios_by_symbol": missing_ratios,
+            "coverage_ratios_by_symbol": coverage_ratios,
+            "excluded_symbols": dict(arrays.metadata.excluded_symbols),
+        },
+    }
+
+    report_path = BACKTEST_OUTPUT_DIR / f"preflight_report_{workflow_label}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
+    report_path.write_text(json.dumps(report, indent=2))
+    if critical_failures and config.block_on_critical:
+        raise ValueError(
+            f"Preflight validation blocked workflow ({', '.join(critical_failures)}). Report: {report_path}"
+        )
+    return report
 
 
 def _timeframe_step_from_1m(timeframe: str) -> int:
@@ -5229,6 +5373,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--bet-sizing-mode", choices=["kelly", "half_kelly", "custom"], default="half_kelly")
     run_parser.add_argument("--custom-bet-pct", type=float, default=10.0)
     run_parser.add_argument("--timeframe", default="1m", help="Bar resolution (e.g. 1m, 5m, 15m, 30m, 1h, 1d).")
+    run_parser.add_argument("--preflight-max-missing-bars-ratio", type=float, default=1.0)
+    run_parser.add_argument("--preflight-min-symbol-coverage-ratio", type=float, default=1.0)
+    run_parser.add_argument(
+        "--preflight-critical-checks",
+        default="timestamp_consistency,adjustment_flags,symbol_coverage",
+        help="Comma-separated preflight checks to treat as critical.",
+    )
+    run_parser.add_argument("--preflight-no-block-on-critical", action="store_true")
     run_parser.add_argument("--strategy", choices=["momentum", "xsmom"], default="momentum")
     run_parser.add_argument("--xsmom-top-quantile", type=float, default=0.2)
     run_parser.add_argument("--xsmom-bottom-quantile", type=float, default=0.2)
@@ -5261,6 +5413,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sweep_parser.add_argument("--top-n", type=int, default=10)
     sweep_parser.add_argument("--fail-fast", action="store_true")
     sweep_parser.add_argument("--continue-on-error", action="store_true")
+    sweep_parser.add_argument("--preflight-max-missing-bars-ratio", type=float, default=1.0)
+    sweep_parser.add_argument("--preflight-min-symbol-coverage-ratio", type=float, default=1.0)
+    sweep_parser.add_argument(
+        "--preflight-critical-checks",
+        default="timestamp_consistency,adjustment_flags,symbol_coverage",
+        help="Comma-separated preflight checks to treat as critical.",
+    )
+    sweep_parser.add_argument("--preflight-no-block-on-critical", action="store_true")
 
     wf_parser = subparsers.add_parser("walk_forward", help="Run rolling walk-forward optimization/evaluation.")
     _add_common_args(wf_parser)
@@ -5372,6 +5532,12 @@ def main() -> None:
             fail_fast=bool(args.fail_fast),
             continue_on_error=bool(args.continue_on_error),
             top_n=args.top_n,
+            preflight_config=PreflightValidationConfig(
+                max_missing_bars_ratio=float(args.preflight_max_missing_bars_ratio),
+                min_symbol_coverage_ratio=float(args.preflight_min_symbol_coverage_ratio),
+                critical_checks=_parse_preflight_critical_checks(args.preflight_critical_checks),
+                block_on_critical=not bool(args.preflight_no_block_on_critical),
+            ),
         )
     elif args.command == "walk_forward":
         output = run_walk_forward_backtest(
@@ -5492,6 +5658,12 @@ def main() -> None:
             portfolio_max_abs_delta_per_underlying=float(args.portfolio_max_abs_delta_per_underlying) if args.portfolio_max_abs_delta_per_underlying is not None else None,
             capacity_aum_scales=[float(v) for v in _parse_json_array(args.capacity_aum_scales)] if str(args.capacity_aum_scales).strip() else None,
             max_participation_rate=float(args.capacity_max_participation_rate) if args.capacity_max_participation_rate is not None else None,
+            preflight_config=PreflightValidationConfig(
+                max_missing_bars_ratio=float(args.preflight_max_missing_bars_ratio),
+                min_symbol_coverage_ratio=float(args.preflight_min_symbol_coverage_ratio),
+                critical_checks=_parse_preflight_critical_checks(args.preflight_critical_checks),
+                block_on_critical=not bool(args.preflight_no_block_on_critical),
+            ),
         )
     print(output)
 
