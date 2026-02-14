@@ -11,6 +11,38 @@ pip install -r requirements.txt
 pytest
 ```
 
+For a reproducible tiered local run that mirrors CI markers and emits artifacts:
+
+```bash
+make test-matrix
+# or
+./scripts/run_test_matrix.sh
+```
+
+Artifacts are written under `reports/test_matrix/<tier>/`:
+
+- `stdout.log` (captured per-tier output)
+- `junit.xml` (per-tier JUnit report)
+- optional `coverage.xml` and `coverage_html/` when coverage is enabled.
+
+Enable per-tier coverage artifacts with:
+
+```bash
+TEST_MATRIX_COVERAGE=1 ./scripts/run_test_matrix.sh
+```
+
+Expected runtime (machine-dependent):
+
+- `smoke`: typically short (fast PR sanity checks)
+- `core`: moderate (PR correctness + governance)
+- `core or slow`: longest run (main/nightly-style comprehensive pass)
+
+CI mapping:
+
+- PR fast gate → `smoke`
+- PR full correctness gate → `core`
+- `main` / nightly comprehensive gate → `core or slow`
+
 
 ## CI test tiers and markers
 
