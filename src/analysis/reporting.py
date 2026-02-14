@@ -160,6 +160,7 @@ def format_backtest_report(
     drawdown_rows: list[dict[str, object]],
     turnover_stats: dict[str, float],
     cost_totals: dict[str, float],
+    run_details: dict[str, object] | None = None,
     robustness_report: dict[str, object] | None = None,
 ) -> str:
     lines: list[str] = []
@@ -233,6 +234,39 @@ def format_backtest_report(
             borrow=cost_totals.get("borrow", 0.0),
         )
     )
+    lines.append("")
+
+    if run_details:
+        lines.append("Run Details:")
+        commit_hash = run_details.get("code_commit_hash", run_details.get("code_version", ""))
+        lines.append(f"  - code_commit_hash: {commit_hash}")
+        lines.append(f"  - config_hash: {run_details.get('config_hash', '')}")
+
+        dataset_details = run_details.get("dataset_fingerprint_details")
+        if isinstance(dataset_details, dict) and dataset_details:
+            lines.append("  - dataset_fingerprint_details:")
+            lines.append(f"      - dataset_fingerprint: {dataset_details.get('dataset_fingerprint', '')}")
+            lines.append(f"      - timeframe: {dataset_details.get('timeframe', '')}")
+            lines.append(f"      - range_start: {dataset_details.get('range_start', '')}")
+            lines.append(f"      - range_end: {dataset_details.get('range_end', '')}")
+            symbols = dataset_details.get("symbols", [])
+            if isinstance(symbols, list):
+                lines.append(f"      - symbols: {', '.join(str(sym) for sym in symbols)}")
+            else:
+                lines.append("      - symbols: ")
+            lines.append(f"      - data_fingerprint: {json.dumps(dataset_details.get('data_fingerprint', {}), sort_keys=True)}")
+
+        random_seeds = run_details.get("random_seeds")
+        if isinstance(random_seeds, dict) and random_seeds:
+            lines.append("  - random_seeds:")
+            for seed_key in ("run_seed", "python_random_seed", "numpy_random_seed"):
+                lines.append(f"      - {seed_key}: {random_seeds.get(seed_key)}")
+            subroutine_seeds = random_seeds.get("subroutine_seeds")
+            if isinstance(subroutine_seeds, dict) and subroutine_seeds:
+                lines.append("      - subroutine_seeds:")
+                for key in sorted(subroutine_seeds):
+                    lines.append(f"          - {key}: {subroutine_seeds[key]}")
+        lines.append("")
 
     if robustness_report:
         ci = robustness_report.get("bootstrap_confidence_intervals", {})
