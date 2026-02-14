@@ -347,3 +347,83 @@ def test_research_lab_funnel_kpi_metrics_expand_beyond_acceptance_rate(tmp_path)
     month_conversion = {row["month"]: row for row in metrics["promotion_conversion_by_month"]}
     assert month_conversion["2024-01"]["promotion_conversion_pct"] == pytest.approx(200 / 3)
     assert month_conversion["2024-02"]["promotion_conversion_pct"] == pytest.approx(0.0)
+
+
+def _build_wizard_lab(tmp_path: Path) -> research_lab_page.ResearchLabPage:
+    lab = research_lab_page.ResearchLabPage.__new__(research_lab_page.ResearchLabPage)
+    lab._research_lab_dir = tmp_path
+    lab._wizard_state_path = tmp_path / "wizard_state.json"
+    lab._wizard_steps = ["idea", "universe", "plan", "run", "review"]
+    lab._wizard_step_index = 0
+    lab._wizard_comments = []
+    lab._wizard_history = []
+    lab._append_output = lambda *_a, **_k: None
+    lab._wizard_render_comments_log = lambda: None
+    lab._wizard_refresh_nav_state = lambda: None
+    lab.wizard_idea_name_var = Var("Idea")
+    lab.wizard_idea_thesis_var = Var("Thesis")
+    lab.wizard_idea_owner_var = Var("alice")
+    lab.wizard_data_universe_var = Var("AAPL")
+    lab.wizard_period_start_var = Var("2024-01-01")
+    lab.wizard_period_end_var = Var("2024-06-01")
+    lab.wizard_sector_include_var = Var("")
+    lab.wizard_sector_exclude_var = Var("")
+    lab.wizard_adv_threshold_var = Var("")
+    lab.wizard_liquidity_threshold_var = Var("")
+    lab.wizard_price_min_var = Var("")
+    lab.wizard_price_max_var = Var("")
+    lab.wizard_market_cap_min_var = Var("")
+    lab.wizard_market_cap_max_var = Var("")
+    lab.wizard_min_option_oi_var = Var("")
+    lab.wizard_min_option_volume_var = Var("")
+    lab.wizard_min_option_dte_var = Var("")
+    lab.wizard_require_weeklies_var = Var(False)
+    lab.wizard_test_plan_var = Var("walk_forward")
+    lab.wizard_acceptance_var = Var("Sharpe > 1")
+    lab.wizard_run_validation_var = Var(True)
+    lab.wizard_run_optimization_var = Var(False)
+    lab.wizard_run_stress_var = Var(False)
+    lab.wizard_review_notes_var = Var("")
+    lab.wizard_promotion_decision_var = Var("pending")
+    lab.wizard_session_label_var = Var("team sync")
+    return lab
+
+
+def test_wizard_state_document_roundtrip_and_upgrade(tmp_path):
+    lab = _build_wizard_lab(tmp_path)
+    lab._wizard_comments = [{"owner": "alice", "note": "n1", "timestamp": "2024-01-01T00:00:00"}]
+    payload = lab._wizard_state_payload()
+    doc = lab._wizard_state_document(payload)
+    parsed, upgraded = lab._wizard_extract_payload(doc)
+    assert parsed is not None
+    assert not upgraded
+    assert parsed["wizard_comments"][0]["owner"] == "alice"
+
+    legacy_payload, legacy_upgraded = lab._wizard_extract_payload(payload)
+    assert legacy_payload is not None
+    assert legacy_upgraded
+
+
+def test_wizard_export_import_session_merges_comments_history(monkeypatch, tmp_path):
+    lab = _build_wizard_lab(tmp_path)
+    infos = []
+    monkeypatch.setattr(research_lab_page.messagebox, "showinfo", lambda title, msg: infos.append((title, msg)))
+
+    lab._wizard_comments = [{"owner": "alice", "note": "start", "timestamp": "2024-01-01T00:00:00"}]
+    lab._wizard_history = [{"event": "created", "timestamp": "2024-01-01T00:00:00"}]
+    lab._wizard_export_session()
+
+    session_files = sorted((tmp_path / "sessions").glob("*.json"))
+    assert session_files
+
+    lab._wizard_comments = [{"owner": "bob", "note": "local", "timestamp": "2024-01-02T00:00:00"}]
+    lab._wizard_history = [{"event": "local", "timestamp": "2024-01-02T00:00:00"}]
+
+    monkeypatch.setattr(research_lab_page.filedialog, "askopenfilename", lambda **_k: str(session_files[0]))
+    lab._wizard_import_session()
+
+    owners = {row["owner"] for row in lab._wizard_comments}
+    events = {row["event"] for row in lab._wizard_history}
+    assert owners == {"alice", "bob"}
+    assert "created" in events and "local" in events
+    assert any(title == "Session exported" for title, _ in infos)
