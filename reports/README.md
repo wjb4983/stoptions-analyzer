@@ -8,7 +8,11 @@ From a clean checkout:
 
 ```bash
 python reports/run_baselines.py
-pytest tests/test_vectorized_no_lookahead.py tests/test_backtest_invariants_and_edge_cases.py -q
+python reports/benchmark_bundle.py
+python reports/quality_gates.py
+python reports/generate_cards.py
+python reports/validate_governance_artifacts.py
+pytest -m core -q
 ```
 
 ## Included artifacts

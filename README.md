@@ -12,6 +12,22 @@ pytest
 ```
 
 
+## CI test tiers and markers
+
+CI is split into explicit tiers with clear pass criteria:
+
+- **Smoke (`smoke`)**: fast checks on every PR.
+- **Core (`core`)**: correctness + governance checks on every PR.
+- **Slow (`slow`)**: longer regression checks on `main` and nightly schedule.
+
+Run locally with markers:
+
+```bash
+pytest -m smoke -ra
+pytest -m core -ra
+pytest -m "core or slow" -ra
+```
+
 ## Backtesting GUI workflow
 
 In the Backtesting page, select one or more **Entry Signals** and **Exit Signals** via checkboxes.
