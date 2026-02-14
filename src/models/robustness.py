@@ -5,6 +5,8 @@ from typing import Any
 
 import numpy as np
 
+from modeling_nextgen.validation.stress_scenarios import build_stress_template_scenarios
+
 from .base import ModelInterface
 
 
@@ -67,12 +69,14 @@ def _perturb_features(
         center = float(np.nanmean(values)) if np.isfinite(np.nanmean(values)) else 0.0
         shifted[name] = (values - center) * (1.0 + distribution_shift_scale) + center + sigma * distribution_shift_scale
 
-    return {
+    perturbations = {
         "noise": noisy,
         "delayed_data": delayed,
         "missing_fields": missing,
         "shifted_distribution": shifted,
     }
+    perturbations.update(build_stress_template_scenarios(features=base, rng=rng))
+    return perturbations
 
 
 def _prediction_degradation(baseline: np.ndarray, perturbed: np.ndarray) -> float:
