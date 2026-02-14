@@ -17,6 +17,7 @@ from backtesting.cache_runner import (
     run_strategy_optimization,
     run_walk_forward_backtest,
 )
+from backtesting.chain_runner import build_default_research_execution_chain
 from config import (
     BACKTEST_OUTPUT_DIR,
     CONFIG_DIR,
@@ -1902,6 +1903,7 @@ class ResearchLabPage(ttk.Frame):
                 }
             ],
             "rubric": dict(record.get("rubric", {})),
+            "execution_chain": build_default_research_execution_chain(),
             "generated_at": generated_at,
             "last_updated": generated_at,
         }
