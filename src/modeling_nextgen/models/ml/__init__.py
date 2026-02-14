@@ -10,6 +10,7 @@ from .panel_baselines import (
     TreeBoostingBaseline,
 )
 from .multitask import CalibrationArtifact, MultiTaskRiskModel, TaskSpec
+from .meta_label_conformal import AcceptancePolicy, MetaLabelConformalModel, PolicyDecision
 
 
 @dataclass
@@ -28,4 +29,7 @@ __all__ = [
     "MultiTaskRiskModel",
     "PanelSplit",
     "PanelWalkForwardSplitter",
+    "AcceptancePolicy",
+    "PolicyDecision",
+    "MetaLabelConformalModel",
 ]

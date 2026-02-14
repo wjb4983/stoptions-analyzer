@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import numpy as np
+
 from .base import BaseParadigmModel
+from modeling_nextgen.models.ml.meta_label_conformal import MetaLabelConformalModel
 
 
 class MomentumModel(BaseParadigmModel):
@@ -83,8 +86,23 @@ class MicrostructureImbalanceModel(BaseParadigmModel):
 class MetaLabelClassifierModel(BaseParadigmModel):
     name = "meta_label_classifier"
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._adapter = MetaLabelConformalModel()
+
     def required_feature_names(self) -> tuple[str, ...]:
         return ("base_signal", "base_confidence", "risk_filter_score")
+
+    def fit(self, features: dict[str, np.ndarray], labels: np.ndarray) -> None:
+        self._adapter.fit(features, labels)
+        self.feature_importances_ = dict(self._adapter.feature_importances_)
+        probs = self.predict_proba(features)
+        self.confidence_scores_ = np.abs(probs - 0.5) * 2.0
+
+    def predict_proba(self, features: dict[str, np.ndarray]) -> np.ndarray:
+        probs = self._adapter.predict_proba(features)
+        policy = self._adapter.apply_policy(features)
+        return np.where(policy.accepted_mask, probs, 0.5)
 
 
 class OptionsDirectionalModel(BaseParadigmModel):
