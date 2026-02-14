@@ -107,9 +107,9 @@ METRIC_TABLE_SCHEMA_VERSIONS: dict[str, str] = {
 PROMOTION_STATES = ("research", "paper", "shadow", "production")
 PROMOTION_REQUIRED_CHECKS: dict[str, list[str]] = {
     "research": ["dataset_lock", "signal_diagnostics"],
-    "paper": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "drift_monitoring", "friction_adjusted_edge", "causal_robustness"],
-    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness", "experiment_id"],
-    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness", "experiment_id", "approval"],
+    "paper": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "drift_monitoring", "friction_adjusted_edge", "causal_robustness", "deflated_sharpe_reality_check", "parameter_stability_penalty", "train_validation_test_drift"],
+    "shadow": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness", "deflated_sharpe_reality_check", "parameter_stability_penalty", "train_validation_test_drift", "experiment_id"],
+    "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness", "deflated_sharpe_reality_check", "parameter_stability_penalty", "train_validation_test_drift", "experiment_id", "approval"],
 }
 
 
@@ -4220,6 +4220,12 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "max_residual_std_ratio_shift": _float("max_residual_std_ratio_shift", 0.25),
         "max_residual_autocorr": _float("max_residual_autocorr", 0.20),
         "max_false_alarm_rate": _float("max_false_alarm_rate", 0.25),
+        "min_deflated_sharpe_ratio": _float("min_deflated_sharpe_ratio", 0.10),
+        "max_reality_check_pvalue": _float("max_reality_check_pvalue", 0.10),
+        "max_parameter_stability_penalty": _float("max_parameter_stability_penalty", 0.40),
+        "max_train_validation_drift": _float("max_train_validation_drift", 0.30),
+        "max_validation_test_drift": _float("max_validation_test_drift", 0.30),
+        "max_train_test_drift": _float("max_train_test_drift", 0.45),
         "retrain_on": source.get("retrain_on", ["high"]),
         "recalibrate_on": source.get("recalibrate_on", ["medium"]),
         "alert_routing": source.get(
@@ -4255,6 +4261,9 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "drift_monitoring": bool(drift_monitoring.get("within_tolerance", False)),
         "friction_adjusted_edge": bool(checks.get("friction_adjusted_edge", False)),
         "causal_robustness": bool(causal_robustness.get("pass", False)),
+        "deflated_sharpe_reality_check": bool(checks.get("deflated_sharpe_reality_check", False)),
+        "parameter_stability_penalty": bool(checks.get("parameter_stability_penalty", False)),
+        "train_validation_test_drift": bool(checks.get("train_validation_test_drift", False)),
         "experiment_id": bool(experiment_id),
     }
 
@@ -4312,6 +4321,8 @@ def _evaluate_governance_gate_checks(
     drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
     drift_within_tolerance = bool(drift_monitoring.get("within_tolerance", False))
     causal_robustness = governance.get("causal_robustness", {}) if isinstance(governance.get("causal_robustness"), dict) else {}
+    diagnostics = _compute_governance_diagnostics(metrics=metrics, fold_rows=fold_rows, thresholds=thresholds)
+    governance["governance_diagnostics"] = diagnostics
     experiment_id = str(governance.get("experiment_id", "")).strip()
 
     checks = {
@@ -4324,9 +4335,108 @@ def _evaluate_governance_gate_checks(
         "drift_monitoring": drift_within_tolerance,
         "friction_adjusted_edge": float(metrics.get("friction_adjusted_edge", float("-inf"))) >= float(thresholds.get("min_friction_adjusted_edge", 0.0)),
         "causal_robustness": bool(causal_robustness.get("pass", False)),
+        "deflated_sharpe_reality_check": bool(diagnostics.get("deflated_sharpe_reality_check", {}).get("pass", False)),
+        "parameter_stability_penalty": bool(diagnostics.get("parameter_stability", {}).get("pass", False)),
+        "train_validation_test_drift": bool(diagnostics.get("train_validation_test_drift", {}).get("pass", False)),
         "experiment_id": bool(experiment_id),
     }
     return checks
+
+
+def _compute_governance_diagnostics(
+    *,
+    metrics: dict[str, float],
+    fold_rows: list[dict[str, Any]] | None,
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    deflated = float(metrics.get("deflated_sharpe_ratio", float("nan")))
+    if not np.isfinite(deflated):
+        deflated = float(metrics.get("probabilistic_sharpe_ratio", float("nan")))
+    white_pvalue = float(metrics.get("white_reality_check_pvalue", metrics.get("corrected_pvalue", 1.0)))
+    spa_pvalue = float(metrics.get("spa_pvalue", white_pvalue))
+    combined_reality_pvalue = max(white_pvalue, spa_pvalue)
+    min_deflated = float(thresholds.get("min_deflated_sharpe_ratio", 0.10))
+    max_reality = float(thresholds.get("max_reality_check_pvalue", 0.10))
+    dsr_check = {
+        "deflated_sharpe_ratio": deflated if np.isfinite(deflated) else None,
+        "white_reality_check_pvalue": white_pvalue,
+        "spa_pvalue": spa_pvalue,
+        "combined_reality_check_pvalue": combined_reality_pvalue,
+        "min_deflated_sharpe_ratio": min_deflated,
+        "max_reality_check_pvalue": max_reality,
+        "pass": bool(np.isfinite(deflated) and deflated >= min_deflated and combined_reality_pvalue <= max_reality),
+    }
+
+    fold_list = fold_rows if isinstance(fold_rows, list) else []
+    selected = [json.dumps(row.get("selected_params", {}), sort_keys=True) for row in fold_list if isinstance(row, dict)]
+    unique_selected = len(set(selected))
+    fold_count = len(fold_list)
+    churn_ratio = float(unique_selected / max(1, fold_count))
+    validation_scores = np.asarray([float(row.get("validation_score", 0.0)) for row in fold_list if isinstance(row, dict)], dtype=float)
+    validation_std = float(np.std(validation_scores, ddof=0)) if validation_scores.size else 0.0
+    validation_mean = float(np.mean(np.abs(validation_scores))) if validation_scores.size else 0.0
+    normalized_variability = validation_std / max(1e-9, 0.25 + validation_mean)
+    stability_penalty = max(0.0, min(1.0, 0.6 * churn_ratio + 0.4 * min(1.0, normalized_variability)))
+    max_penalty = float(thresholds.get("max_parameter_stability_penalty", 0.40))
+    stability_diag = {
+        "fold_count": fold_count,
+        "unique_selected_params": unique_selected,
+        "churn_ratio": churn_ratio,
+        "validation_score_std": validation_std,
+        "normalized_validation_variability": normalized_variability,
+        "parameter_stability_penalty": stability_penalty,
+        "max_parameter_stability_penalty": max_penalty,
+        "pass": bool(fold_count > 0 and stability_penalty <= max_penalty),
+    }
+
+    train_scores: list[float] = []
+    validation_scores_ladder: list[float] = []
+    test_scores: list[float] = []
+    for row in fold_list:
+        if not isinstance(row, dict):
+            continue
+        diagnostics_rows = row.get("diagnostics", [])
+        if not isinstance(diagnostics_rows, list):
+            continue
+        best_diag = max(
+            [item for item in diagnostics_rows if isinstance(item, dict)],
+            key=lambda item: float(item.get("validation_score", float("-inf"))),
+            default=None,
+        )
+        if not isinstance(best_diag, dict):
+            continue
+        train_metric = float(best_diag.get("train_metrics", {}).get("sharpe", 0.0))
+        val_metric = float(best_diag.get("validation_metrics", {}).get("sharpe", 0.0))
+        test_metric = float((row.get("oos_metrics", {}) if isinstance(row.get("oos_metrics"), dict) else {}).get("sharpe", 0.0))
+        train_scores.append(train_metric)
+        validation_scores_ladder.append(val_metric)
+        test_scores.append(test_metric)
+
+    train_arr = np.asarray(train_scores, dtype=float)
+    val_arr = np.asarray(validation_scores_ladder, dtype=float)
+    test_arr = np.asarray(test_scores, dtype=float)
+    tv_drift = float(np.mean(np.abs(train_arr - val_arr))) if train_arr.size and val_arr.size else float("inf")
+    vt_drift = float(np.mean(np.abs(val_arr - test_arr))) if val_arr.size and test_arr.size else float("inf")
+    tt_drift = float(np.mean(np.abs(train_arr - test_arr))) if train_arr.size and test_arr.size else float("inf")
+    max_tv = float(thresholds.get("max_train_validation_drift", 0.30))
+    max_vt = float(thresholds.get("max_validation_test_drift", 0.30))
+    max_tt = float(thresholds.get("max_train_test_drift", 0.45))
+    drift_diag = {
+        "folds_evaluated": int(min(train_arr.size, val_arr.size, test_arr.size)),
+        "train_validation_abs_drift": tv_drift,
+        "validation_test_abs_drift": vt_drift,
+        "train_test_abs_drift": tt_drift,
+        "max_train_validation_drift": max_tv,
+        "max_validation_test_drift": max_vt,
+        "max_train_test_drift": max_tt,
+        "pass": bool(np.isfinite(tv_drift) and np.isfinite(vt_drift) and np.isfinite(tt_drift) and tv_drift <= max_tv and vt_drift <= max_vt and tt_drift <= max_tt),
+    }
+
+    return {
+        "deflated_sharpe_reality_check": dsr_check,
+        "parameter_stability": stability_diag,
+        "train_validation_test_drift": drift_diag,
+    }
 
 
 def _evaluate_causal_robustness(*, causal_validation: dict[str, Any], thresholds: dict[str, float]) -> dict[str, Any]:

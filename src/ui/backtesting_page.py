@@ -1365,7 +1365,13 @@ class BacktestingPage(ttk.Frame):
         repro_meta = manifest.get("reproducibility_metadata", {}) if isinstance(manifest, dict) and isinstance(manifest.get("reproducibility_metadata"), dict) else {}
         feature_hashes = repro_meta.get("feature_hashes", {}) if isinstance(repro_meta.get("feature_hashes"), dict) else {}
         drift_monitoring = governance.get("drift_monitoring", {}) if isinstance(governance.get("drift_monitoring"), dict) else {}
+        governance_diagnostics = governance.get("governance_diagnostics", {}) if isinstance(governance.get("governance_diagnostics"), dict) else {}
+        gate_checks = governance.get("gate_checks", {}) if isinstance(governance.get("gate_checks"), dict) else {}
+        missing_checks = governance.get("missing_required_checks", []) if isinstance(governance.get("missing_required_checks"), list) else []
         drift_alerts = drift_monitoring.get("alert_summaries", []) if isinstance(drift_monitoring.get("alert_summaries"), list) else []
+        dsr_diag = governance_diagnostics.get("deflated_sharpe_reality_check", {}) if isinstance(governance_diagnostics.get("deflated_sharpe_reality_check"), dict) else {}
+        stability_diag = governance_diagnostics.get("parameter_stability", {}) if isinstance(governance_diagnostics.get("parameter_stability"), dict) else {}
+        split_drift_diag = governance_diagnostics.get("train_validation_test_drift", {}) if isinstance(governance_diagnostics.get("train_validation_test_drift"), dict) else {}
         msg = [
             f"Run: {run_dir.name}",
             f"Run ID: {run_id[:24] if run_id else 'n/a'}",
@@ -1377,6 +1383,10 @@ class BacktestingPage(ttk.Frame):
             f"Experiment ID: {str(governance.get('experiment_id', '')).strip() or 'n/a'}",
             f"Drift monitor: {'OK' if drift_monitoring.get('within_tolerance', False) else 'BREACH'}",
             f"Drift alerts: {len(drift_alerts)}",
+            f"Deflated Sharpe / RC: {'OK' if gate_checks.get('deflated_sharpe_reality_check', False) else 'BREACH'} (dsr={float(dsr_diag.get('deflated_sharpe_ratio', 0.0) or 0.0):.3f}, p={float(dsr_diag.get('combined_reality_check_pvalue', 1.0) or 1.0):.3f})",
+            f"Parameter stability penalty: {'OK' if gate_checks.get('parameter_stability_penalty', False) else 'BREACH'} ({float(stability_diag.get('parameter_stability_penalty', 1.0) or 1.0):.3f})",
+            f"Train/validation/test drift: {'OK' if gate_checks.get('train_validation_test_drift', False) else 'BREACH'} (tv={float(split_drift_diag.get('train_validation_abs_drift', 0.0) or 0.0):.3f}, vt={float(split_drift_diag.get('validation_test_abs_drift', 0.0) or 0.0):.3f})",
+            f"Missing required checks: {', '.join(missing_checks) if missing_checks else 'none'}",
             f"Config hash/checksum: {(cfg_hash[:12] if cfg_hash else 'n/a')} / {(cfg_chk[:12] if cfg_chk else 'n/a')}",
             f"Snapshot checksum: {snap_chk[:24] if snap_chk else 'n/a'}",
             f"Manifest checksum: {man_chk[:24] if man_chk else 'n/a'}",
@@ -1637,6 +1647,27 @@ class BacktestingPage(ttk.Frame):
                 for alert in drift_monitoring.get("alert_summaries", []):
                     if isinstance(alert, dict):
                         badges.append({"label": "Drift Alert", "severity": str(alert.get("severity", "high")), "reason": str(alert.get("summary", "Drift tolerance breached."))})
+            gate_checks = governance.get("gate_checks", {}) if isinstance(governance.get("gate_checks"), dict) else {}
+            missing_checks = governance.get("missing_required_checks", []) if isinstance(governance.get("missing_required_checks"), list) else []
+            governance_diagnostics = governance.get("governance_diagnostics", {}) if isinstance(governance.get("governance_diagnostics"), dict) else {}
+            dsr_diag = governance_diagnostics.get("deflated_sharpe_reality_check", {}) if isinstance(governance_diagnostics.get("deflated_sharpe_reality_check"), dict) else {}
+            stability_diag = governance_diagnostics.get("parameter_stability", {}) if isinstance(governance_diagnostics.get("parameter_stability"), dict) else {}
+            split_drift_diag = governance_diagnostics.get("train_validation_test_drift", {}) if isinstance(governance_diagnostics.get("train_validation_test_drift"), dict) else {}
+            if gate_checks:
+                if gate_checks.get("deflated_sharpe_reality_check", False):
+                    badges.append({"label": "DSR/RC OK", "severity": "low", "reason": "Deflated Sharpe and reality-check diagnostics passed."})
+                else:
+                    badges.append({"label": "DSR/RC Breach", "severity": "high", "reason": f"Deflated Sharpe/reality-check failed (DSR={float(dsr_diag.get('deflated_sharpe_ratio', 0.0) or 0.0):.2f}, p={float(dsr_diag.get('combined_reality_check_pvalue', 1.0) or 1.0):.2f})."})
+                if gate_checks.get("parameter_stability_penalty", False):
+                    badges.append({"label": "Stability Penalty OK", "severity": "low", "reason": f"Parameter stability penalty within tolerance ({float(stability_diag.get('parameter_stability_penalty', 0.0) or 0.0):.2f})."})
+                else:
+                    badges.append({"label": "Stability Penalty", "severity": "medium", "reason": f"Parameter stability penalty exceeded threshold ({float(stability_diag.get('parameter_stability_penalty', 1.0) or 1.0):.2f})."})
+                if gate_checks.get("train_validation_test_drift", False):
+                    badges.append({"label": "Split Drift OK", "severity": "low", "reason": "Train/validation/test performance drift is within tolerance."})
+                else:
+                    badges.append({"label": "Split Drift", "severity": "medium", "reason": f"Split drift breached (tv={float(split_drift_diag.get('train_validation_abs_drift', 0.0) or 0.0):.2f}, vt={float(split_drift_diag.get('validation_test_abs_drift', 0.0) or 0.0):.2f})."})
+            if missing_checks:
+                badges.append({"label": "Missing Required Checks", "severity": "high", "reason": ", ".join(str(item) for item in missing_checks)})
         palette = {"high": "#d9534f", "medium": "#f0ad4e", "low": "#5cb85c"}
         for badge in badges:
             artifact = str(badge.get("artifact", ""))
