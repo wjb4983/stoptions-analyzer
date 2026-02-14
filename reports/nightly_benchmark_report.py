@@ -38,6 +38,10 @@ def build_comparison(*, mainline: list[dict[str, Any]], prior: list[dict[str, An
         prior_sharpe = float(prior_row.get("sharpe", 0.0))
         main_return = float(main_row.get("total_return", 0.0))
         prior_return = float(prior_row.get("total_return", 0.0))
+        alpha_keys = sorted([k for k in set(main_row) | set(prior_row) if str(k).startswith("alpha_vs_")])
+        ir_keys = sorted([k for k in set(main_row) | set(prior_row) if str(k).startswith("ir_vs_")])
+        alpha_delta = {key: float(main_row.get(key, 0.0)) - float(prior_row.get(key, 0.0)) for key in alpha_keys}
+        ir_delta = {key: float(main_row.get(key, 0.0)) - float(prior_row.get(key, 0.0)) for key in ir_keys}
 
         rows.append(
             {
@@ -47,6 +51,8 @@ def build_comparison(*, mainline: list[dict[str, Any]], prior: list[dict[str, An
                 "delta": {
                     "sharpe": main_sharpe - prior_sharpe,
                     "total_return": main_return - prior_return,
+                    "alpha": alpha_delta,
+                    "information_ratio": ir_delta,
                 },
             }
         )
@@ -67,12 +73,12 @@ def render_markdown(comparison: dict[str, Any]) -> str:
         f"Scenarios compared: **{comparison['scenarios_compared']}**",
         f"Mainline sharpe >= prior baseline: **{comparison['mainline_beats_or_matches_prior_on_sharpe']}** scenarios",
         "",
-        "| Scenario | Mainline Sharpe | Prior Sharpe | Δ Sharpe | Mainline Return | Prior Return | Δ Return |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Scenario | Mainline Sharpe | Prior Sharpe | Δ Sharpe | Mainline Return | Prior Return | Δ Return | Δ Alpha vs BH | Δ IR vs BH |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in comparison["rows"]:
         lines.append(
-            "| {scenario} | {m_sh:.4f} | {p_sh:.4f} | {d_sh:.4f} | {m_rt:.4f} | {p_rt:.4f} | {d_rt:.4f} |".format(
+            "| {scenario} | {m_sh:.4f} | {p_sh:.4f} | {d_sh:.4f} | {m_rt:.4f} | {p_rt:.4f} | {d_rt:.4f} | {d_alpha_bh:.6f} | {d_ir_bh:.6f} |".format(
                 scenario=row["scenario"],
                 m_sh=row["mainline"]["sharpe"],
                 p_sh=row["prior_baseline"]["sharpe"],
@@ -80,6 +86,8 @@ def render_markdown(comparison: dict[str, Any]) -> str:
                 m_rt=row["mainline"]["total_return"],
                 p_rt=row["prior_baseline"]["total_return"],
                 d_rt=row["delta"]["total_return"],
+                d_alpha_bh=float(row["delta"].get("alpha", {}).get("alpha_vs_buy_hold", 0.0)),
+                d_ir_bh=float(row["delta"].get("information_ratio", {}).get("ir_vs_buy_hold", 0.0)),
             )
         )
     lines.append("")
