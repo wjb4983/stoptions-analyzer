@@ -234,3 +234,25 @@ def test_governance_gate_checks_include_extended_diagnostics() -> None:
     assert "deflated_sharpe_reality_check" in diagnostics
     assert "parameter_stability" in diagnostics
     assert "train_validation_test_drift" in diagnostics
+
+
+def test_governance_metadata_carries_append_only_artifacts() -> None:
+    governance = _build_governance_metadata(
+        {
+            "promotion_state": "research",
+            "dataset_snapshot_lock": "snap:1",
+            "comments": [
+                {"owner": "alice", "note": "Initial review", "timestamp": "2026-01-01T10:00:00"},
+            ],
+            "review_actions": [
+                {"owner": "alice", "action": "review_started", "status": "in_review", "timestamp": "2026-01-01T10:00:10"},
+            ],
+            "decision_log": [
+                {"owner": "alice", "decision": "pending", "reason": "Need more data", "timestamp": "2026-01-01T10:00:20"},
+            ],
+        }
+    )
+
+    assert governance["comments"][0]["owner"] == "alice"
+    assert governance["review_actions"][0]["action"] == "review_started"
+    assert governance["decision_log"][0]["decision"] == "pending"

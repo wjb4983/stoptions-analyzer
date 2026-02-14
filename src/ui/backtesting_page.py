@@ -4,7 +4,7 @@ import threading
 import csv
 import json
 import webbrowser
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -592,6 +592,18 @@ class BacktestingPage(ttk.Frame):
         ttk.Combobox(governance_frame, textvariable=self.gov_approval_status_var, state="readonly", values=GOVERNANCE_APPROVAL_STATES).grid(row=g_row, column=1, sticky="ew", padx=8, pady=4)
 
         g_row += 1
+        note_row = ttk.Frame(governance_frame)
+        note_row.grid(row=g_row, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
+        note_row.columnconfigure(3, weight=1)
+        ttk.Label(note_row, text="Gov note owner").grid(row=0, column=0, sticky="w")
+        self.gov_note_owner_var = tk.StringVar(value="")
+        ttk.Entry(note_row, textvariable=self.gov_note_owner_var, width=16).grid(row=0, column=1, sticky="w", padx=(6, 10))
+        ttk.Label(note_row, text="Gov note").grid(row=0, column=2, sticky="w")
+        self.gov_note_text_var = tk.StringVar(value="")
+        ttk.Entry(note_row, textvariable=self.gov_note_text_var).grid(row=0, column=3, sticky="ew", padx=(6, 10))
+        ttk.Button(note_row, text="Append Governance Note", command=self._append_governance_note).grid(row=0, column=4, sticky="e")
+
+        g_row += 1
         gate_row = ttk.Frame(governance_frame)
         gate_row.grid(row=g_row, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
         for idx, (label, default) in enumerate([
@@ -648,11 +660,18 @@ class BacktestingPage(ttk.Frame):
         ttk.Label(observed_row, text=" / ").pack(side="left")
         ttk.Entry(observed_row, textvariable=self.gov_observed_pnl_attribution_var, width=8).pack(side="left")
 
+        self._governance_comments: list[dict[str, str]] = []
+        self._governance_review_actions: list[dict[str, str]] = []
+        self._governance_decision_log: list[dict[str, str]] = []
+
         notes_frame = ttk.LabelFrame(run_setup_tab, text="Run Notes")
         notes_frame.grid(row=5, column=0, sticky="nsew", padx=10, pady=10)
         notes_frame.columnconfigure(0, weight=1)
-        self.notes_text = tk.Text(notes_frame, height=14)
+        self.notes_text = tk.Text(notes_frame, height=10)
         self.notes_text.grid(row=0, column=0, sticky="nsew", padx=8, pady=6)
+        self.governance_log_text = tk.Text(notes_frame, height=6)
+        self.governance_log_text.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 6))
+        self.governance_log_text.configure(state="disabled")
 
         button_row = ttk.Frame(run_setup_tab)
         button_row.grid(row=6, column=0, sticky="ew", padx=10, pady=(4, 10))
@@ -678,6 +697,32 @@ class BacktestingPage(ttk.Frame):
         self._on_mode_changed()
         self._refresh_template_choices()
         self._update_validation_hint()
+
+    def _append_governance_note(self) -> None:
+        note = self.gov_note_text_var.get().strip()
+        if not note:
+            return
+        owner = self.gov_note_owner_var.get().strip() or self.gov_owner_var.get().strip() or "research_lab_ui"
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        comment = {"owner": owner, "note": note, "timestamp": timestamp}
+        self._governance_comments.append(comment)
+        self._governance_review_actions.append(
+            {"owner": owner, "action": "note_appended", "status": "recorded", "timestamp": timestamp}
+        )
+        self.gov_note_text_var.set("")
+        self._render_governance_log()
+
+    def _render_governance_log(self) -> None:
+        if not hasattr(self, "governance_log_text"):
+            return
+        self.governance_log_text.configure(state="normal")
+        self.governance_log_text.delete("1.0", tk.END)
+        for row in self._governance_comments:
+            self.governance_log_text.insert(
+                tk.END,
+                f"[{row.get('timestamp', '')}] {row.get('owner', 'research_lab_ui')}: {row.get('note', '')}\n",
+            )
+        self.governance_log_text.configure(state="disabled")
 
     def _on_page_canvas_configure(self, event: tk.Event) -> None:
         self.page_canvas.itemconfigure(self._page_canvas_window, width=event.width)
@@ -2298,6 +2343,16 @@ class BacktestingPage(ttk.Frame):
         self.gov_observed_signal_agreement_var.set(str(settings.get("governance_observed_signal_agreement", "1.0")))
         self.gov_observed_fill_slippage_bps_var.set(str(settings.get("governance_observed_fill_slippage_bps", "0.0")))
         self.gov_observed_pnl_attribution_var.set(str(settings.get("governance_observed_pnl_attribution", "1.0")))
+        self._governance_comments = [
+            dict(item) for item in settings.get("governance_comments", []) if isinstance(item, dict)
+        ]
+        self._governance_review_actions = [
+            dict(item) for item in settings.get("governance_review_actions", []) if isinstance(item, dict)
+        ]
+        self._governance_decision_log = [
+            dict(item) for item in settings.get("governance_decision_log", []) if isinstance(item, dict)
+        ]
+        self._render_governance_log()
         self.logs_text.delete("1.0", tk.END)
         self.logs_text.insert("1.0", str(settings.get("notes", "")))
         self._refresh_template_choices()
@@ -2425,6 +2480,9 @@ class BacktestingPage(ttk.Frame):
             "governance_observed_signal_agreement": self.gov_observed_signal_agreement_var.get().strip() or "1.0",
             "governance_observed_fill_slippage_bps": self.gov_observed_fill_slippage_bps_var.get().strip() or "0.0",
             "governance_observed_pnl_attribution": self.gov_observed_pnl_attribution_var.get().strip() or "1.0",
+            "governance_comments": list(self._governance_comments),
+            "governance_review_actions": list(self._governance_review_actions),
+            "governance_decision_log": list(self._governance_decision_log),
             "ui_mode": self.ui_mode_var.get().strip() or "basic",
             "selected_preset": self._preset_display_to_key.get(self.preset_var.get().strip(), "custom"),
             "selected_template": self.template_var.get().strip(),
@@ -2548,7 +2606,30 @@ class BacktestingPage(ttk.Frame):
                 "fill_slippage_bps": float(parse_float(self.gov_observed_fill_slippage_bps_var.get()) or 0.0),
                 "pnl_attribution": float(parse_float(self.gov_observed_pnl_attribution_var.get()) or 1.0),
             },
+            "comments": list(self._governance_comments),
+            "review_actions": list(self._governance_review_actions),
+            "decision_log": list(self._governance_decision_log),
         }
+
+        decision_owner = self.gov_owner_var.get().strip() or "research_lab_ui"
+        decision_timestamp = datetime.now().isoformat(timespec="seconds")
+        self._governance_decision_log.append(
+            {
+                "owner": decision_owner,
+                "decision": self.gov_approval_status_var.get().strip() or "pending",
+                "reason": self.gov_acceptance_text.get("1.0", tk.END).strip(),
+                "promotion_state": self.gov_promotion_state_var.get().strip() or "research",
+                "timestamp": decision_timestamp,
+            }
+        )
+        self._governance_review_actions.append(
+            {
+                "owner": decision_owner,
+                "action": "run_requested",
+                "status": self.gov_approval_status_var.get().strip() or "pending",
+                "timestamp": decision_timestamp,
+            }
+        )
 
         worker_args: tuple[object, ...]
         status_line: str

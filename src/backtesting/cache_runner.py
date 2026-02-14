@@ -4604,6 +4604,40 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
 
     missing_required = [name for name in required_checks if not gate_checks.get(name, False)]
 
+    comments = source.get("comments") if isinstance(source.get("comments"), list) else []
+    review_actions = source.get("review_actions") if isinstance(source.get("review_actions"), list) else []
+    decision_log = source.get("decision_log") if isinstance(source.get("decision_log"), list) else []
+
+    normalized_comments = [
+        {
+            "owner": str(row.get("owner", "research_lab_ui")),
+            "note": str(row.get("note", "")),
+            "timestamp": str(row.get("timestamp", datetime.now().isoformat())),
+        }
+        for row in comments
+        if isinstance(row, dict) and str(row.get("note", "")).strip()
+    ]
+    normalized_review_actions = [
+        {
+            "owner": str(row.get("owner", "research_lab_ui")),
+            "action": str(row.get("action", "")),
+            "status": str(row.get("status", "recorded")),
+            "timestamp": str(row.get("timestamp", datetime.now().isoformat())),
+        }
+        for row in review_actions
+        if isinstance(row, dict) and str(row.get("action", "")).strip()
+    ]
+    normalized_decision_log = [
+        {
+            "owner": str(row.get("owner", "research_lab_ui")),
+            "decision": str(row.get("decision", "pending")),
+            "reason": str(row.get("reason", "")),
+            "timestamp": str(row.get("timestamp", datetime.now().isoformat())),
+        }
+        for row in decision_log
+        if isinstance(row, dict)
+    ]
+
     governance = {
         "hypothesis_id": str(source.get("hypothesis_id", "")).strip(),
         "experiment_id": experiment_id,
@@ -4619,6 +4653,9 @@ def _build_governance_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "causal_robustness": causal_robustness,
         "missing_required_checks": missing_required,
         "is_promotion_ready": not missing_required,
+        "comments": normalized_comments,
+        "review_actions": normalized_review_actions,
+        "decision_log": normalized_decision_log,
         "audit_trail": [
             {
                 "timestamp": datetime.now().isoformat(),

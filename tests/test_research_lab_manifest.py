@@ -75,6 +75,9 @@ def test_write_experiment_skeleton_writes_research_project_manifest(tmp_path):
     assert payload["gate_outcomes"][0]["gate"] == "rubric_score"
     assert payload["reviewer_comments"][0]["reviewer"] == "research_lab_ui"
     assert payload["promotion_history"][0]["state"] == "promoted_to_experiment"
+    assert isinstance(payload["comments"], list)
+    assert payload["review_actions"][0]["action"] == "review_completed"
+    assert payload["decision_log"][0]["decision"] == "accept"
     assert payload["context"]["universe_filters"]["sector"]["include"] == ["Technology"]
 
 
@@ -93,6 +96,8 @@ def test_write_experiment_skeleton_appends_manifest_sections_without_duplication
     assert len(payload["gate_outcomes"]) == 1
     assert len(payload["reviewer_comments"]) == 1
     assert len(payload["promotion_history"]) == 1
+    assert len(payload["review_actions"]) == 1
+    assert len(payload["decision_log"]) == 1
 
 
 def test_build_signal_grids_serializes_universe_filters_into_core_grid():
