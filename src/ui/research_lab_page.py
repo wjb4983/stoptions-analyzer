@@ -5,6 +5,7 @@ import shutil
 import json
 import re
 import uuid
+import statistics
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -183,6 +184,8 @@ class ResearchLabPage(ttk.Frame):
         self._build_workflow_controls()
         self._build_wizard_mode()
         self._build_governance_mini_dashboard()
+        self._build_funnel_kpi_dashboard()
+        self._refresh_funnel_kpi_dashboard()
 
         button_row = ttk.Frame(self)
         button_row.pack(pady=(16, 8))
@@ -238,6 +241,39 @@ class ResearchLabPage(ttk.Frame):
 
         ttk.Label(frame, text="Approval status").grid(row=3, column=0, sticky="w", padx=8, pady=(4, 8))
         ttk.Label(frame, textvariable=self._governance_approval_status_var).grid(row=3, column=1, sticky="w", padx=8, pady=(4, 8))
+
+    def _build_funnel_kpi_dashboard(self) -> None:
+        frame = ttk.LabelFrame(self, text="Idea Funnel KPI Dashboard")
+        frame.pack(fill="x", padx=40, pady=(0, 8))
+        frame.columnconfigure(1, weight=1)
+
+        self._funnel_acceptance_var = tk.StringVar(value="Acceptance rate: n/a")
+        self._funnel_median_time_var = tk.StringVar(value="Median time-to-decision: n/a")
+        self._funnel_false_positive_var = tk.StringVar(value="False-positive proxy: n/a")
+        self._funnel_strategy_rates_var = tk.StringVar(value="No strategy-family funnel data yet.")
+        self._funnel_monthly_conversion_var = tk.StringVar(value="No monthly promotion conversion data yet.")
+
+        ttk.Label(frame, textvariable=self._funnel_acceptance_var).grid(row=0, column=0, sticky="w", padx=8, pady=(6, 4))
+        ttk.Label(frame, textvariable=self._funnel_median_time_var).grid(row=0, column=1, sticky="w", padx=8, pady=(6, 4))
+        ttk.Label(frame, textvariable=self._funnel_false_positive_var).grid(row=1, column=0, sticky="w", padx=8, pady=(0, 6))
+
+        ttk.Label(frame, text="Pass rates by strategy family").grid(row=2, column=0, sticky="nw", padx=8, pady=(0, 4))
+        ttk.Label(frame, textvariable=self._funnel_strategy_rates_var, justify="left").grid(
+            row=2,
+            column=1,
+            sticky="w",
+            padx=8,
+            pady=(0, 4),
+        )
+
+        ttk.Label(frame, text="Promotion conversion by month").grid(row=3, column=0, sticky="nw", padx=8, pady=(0, 8))
+        ttk.Label(frame, textvariable=self._funnel_monthly_conversion_var, justify="left").grid(
+            row=3,
+            column=1,
+            sticky="w",
+            padx=8,
+            pady=(0, 8),
+        )
 
     def _build_tile(
         self,
@@ -730,6 +766,37 @@ class ResearchLabPage(ttk.Frame):
         )
         self._governance_promotion_ready_var.set("Ready" if readiness else "Not ready")
         self._governance_approval_status_var.set(f"{approval_status} ({promotion_state})")
+
+    def _refresh_funnel_kpi_dashboard(self) -> None:
+        funnel = self._compute_funnel_metrics()
+        self._funnel_acceptance_var.set(
+            f"Acceptance rate: {funnel['acceptance_rate_pct']:.1f}% ({int(funnel['accepted_ideas'])}/{int(funnel['total_ideas'])})"
+        )
+        self._funnel_median_time_var.set(
+            f"Median time-to-decision: {funnel['median_time_to_decision_days']:.1f} days"
+        )
+        self._funnel_false_positive_var.set(
+            "False-positive proxy: "
+            f"{funnel['false_positive_rate_pct']:.1f}% (accepted then later rejected)"
+        )
+
+        strategy_lines = []
+        for row in funnel.get("pass_rates_by_strategy_family", []):
+            strategy_lines.append(
+                f"{row['strategy_family']}: {row['acceptance_rate_pct']:.1f}% "
+                f"({row['accepted']}/{row['total']})"
+            )
+        self._funnel_strategy_rates_var.set("\n".join(strategy_lines) if strategy_lines else "No strategy-family funnel data yet.")
+
+        month_lines = []
+        for row in funnel.get("promotion_conversion_by_month", []):
+            month_lines.append(
+                f"{row['month']}: {row['promotion_conversion_pct']:.1f}% "
+                f"({row['promoted']}/{row['total']})"
+            )
+        self._funnel_monthly_conversion_var.set(
+            "\n".join(month_lines) if month_lines else "No monthly promotion conversion data yet."
+        )
 
     def _load_governance_payload_from_output(self, output_text: str) -> dict[str, Any]:
         manifest_path = self._extract_manifest_path_from_output(output_text)
@@ -1818,8 +1885,9 @@ class ResearchLabPage(ttk.Frame):
         scored = self._score_hypothesis(idea_record, context)
         promoted = scored["decision"] == "accept"
         experiment_path = self._write_experiment_skeleton(scored, context) if promoted else None
-        self._append_funnel_event(scored)
+        self._append_funnel_event(scored, context)
         funnel = self._compute_funnel_metrics()
+        self._refresh_funnel_kpi_dashboard()
 
         lines = [
             f"Idea intake: {scored['idea']['title']}",
@@ -2097,13 +2165,27 @@ class ResearchLabPage(ttk.Frame):
         output_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         return output_path
 
-    def _append_funnel_event(self, record: dict[str, Any]) -> None:
+    def _append_funnel_event(self, record: dict[str, Any], context: dict[str, Any] | None = None) -> None:
         event_path = self._research_lab_dir / "idea_funnel_events.jsonl"
+        submitted_at = str(record.get("idea", {}).get("submitted_at", date.today().isoformat()))
+        decision_at = date.today().isoformat()
+        strategy_family = "unspecified"
+        if context is not None:
+            context_strategy = str(context.get("strategy_family", "")).strip()
+            if context_strategy:
+                strategy_family = context_strategy
+        if strategy_family == "unspecified":
+            strategy_family = str(record.get("test_design", {}).get("primary_test", "unspecified")).strip() or "unspecified"
+
         event = {
             "hypothesis_id": record["hypothesis_id"],
             "lineage": dict(record.get("lineage", {})),
             "date": date.today().isoformat(),
+            "submitted_at": submitted_at,
+            "decision_at": decision_at,
+            "strategy_family": strategy_family,
             "decision": record["decision"],
+            "promotion_state": str(record.get("promotion_or_rejection", {}).get("state", "pending")),
             "rubric_total": float(record["rubric"]["total_score"]),
             "stages": {
                 "idea_intake": True,
@@ -2117,13 +2199,26 @@ class ResearchLabPage(ttk.Frame):
         with event_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, sort_keys=True) + "\n")
 
-    def _compute_funnel_metrics(self) -> dict[str, float]:
+    def _compute_funnel_metrics(self) -> dict[str, Any]:
         event_path = self._research_lab_dir / "idea_funnel_events.jsonl"
         if not event_path.exists():
-            return {"total_ideas": 0.0, "accepted_ideas": 0.0, "acceptance_rate_pct": 0.0}
+            return {
+                "total_ideas": 0.0,
+                "accepted_ideas": 0.0,
+                "acceptance_rate_pct": 0.0,
+                "median_time_to_decision_days": 0.0,
+                "false_positive_rate_pct": 0.0,
+                "pass_rates_by_strategy_family": [],
+                "promotion_conversion_by_month": [],
+            }
 
         total = 0
         accepted = 0
+        decision_latencies: list[float] = []
+        strategy_counts: dict[str, dict[str, int]] = {}
+        month_counts: dict[str, dict[str, int]] = {}
+        decisions_by_hypothesis: dict[str, list[tuple[date, str]]] = {}
+
         for line in event_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
@@ -2133,12 +2228,91 @@ class ResearchLabPage(ttk.Frame):
             except json.JSONDecodeError:
                 continue
             total += 1
-            if str(parsed.get("decision", "")).lower() == "accept":
+            decision = str(parsed.get("decision", "")).lower()
+            if decision == "accept":
                 accepted += 1
 
+            submitted_at = self._parse_iso_date(parsed.get("submitted_at") or parsed.get("date"))
+            decision_at = self._parse_iso_date(parsed.get("decision_at") or parsed.get("date"))
+            if submitted_at is not None and decision_at is not None:
+                decision_latencies.append(float((decision_at - submitted_at).days))
+
+            strategy_family = str(parsed.get("strategy_family", "unspecified")).strip() or "unspecified"
+            strategy_bucket = strategy_counts.setdefault(strategy_family, {"total": 0, "accepted": 0})
+            strategy_bucket["total"] += 1
+            if decision == "accept":
+                strategy_bucket["accepted"] += 1
+
+            decision_month = decision_at.strftime("%Y-%m") if decision_at is not None else "unknown"
+            month_bucket = month_counts.setdefault(decision_month, {"total": 0, "promoted": 0})
+            month_bucket["total"] += 1
+            promotion_state = str(parsed.get("promotion_state", "")).lower().strip()
+            if promotion_state.startswith("promoted"):
+                month_bucket["promoted"] += 1
+
+            hypothesis_id = str(parsed.get("hypothesis_id", "")).strip()
+            if hypothesis_id:
+                decision_points = decisions_by_hypothesis.setdefault(hypothesis_id, [])
+                decision_date = decision_at or submitted_at
+                if decision_date is not None:
+                    decision_points.append((decision_date, decision))
+
         acceptance_rate = (accepted / total * 100.0) if total else 0.0
+        median_latency = statistics.median(decision_latencies) if decision_latencies else 0.0
+
+        accepted_hypotheses = 0
+        accepted_then_rejected = 0
+        for timeline in decisions_by_hypothesis.values():
+            ordered = [decision for _dt, decision in sorted(timeline, key=lambda row: row[0])]
+            if "accept" not in ordered:
+                continue
+            accepted_hypotheses += 1
+            first_accept_index = ordered.index("accept")
+            if any(decision == "reject" for decision in ordered[first_accept_index + 1 :]):
+                accepted_then_rejected += 1
+        false_positive_rate = (accepted_then_rejected / accepted_hypotheses * 100.0) if accepted_hypotheses else 0.0
+
+        strategy_rates = []
+        for family in sorted(strategy_counts):
+            row = strategy_counts[family]
+            family_total = row["total"]
+            family_accepted = row["accepted"]
+            strategy_rates.append(
+                {
+                    "strategy_family": family,
+                    "total": family_total,
+                    "accepted": family_accepted,
+                    "acceptance_rate_pct": (family_accepted / family_total * 100.0) if family_total else 0.0,
+                }
+            )
+
+        monthly_conversion = []
+        for month in sorted(month_counts):
+            row = month_counts[month]
+            monthly_conversion.append(
+                {
+                    "month": month,
+                    "total": row["total"],
+                    "promoted": row["promoted"],
+                    "promotion_conversion_pct": (row["promoted"] / row["total"] * 100.0) if row["total"] else 0.0,
+                }
+            )
+
         return {
             "total_ideas": float(total),
             "accepted_ideas": float(accepted),
             "acceptance_rate_pct": acceptance_rate,
+            "median_time_to_decision_days": float(median_latency),
+            "false_positive_rate_pct": false_positive_rate,
+            "pass_rates_by_strategy_family": strategy_rates,
+            "promotion_conversion_by_month": monthly_conversion,
         }
+
+    def _parse_iso_date(self, value: Any) -> date | None:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return date.fromisoformat(text)
+        except ValueError:
+            return None
