@@ -143,6 +143,16 @@ def test_run_multi_signal_backtest_ranks_and_persists(monkeypatch, tmp_path) -> 
         return f"report\n\nSaved outputs to: {run_dir}"
 
     monkeypatch.setattr(cache_runner, "run_time_series_momentum_backtest", fake_single)
+    monkeypatch.setattr(
+        cache_runner,
+        "_stress_gate_summary",
+        lambda *_args, **_kwargs: {
+            "stress_passed": True,
+            "stress_total_scenarios": 0,
+            "stress_failed_scenarios": 0,
+            "stress_pass_rate": 1.0,
+        },
+    )
 
     output = cache_runner.run_multi_signal_backtest(
         tickers=["AAA"],
@@ -212,6 +222,53 @@ def test_run_multi_signal_backtest_applies_conservative_runtime_params(monkeypat
     ts_call = next(call for call in captured if call["entry_signal"] == "ts_momentum")
     assert ts_call["entry_signal_params"]["long_only"] is True
     assert float(ts_call["entry_signal_params"]["min_abs_return"]) == 0.01
+
+
+def test_run_multi_signal_backtest_forwards_scenario_packs(monkeypatch, tmp_path) -> None:
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+    captured: list[dict[str, object]] = []
+
+    def fake_single(**kwargs):
+        captured.append(kwargs)
+        run_dir = tmp_path / f"run_{len(captured)}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        metrics = [
+            {"metric": "total_return", "value": 0.01},
+            {"metric": "sharpe", "value": 1.0},
+            {"metric": "cagr", "value": 0.05},
+            {"metric": "max_drawdown", "value": -0.1},
+            {"metric": "calmar", "value": 0.5},
+            {"metric": "volatility", "value": 0.2},
+            {"metric": "sortino", "value": 0.9},
+            {"metric": "hit_rate", "value": 0.52},
+            {"metric": "profit_factor", "value": 1.2},
+            {"metric": "turnover_adjusted_return", "value": 0.02},
+            {"metric": "rolling_sharpe_mean", "value": 0.7},
+            {"metric": "rolling_drawdown_worst", "value": -0.08},
+            {"metric": "turnover_total", "value": 1.0},
+            {"metric": "cost_total", "value": 0.01},
+        ]
+        (run_dir / "metrics.json").write_text(__import__("json").dumps(metrics))
+        return f"report\n\nSaved outputs to: {run_dir}"
+
+    monkeypatch.setattr(cache_runner, "run_time_series_momentum_backtest", fake_single)
+
+    output = cache_runner.run_multi_signal_backtest(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        lookback_days=20,
+        skip_days=5,
+        costs_bps=5.0,
+        entry_signals=["ts_momentum"],
+        exit_signals=["none"],
+        scenario_packs=["volatility_shock", "gap_risk_burst"],
+    )
+
+    assert captured
+    assert captured[0]["scenario_packs"] == ["volatility_shock", "gap_risk_burst"]
+    assert "Scenario packs: volatility_shock, gap_risk_burst" in output
 
 
 def test_apply_discrete_bet_sizing_rounds_down_shares() -> None:

@@ -92,6 +92,7 @@ from backtesting.optimization import (
 from backtesting.experiment_registry import append_experiment_entry
 from backtesting.monitoring import evaluate_drift_monitoring
 from backtesting.attribution import write_attribution_artifacts
+from backtesting.scenario_toolkit import list_scenario_pack_templates, resolve_scenario_pack_templates
 
 
 LOGGER = logging.getLogger(__name__)
@@ -252,6 +253,7 @@ def run_time_series_momentum_backtest(
     regime_cost_multipliers: dict[str, float] | None = None,
     governance_metadata: dict[str, Any] | None = None,
     stress_controls: dict[str, Any] | None = None,
+    scenario_packs: list[str] | None = None,
     capacity_aum_scales: list[float] | None = None,
     max_participation_rate: float | None = None,
     random_seed: int = 42,
@@ -657,6 +659,7 @@ def run_time_series_momentum_backtest(
         "cache_root": str(cache_root),
         "governance": governance_payload,
         "stress_controls": dict(stress_controls or {}),
+        "scenario_packs": [str(pack) for pack in (scenario_packs or [])],
     }
 
     fill_rows = list(result.fills)
@@ -674,6 +677,7 @@ def run_time_series_momentum_backtest(
         timestamps=timestamps,
         returns=returns,
         controls=stress_controls,
+        scenario_packs=scenario_packs,
     )
     scenario_results = _run_stress_scenario_wrappers(
         returns=returns,
@@ -2342,7 +2346,7 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
     scaled_cost_total = scaled_slippage + non_slippage * aum_scale
     vol = max(float(metrics.get("volatility", 0.0)), 1e-12)
     post_cost_sharpe = float(metrics.get("sharpe", 0.0)) - ((scaled_cost_total - float(cost_totals.get("total", 0.0))) / vol)
-    scenario_defs = _build_stress_scenario_definitions(timestamps=np.arange(result.returns.size, dtype=np.int64), returns=_to_numpy_1d(result.returns), controls=dict(payload.get("stress_controls", {})))
+    scenario_defs = _build_stress_scenario_definitions(timestamps=np.arange(result.returns.size, dtype=np.int64), returns=_to_numpy_1d(result.returns), controls=dict(payload.get("stress_controls", {})), scenario_packs=list(payload.get("scenario_packs", [])))
     scenario_rows = _run_stress_scenario_wrappers(returns=_to_numpy_1d(result.returns), prices=prices, scenario_definitions=scenario_defs)
     scenario_payload = build_scenario_attribution_and_guardrails(baseline_metrics={k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))}, scenario_results=scenario_rows)
     stress_gate = _stress_gate_summary(scenario_payload, controls=dict(payload.get("stress_controls", {})))
@@ -2642,6 +2646,7 @@ def run_multi_signal_backtest(
     portfolio_sector_map: dict[str, str] | None = None,
     governance_metadata: dict[str, Any] | None = None,
     stress_controls: dict[str, Any] | None = None,
+    scenario_packs: list[str] | None = None,
 ) -> str:
     """Run all selected entry/exit combinations with shared core parameters."""
 
@@ -2652,6 +2657,9 @@ def run_multi_signal_backtest(
 
     rows: list[dict[str, Any]] = []
     combo_reports: list[str] = []
+
+    selected_scenario_packs = [str(pack) for pack in (scenario_packs or [])]
+    resolved_pack_templates = resolve_scenario_pack_templates(selected_scenario_packs)
 
     for entry_signal in entry_signals:
         for exit_signal in exit_signals:
@@ -2693,6 +2701,7 @@ def run_multi_signal_backtest(
                 portfolio_sector_map=portfolio_sector_map,
                 governance_metadata=governance_metadata,
                 stress_controls=stress_controls,
+                scenario_packs=selected_scenario_packs,
             )
             run_dir = _extract_saved_output_dir(report)
             metrics = _load_metrics_from_run_dir(run_dir)
@@ -2734,6 +2743,12 @@ def run_multi_signal_backtest(
         "",
         f"Starting capital: {starting_capital:.2f}",
         f"Bet sizing mode: {bet_sizing_mode}",
+        (
+            "Scenario packs: "
+            + (", ".join(selected_scenario_packs) if selected_scenario_packs else "none")
+            + f" (available: {', '.join(list_scenario_pack_templates())})"
+        ),
+        f"Scenario pack templates expanded: {len(resolved_pack_templates)}",
         "Ranked combinations (by sharpe):",
     ]
     for idx, row in enumerate(ranked_rows, start=1):
@@ -2808,6 +2823,11 @@ def _persist_multi_signal_outputs(rows: list[dict[str, Any]]) -> Path:
         "stress_total_scenarios",
         "stress_failed_scenarios",
         "stress_pass_rate",
+        "stress_failed_scenario_names",
+        "stress_fragility_index",
+        "stress_survivability_score",
+        "stress_survivability_min",
+        "stress_model_gate_passed",
         "run_dir",
     ]
     with (run_dir / "leaderboard.csv").open("w", newline="") as handle:
@@ -3250,6 +3270,7 @@ def _build_stress_scenario_definitions(
     timestamps: np.ndarray,
     returns: np.ndarray,
     controls: dict[str, Any] | None = None,
+    scenario_packs: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     n_obs = int(np.asarray(returns).size)
@@ -3318,6 +3339,7 @@ def _build_stress_scenario_definitions(
             },
         ]
     )
+    rows.extend(resolve_scenario_pack_templates(scenario_packs))
     rows.extend(
         _build_synthetic_regime_switch_paths(
             returns=np.asarray(returns, dtype=float).reshape(-1),
