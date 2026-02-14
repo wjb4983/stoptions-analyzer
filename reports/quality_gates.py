@@ -2,10 +2,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import importlib.util
+import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+QUALITY_GATES_MODULE_PATH = ROOT_DIR / "src" / "modeling_nextgen" / "validation" / "quality_gates.py"
+_spec = importlib.util.spec_from_file_location("modeling_nextgen_quality_gates", QUALITY_GATES_MODULE_PATH)
+if _spec is None or _spec.loader is None:
+    raise ImportError(f"Unable to load quality gate module from {QUALITY_GATES_MODULE_PATH}")
+_quality_gates_module = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = _quality_gates_module
+_spec.loader.exec_module(_quality_gates_module)
+evaluate_modeling_quality_gates = _quality_gates_module.evaluate_modeling_quality_gates
+promotion_blocked = _quality_gates_module.promotion_blocked
 
 
 REPORTS_DIR = Path(__file__).resolve().parent
@@ -71,27 +84,10 @@ def evaluate_quality_gates(
         },
     )
 
-    fit_error = calibration_report.get("fit_error", {}) if isinstance(calibration_report.get("fit_error"), dict) else {}
-    stability = calibration_report.get("stability", {}) if isinstance(calibration_report.get("stability"), dict) else {}
-    mae_max = float(fit_error.get("mae_bps_max", np.inf))
-    coeff_std = float(stability.get("impact_coefficient_std_bps", np.inf))
-    calibration = _bool_gate(
-        "calibration",
-        bool(mae_max <= 15.0 and coeff_std <= 20.0),
-        {
-            "mae_bps_max": mae_max,
-            "impact_coefficient_std_bps": coeff_std,
-            "thresholds": {"mae_bps_max": 15.0, "impact_coefficient_std_bps": 20.0},
-        },
-    )
-
-    friction_adjusted = _bool_gate(
-        "friction_adjusted_performance",
-        bool(np.all(np.isfinite(sharpe_values)) and np.nanmean(turnover_values) >= 0.0),
-        {
-            "mean_sharpe": float(np.nanmean(sharpe_values)),
-            "mean_turnover": float(np.nanmean(turnover_values)),
-        },
+    nextgen_gates = evaluate_modeling_quality_gates(
+        scorecard=scorecard,
+        calibration_report=calibration_report,
+        baseline_rows=baseline,
     )
 
     no_arb_model_gate = no_arb_report.get("model_gate", {}) if isinstance(no_arb_report, dict) else {}
@@ -104,8 +100,8 @@ def evaluate_quality_gates(
         },
     )
 
-    gates = [data_quality, leakage_tests, validation_integrity, calibration, friction_adjusted, no_arb_gate]
-    all_pass = all(bool(gate["pass"]) for gate in gates)
+    gates = [data_quality, leakage_tests, validation_integrity, *nextgen_gates, no_arb_gate]
+    all_pass = not promotion_blocked(gates)
 
     return {
         "all_gates_pass": all_pass,

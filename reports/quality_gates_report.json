@@ -26,8 +26,8 @@
         "failed_critical_dimensions": []
       }
     },
-    "calibration": {
-      "name": "calibration",
+    "calibration_thresholds": {
+      "name": "calibration_thresholds",
       "pass": true,
       "details": {
         "mae_bps_max": 0.18823529411764728,
@@ -38,12 +38,55 @@
         }
       }
     },
-    "friction_adjusted_performance": {
-      "name": "friction_adjusted_performance",
+    "downside_tail_risk_constraints": {
+      "name": "downside_tail_risk_constraints",
       "pass": true,
       "details": {
-        "mean_sharpe": -2.3500517987012692,
-        "mean_turnover": 62.555555555555564
+        "max_drawdown_worst": -0.09866998076498312,
+        "downside_deviation_max": 0.0008643009942349175,
+        "rolling_drawdown_worst": -0.017436933119605924,
+        "thresholds": {
+          "max_drawdown_floor": -0.25,
+          "downside_deviation_max": 0.03,
+          "rolling_drawdown_worst_floor": -0.12
+        }
+      }
+    },
+    "capacity_impact_penalties": {
+      "name": "capacity_impact_penalties",
+      "pass": true,
+      "details": {
+        "turnover_total_max": 100.41666666666667,
+        "slippage_bps_max": 20.0,
+        "thresholds": {
+          "turnover_total_max": 150.0,
+          "slippage_bps_max": 25.0
+        }
+      }
+    },
+    "regime_robustness_minimums": {
+      "name": "regime_robustness_minimums",
+      "pass": true,
+      "details": {
+        "robust_oos_pass": true,
+        "stress_resilience_pass": true,
+        "pass_rate": 1.0,
+        "minimum_pass_rate": 1.0
+      }
+    },
+    "no_arbitrage_surface": {
+      "name": "no_arbitrage_surface",
+      "pass": true,
+      "details": {
+        "threshold": 0,
+        "diagnostics": {
+          "calendar_violations": 0,
+          "butterfly_violations": 0,
+          "total_variance_monotonicity_violations": 0,
+          "max_calendar_violation": 0.0,
+          "max_butterfly_violation": 0.0,
+          "max_total_variance_monotonicity_violation": 0.0
+        }
       }
     }
   }
