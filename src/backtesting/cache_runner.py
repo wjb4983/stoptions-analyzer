@@ -1736,6 +1736,8 @@ def run_walk_forward_backtest(
         "cpcv_n_test_groups": int(cpcv_n_test_groups),
         "cv_seed": int(cv_seed),
         "split_policy": normalized_split_policy,
+        "stress_controls": dict(stress_controls or {}),
+        "governance_metadata": governance_payload,
     }
     manifest = _build_run_manifest(
         run_type="walk_forward",
@@ -2026,6 +2028,8 @@ def run_strategy_optimization(
             "objectives": objective_defs,
             "constraints": [constraint.__dict__ for constraint in constraints],
             "partial_period_fractions": partial_period_fractions,
+            "stress_controls": dict(stress_controls or {}),
+            "governance_metadata": governance_payload,
         },
         data_snapshot=_build_sweep_snapshot_identifiers({
             "tickers": tickers,
@@ -2251,6 +2255,9 @@ def _execute_sweep_combo(payload: dict[str, Any]) -> dict[str, Any]:
     lookback_days = int(payload["lookback_days"])
     skip_days = int(payload["skip_days"])
     costs_bps = float(payload["costs_bps"])
+    universe_filters = payload.get("universe_filters")
+    if universe_filters is not None and not isinstance(universe_filters, dict):
+        raise ValueError("universe_filters must be a mapping when provided")
     aum_scale = max(float(payload.get("aum_scale", payload.get("notional_scale", 1.0))), 1e-6)
     max_participation_rate = payload.get("max_participation_rate")
 
@@ -2604,6 +2611,9 @@ def _is_valid_combo_definition(combo: dict[str, Any]) -> bool:
             default_skip_days=int(combo["skip_days"]),
         )
         float(combo["costs_bps"])
+        universe_filters = combo.get("universe_filters")
+        if universe_filters is not None and not isinstance(universe_filters, dict):
+            return False
         return True
     except Exception:
         return False

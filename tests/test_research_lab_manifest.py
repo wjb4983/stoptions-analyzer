@@ -51,6 +51,12 @@ def _build_context() -> dict[str, object]:
         "lookback": 90,
         "skip": 5,
         "costs_bps": 5.0,
+        "universe_filters": {
+            "sector": {"include": ["Technology"], "exclude": ["Financials"]},
+            "liquidity": {"min_adv": 1_000_000.0, "min_liquidity": 250_000.0},
+            "price_market_cap": {"min_price": 5.0, "max_price": 500.0, "min_market_cap": 1_000_000_000.0, "max_market_cap": 5_000_000_000_000.0},
+            "options_eligibility": {"min_open_interest": 500, "min_option_volume": 100, "min_days_to_expiration": 7, "require_weeklies": True},
+        },
     }
 
 
@@ -69,6 +75,7 @@ def test_write_experiment_skeleton_writes_research_project_manifest(tmp_path):
     assert payload["gate_outcomes"][0]["gate"] == "rubric_score"
     assert payload["reviewer_comments"][0]["reviewer"] == "research_lab_ui"
     assert payload["promotion_history"][0]["state"] == "promoted_to_experiment"
+    assert payload["context"]["universe_filters"]["sector"]["include"] == ["Technology"]
 
 
 def test_write_experiment_skeleton_appends_manifest_sections_without_duplication(tmp_path):
@@ -86,3 +93,19 @@ def test_write_experiment_skeleton_appends_manifest_sections_without_duplication
     assert len(payload["gate_outcomes"]) == 1
     assert len(payload["reviewer_comments"]) == 1
     assert len(payload["promotion_history"]) == 1
+
+
+def test_build_signal_grids_serializes_universe_filters_into_core_grid():
+    page = object.__new__(ResearchLabPage)
+    context = _build_context()
+    config = type(
+        "_Cfg",
+        (),
+        {"entry_signals": ["ts_momentum"], "exit_signals": ["none"]},
+    )()
+
+    entry_grid, exit_grid, core_grid = ResearchLabPage._build_signal_grids(page, context, config)
+
+    assert entry_grid == {"ts_momentum": [{}]}
+    assert exit_grid == {"none": [{}]}
+    assert core_grid["universe_filters"][0]["options_eligibility"]["require_weeklies"] is True
