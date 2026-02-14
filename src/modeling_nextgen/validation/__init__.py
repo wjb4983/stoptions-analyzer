@@ -6,6 +6,7 @@ from .purged_cv import (
     generate_purged_kfold_splits,
 )
 from .schemes import PurgedCrossValidator, StressValidator, WalkForwardValidator
+from .adversarial import AdversarialValidationConfig, build_adversarial_fragility_scorecards
 from .stress_scenarios import StressTemplateConfig, build_stress_template_scenarios
 from .walkforward_hpo import (
     WalkForwardHPOSummary,
@@ -19,6 +20,8 @@ __all__ = [
     "PurgedCrossValidator",
     "WalkForwardValidator",
     "StressValidator",
+    "AdversarialValidationConfig",
+    "build_adversarial_fragility_scorecards",
     "PurgedSplit",
     "generate_purged_kfold_splits",
     "generate_combinatorial_purged_cv_splits",
