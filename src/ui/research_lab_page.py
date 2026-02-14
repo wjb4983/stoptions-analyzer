@@ -21,12 +21,14 @@ from config import (
     DEFAULT_BACKTEST_SETTINGS,
     DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES,
     HYPOTHESIS_RUBRIC_TEMPLATES_PATH,
+    RESEARCH_LAB_PRESETS_PATH,
 )
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
 
 @dataclass
 class ResearchWorkflowConfig:
+    preset_name: str
     entry_signals: list[str]
     exit_signals: list[str]
     optimization_n_trials: int
@@ -36,6 +38,36 @@ class ResearchWorkflowConfig:
     test_fraction: float
     step_fraction: float
     stress_controls: dict[str, object]
+
+
+DEFAULT_RESEARCH_WORKFLOW_PRESETS: dict[str, Any] = {
+    "default_preset": "balanced_baseline",
+    "presets": {
+        "balanced_baseline": {
+            "label": "Balanced Baseline",
+            "description": "General-purpose baseline with diversified signals and balanced stress settings.",
+            "entry_signals": ["ts_momentum", "breakout"],
+            "exit_signals": ["none", "momentum_flip"],
+            "optimization": {"n_trials": 20, "sampler": "tpe"},
+            "walk_forward": {
+                "train_fraction": 0.70,
+                "validation_fraction": 0.15,
+                "test_fraction": 0.15,
+                "step_fraction": 0.15,
+            },
+            "stress_controls": {
+                "enable_historical_replay_regimes": True,
+                "historical_window_fraction": 0.20,
+                "historical_replay_window_bars": 20,
+                "synthetic_jump_magnitude": 0.02,
+                "synthetic_jump_interval": 7,
+                "synthetic_vol_cluster_multiplier": 1.6,
+                "overlay_spread_multiplier": 2.5,
+                "overlay_liquidity_multiplier": 0.4,
+            },
+        },
+    },
+}
 
 
 @dataclass
@@ -67,6 +99,7 @@ class ResearchLabPage(ttk.Frame):
         self._wizard_state_path = self._research_lab_dir / "wizard_state.json"
         self._hypothesis_rubric_templates_path = HYPOTHESIS_RUBRIC_TEMPLATES_PATH
         self._rubric_templates = self._load_rubric_templates()
+        self._workflow_presets = self._load_workflow_presets()
 
 
         ttk.Label(self, text="Research Lab", font=("Arial", 18, "bold")).pack(pady=(12, 8))
@@ -362,7 +395,29 @@ class ResearchLabPage(ttk.Frame):
         self.hypothesis_expected_capacity_var = tk.StringVar(value=f"{default_scores['expected_capacity']:.2f}")
         self.hypothesis_robustness_var = tk.StringVar(value=f"{default_scores['robustness']:.2f}")
 
+        preset_options = tuple(self._workflow_presets.get("presets", {}).keys())
+        default_preset = str(self._workflow_presets.get("default_preset", "custom"))
+        if default_preset not in preset_options:
+            default_preset = preset_options[0] if preset_options else "custom"
+        self.workflow_preset_var = tk.StringVar(value=default_preset)
+
         row = 0
+        ttk.Label(controls, text="Workflow preset").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        preset_row = ttk.Frame(controls)
+        preset_row.grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        preset_row.columnconfigure(0, weight=1)
+        ttk.Combobox(
+            preset_row,
+            textvariable=self.workflow_preset_var,
+            values=preset_options,
+            state="readonly",
+            width=24,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(preset_row, text="Apply preset", command=self._apply_selected_workflow_preset).grid(
+            row=0, column=1, sticky="w", padx=(8, 0)
+        )
+
+        row += 1
         ttk.Label(controls, text="Entry signals (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
         ttk.Entry(controls, textvariable=self.entry_signals_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
 
@@ -456,6 +511,8 @@ class ResearchLabPage(ttk.Frame):
         ttk.Label(hypothesis_row, text=" / ").pack(side="left")
         ttk.Entry(hypothesis_row, textvariable=self.hypothesis_robustness_var, width=6).pack(side="left")
 
+        self.workflow_preset_var.trace_add("write", self._on_workflow_preset_change)
+        self._apply_selected_workflow_preset()
 
     def _build_wizard_mode(self) -> None:
         self._wizard_step_index = 0
@@ -849,6 +906,66 @@ class ResearchLabPage(ttk.Frame):
             return profiles[fallback]
         return DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES["profiles"]["intraday_alpha"]
 
+    def _load_workflow_presets(self) -> dict[str, Any]:
+        if not RESEARCH_LAB_PRESETS_PATH.exists():
+            return dict(DEFAULT_RESEARCH_WORKFLOW_PRESETS)
+        try:
+            payload = json.loads(RESEARCH_LAB_PRESETS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return dict(DEFAULT_RESEARCH_WORKFLOW_PRESETS)
+
+        presets = payload.get("presets") if isinstance(payload, dict) else None
+        if not isinstance(presets, dict) or not presets:
+            return dict(DEFAULT_RESEARCH_WORKFLOW_PRESETS)
+
+        default_preset = str(payload.get("default_preset") or next(iter(presets)))
+        if default_preset not in presets:
+            default_preset = next(iter(presets))
+        return {"default_preset": default_preset, "presets": presets}
+
+    def _resolve_workflow_preset(self, preset_name: str) -> dict[str, Any] | None:
+        presets = self._workflow_presets.get("presets", {})
+        preset = presets.get(preset_name)
+        return preset if isinstance(preset, dict) else None
+
+    def _on_workflow_preset_change(self, *_: object) -> None:
+        # Selection is explicit; values are applied when button is clicked.
+        return
+
+    def _apply_selected_workflow_preset(self) -> None:
+        preset_name = self.workflow_preset_var.get().strip()
+        preset = self._resolve_workflow_preset(preset_name)
+        if preset is None:
+            return
+
+        entry_signals = preset.get("entry_signals", [])
+        exit_signals = preset.get("exit_signals", [])
+        optimization = preset.get("optimization", {})
+        walk_forward = preset.get("walk_forward", {})
+        stress_controls = preset.get("stress_controls", {})
+
+        if isinstance(entry_signals, list) and entry_signals:
+            self.entry_signals_var.set(", ".join(str(signal) for signal in entry_signals))
+        if isinstance(exit_signals, list) and exit_signals:
+            self.exit_signals_var.set(", ".join(str(signal) for signal in exit_signals))
+
+        self.optimization_trials_var.set(str(optimization.get("n_trials", self.optimization_trials_var.get())))
+        self.optimization_sampler_var.set(str(optimization.get("sampler", self.optimization_sampler_var.get())))
+
+        self.wf_train_fraction_var.set(f"{float(walk_forward.get('train_fraction', self.wf_train_fraction_var.get())):.2f}")
+        self.wf_validation_fraction_var.set(f"{float(walk_forward.get('validation_fraction', self.wf_validation_fraction_var.get())):.2f}")
+        self.wf_test_fraction_var.set(f"{float(walk_forward.get('test_fraction', self.wf_test_fraction_var.get())):.2f}")
+        self.wf_step_fraction_var.set(f"{float(walk_forward.get('step_fraction', self.wf_step_fraction_var.get())):.2f}")
+
+        self.stress_enable_historical_replay_var.set(bool(stress_controls.get("enable_historical_replay_regimes", self.stress_enable_historical_replay_var.get())))
+        self.stress_historical_window_fraction_var.set(f"{float(stress_controls.get('historical_window_fraction', self.stress_historical_window_fraction_var.get())):.2f}")
+        self.stress_historical_replay_window_bars_var.set(str(stress_controls.get("historical_replay_window_bars", self.stress_historical_replay_window_bars_var.get())))
+        self.stress_synthetic_jump_magnitude_var.set(f"{float(stress_controls.get('synthetic_jump_magnitude', self.stress_synthetic_jump_magnitude_var.get())):.2f}")
+        self.stress_synthetic_jump_interval_var.set(str(stress_controls.get("synthetic_jump_interval", self.stress_synthetic_jump_interval_var.get())))
+        self.stress_synthetic_vol_cluster_multiplier_var.set(f"{float(stress_controls.get('synthetic_vol_cluster_multiplier', self.stress_synthetic_vol_cluster_multiplier_var.get())):.2f}")
+        self.stress_overlay_spread_multiplier_var.set(f"{float(stress_controls.get('overlay_spread_multiplier', self.stress_overlay_spread_multiplier_var.get())):.2f}")
+        self.stress_overlay_liquidity_multiplier_var.set(f"{float(stress_controls.get('overlay_liquidity_multiplier', self.stress_overlay_liquidity_multiplier_var.get())):.2f}")
+
     def run_walk_forward(self) -> None:
         self._start_worker(self._run_walk_forward_workflow, "Walk-forward validation")
 
@@ -926,6 +1043,7 @@ class ResearchLabPage(ttk.Frame):
         }
 
         return ResearchWorkflowConfig(
+            preset_name=self.workflow_preset_var.get().strip(),
             entry_signals=entry_signals,
             exit_signals=exit_signals,
             optimization_n_trials=n_trials,
@@ -965,7 +1083,7 @@ class ResearchLabPage(ttk.Frame):
             validation_fraction=config.validation_fraction,
             test_fraction=config.test_fraction,
             step_fraction=config.step_fraction,
-            governance_metadata={"promotion_state": "research", "approval_status": "pending"},
+            governance_metadata={"promotion_state": "research", "approval_status": "pending", "workflow_preset": config.preset_name},
             stress_controls=dict(config.stress_controls),
         )
 
@@ -983,7 +1101,7 @@ class ResearchLabPage(ttk.Frame):
             n_trials=config.optimization_n_trials,
             sampler_name=config.optimization_sampler,
             partial_period_fractions=[0.5, 1.0],
-            governance_metadata={"promotion_state": "research", "approval_status": "pending"},
+            governance_metadata={"promotion_state": "research", "approval_status": "pending", "workflow_preset": config.preset_name},
             stress_controls=dict(config.stress_controls),
         )
 
@@ -999,7 +1117,7 @@ class ResearchLabPage(ttk.Frame):
             timeframe=str(DEFAULT_BACKTEST_SETTINGS.get("timeframe", "1m")),
             entry_signals=list(config.entry_signals),
             exit_signals=list(config.exit_signals),
-            governance_metadata={"promotion_state": "research", "approval_status": "pending"},
+            governance_metadata={"promotion_state": "research", "approval_status": "pending", "workflow_preset": config.preset_name},
             stress_controls=dict(config.stress_controls),
         )
 
