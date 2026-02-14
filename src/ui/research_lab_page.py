@@ -992,8 +992,8 @@ class ResearchLabPage(ttk.Frame):
         help_text = {
             "preset": "Preset bundles entry/exit signal sets plus optimization, walk-forward, and stress defaults.",
             "easy": "Easy Mode applies robust defaults and locks advanced tuning fields.",
-            "entry": "Comma-separated entry signal IDs: ts_momentum, ma_trend, breakout.",
-            "exit": "Comma-separated exit signal IDs: none, momentum_flip, trailing_stop, max_hold.",
+            "entry": "Select one or more entry signal IDs: ts_momentum, ma_trend, breakout.",
+            "exit": "Select one or more exit signal IDs: none, momentum_flip, trailing_stop, max_hold.",
             "opt": "n_trials controls search breadth. sampler controls candidate generation.",
             "prune": "Enable early stopping for weak trials; set minimum completed trials for pruning.",
             "staged": "Optional JSON list of optimization stages for coarse-to-fine search.",
@@ -1035,18 +1035,53 @@ class ResearchLabPage(ttk.Frame):
         add_help(row, help_text["easy"])
 
         row += 1
-        ttk.Label(controls, text="Entry signals (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
-        ttk.Entry(controls, textvariable=self.entry_signals_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        ttk.Label(controls, text="Entry signals").grid(row=row, column=0, sticky="nw", padx=8, pady=5)
+        entry_row = ttk.Frame(controls)
+        entry_row.grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        entry_row.columnconfigure(0, weight=1)
+        self.entry_signals_listbox = tk.Listbox(entry_row, selectmode="multiple", exportselection=False, height=len(self._signal_options))
+        self.entry_signals_listbox.grid(row=0, column=0, sticky="ew")
+        for option in self._signal_options:
+            self.entry_signals_listbox.insert("end", option)
+        self._set_listbox_selection(self.entry_signals_listbox, ["ts_momentum", "breakout"], valid_options=self._signal_options)
+        self.entry_signals_listbox.bind("<<ListboxSelect>>", lambda _event: self._on_structured_selection_change("entry"))
+        ttk.Button(entry_row, text="Select recommended set", command=lambda: self._select_recommended_set("entry")).grid(row=1, column=0, sticky="w", pady=(4, 0))
         add_help(row, help_text["entry"])
 
         row += 1
-        ttk.Label(controls, text="Exit signals (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
-        ttk.Entry(controls, textvariable=self.exit_signals_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        ttk.Label(controls, text="Exit signals").grid(row=row, column=0, sticky="nw", padx=8, pady=5)
+        exit_row = ttk.Frame(controls)
+        exit_row.grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        exit_row.columnconfigure(0, weight=1)
+        self.exit_signals_listbox = tk.Listbox(exit_row, selectmode="multiple", exportselection=False, height=len(self._exit_signal_options))
+        self.exit_signals_listbox.grid(row=0, column=0, sticky="ew")
+        for option in self._exit_signal_options:
+            self.exit_signals_listbox.insert("end", option)
+        self._set_listbox_selection(self.exit_signals_listbox, ["none", "momentum_flip"], valid_options=self._exit_signal_options)
+        self.exit_signals_listbox.bind("<<ListboxSelect>>", lambda _event: self._on_structured_selection_change("exit"))
+        ttk.Button(exit_row, text="Select recommended set", command=lambda: self._select_recommended_set("exit")).grid(row=1, column=0, sticky="w", pady=(4, 0))
         add_help(row, help_text["exit"])
 
         row += 1
-        ttk.Label(controls, text="Benchmarks (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
-        ttk.Entry(controls, textvariable=self.benchmark_selection_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        ttk.Label(controls, text="Benchmarks").grid(row=row, column=0, sticky="nw", padx=8, pady=5)
+        benchmark_row = ttk.Frame(controls)
+        benchmark_row.grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        benchmark_row.columnconfigure(0, weight=1)
+        self.benchmark_selection_listbox = tk.Listbox(benchmark_row, selectmode="multiple", exportselection=False, height=len(self._benchmark_options))
+        self.benchmark_selection_listbox.grid(row=0, column=0, sticky="ew")
+        for option in self._benchmark_options:
+            self.benchmark_selection_listbox.insert("end", option)
+        self._set_listbox_selection(
+            self.benchmark_selection_listbox,
+            ["buy_hold", "equal_weight_momentum", "volatility_parity"],
+            valid_options=self._benchmark_options,
+        )
+        self.benchmark_selection_listbox.bind("<<ListboxSelect>>", lambda _event: self._on_structured_selection_change("benchmark"))
+        ttk.Button(
+            benchmark_row,
+            text="Select recommended set",
+            command=lambda: self._select_recommended_set("benchmark"),
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         row += 1
         ttk.Label(controls, text="Optimization trials / sampler").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -1171,6 +1206,7 @@ class ResearchLabPage(ttk.Frame):
 
         self.workflow_preset_var.trace_add("write", self._on_workflow_preset_change)
         self._attach_workflow_validation_traces()
+        self._sync_signal_selection_vars()
         self._apply_selected_workflow_preset()
         self._on_easy_mode_toggle()
 
@@ -1695,10 +1731,84 @@ class ResearchLabPage(ttk.Frame):
                 continue
         self._refresh_workflow_validation_hints()
 
+    def _selected_listbox_values(self, listbox: tk.Listbox) -> list[str]:
+        return [str(listbox.get(index)) for index in listbox.curselection()]
+
+    def _set_listbox_selection(
+        self,
+        listbox: tk.Listbox,
+        values: list[str],
+        *,
+        valid_options: tuple[str, ...],
+    ) -> None:
+        filtered = [item for item in values if item in valid_options]
+        options = [str(listbox.get(index)) for index in range(listbox.size())]
+        listbox.selection_clear(0, "end")
+        for item in filtered:
+            if item in options:
+                listbox.selection_set(options.index(item))
+
+    def _sync_signal_selection_vars(self) -> None:
+        self.entry_signals_var.set(", ".join(self._selected_listbox_values(self.entry_signals_listbox)))
+        self.exit_signals_var.set(", ".join(self._selected_listbox_values(self.exit_signals_listbox)))
+        self.benchmark_selection_var.set(", ".join(self._selected_listbox_values(self.benchmark_selection_listbox)))
+
+    def _on_structured_selection_change(self, _field: str) -> None:
+        self._sync_signal_selection_vars()
+        self._refresh_workflow_validation_hints()
+
+    def _structured_or_text_selection(
+        self,
+        *,
+        listbox: tk.Listbox,
+        text_var: tk.StringVar,
+        valid_options: tuple[str, ...],
+        field_name: str,
+        show_popup: bool = True,
+    ) -> list[str] | None:
+        structured = self._selected_listbox_values(listbox)
+        if structured:
+            return structured
+        return self._parse_signal_csv(
+            text_var.get().strip(),
+            valid_options=valid_options,
+            field_name=field_name,
+            show_popup=show_popup,
+        )
+
+    def _recommended_values_for_field(self, field: str) -> list[str]:
+        preset = self._resolve_workflow_preset(self.workflow_preset_var.get().strip())
+        if preset is None:
+            return []
+        key_by_field = {
+            "entry": "entry_signals",
+            "exit": "exit_signals",
+            "benchmark": "benchmark_selection",
+        }
+        key = key_by_field.get(field)
+        if key is None:
+            return []
+        values = preset.get(key, [])
+        if not isinstance(values, list):
+            return []
+        return [str(value) for value in values]
+
+    def _select_recommended_set(self, field: str) -> None:
+        recommended = self._recommended_values_for_field(field)
+        if field == "entry":
+            self._set_listbox_selection(self.entry_signals_listbox, recommended, valid_options=self._signal_options)
+        elif field == "exit":
+            self._set_listbox_selection(self.exit_signals_listbox, recommended, valid_options=self._exit_signal_options)
+        elif field == "benchmark":
+            self._set_listbox_selection(self.benchmark_selection_listbox, recommended, valid_options=self._benchmark_options)
+        self._sync_signal_selection_vars()
+        self._refresh_workflow_validation_hints()
+
     def _attach_workflow_validation_traces(self) -> None:
         watched_vars = [
             self.entry_signals_var,
             self.exit_signals_var,
+            self.benchmark_selection_var,
             self.optimization_trials_var,
             self.optimization_sampler_var,
             self.optimization_min_completed_var,
@@ -1721,20 +1831,31 @@ class ResearchLabPage(ttk.Frame):
 
     def _collect_workflow_validation_issues(self) -> list[str]:
         issues: list[str] = []
-        if self._parse_signal_csv(
-            self.entry_signals_var.get().strip(),
+        if self._structured_or_text_selection(
+            listbox=self.entry_signals_listbox,
+            text_var=self.entry_signals_var,
             valid_options=self._signal_options,
             field_name="Entry signals",
             show_popup=False,
         ) is None:
             issues.append("Entry signals must include at least one supported signal.")
-        if self._parse_signal_csv(
-            self.exit_signals_var.get().strip(),
+        if self._structured_or_text_selection(
+            listbox=self.exit_signals_listbox,
+            text_var=self.exit_signals_var,
             valid_options=self._exit_signal_options,
             field_name="Exit signals",
             show_popup=False,
         ) is None:
             issues.append("Exit signals must include at least one supported signal.")
+
+        if self._structured_or_text_selection(
+            listbox=self.benchmark_selection_listbox,
+            text_var=self.benchmark_selection_var,
+            valid_options=self._benchmark_options,
+            field_name="Benchmarks",
+            show_popup=False,
+        ) is None:
+            issues.append("Benchmarks must include at least one supported selection.")
 
         n_trials = int(parse_float(self.optimization_trials_var.get()) or 20)
         if n_trials <= 0:
@@ -1918,11 +2039,24 @@ class ResearchLabPage(ttk.Frame):
         benchmark_selection = preset.get("benchmark_selection", list(self._benchmark_options))
 
         if isinstance(entry_signals, list) and entry_signals:
-            self.entry_signals_var.set(", ".join(str(signal) for signal in entry_signals))
+            self._set_listbox_selection(
+                self.entry_signals_listbox,
+                [str(signal) for signal in entry_signals],
+                valid_options=self._signal_options,
+            )
         if isinstance(exit_signals, list) and exit_signals:
-            self.exit_signals_var.set(", ".join(str(signal) for signal in exit_signals))
+            self._set_listbox_selection(
+                self.exit_signals_listbox,
+                [str(signal) for signal in exit_signals],
+                valid_options=self._exit_signal_options,
+            )
         if isinstance(benchmark_selection, list) and benchmark_selection:
-            self.benchmark_selection_var.set(", ".join(str(item) for item in benchmark_selection))
+            self._set_listbox_selection(
+                self.benchmark_selection_listbox,
+                [str(item) for item in benchmark_selection],
+                valid_options=self._benchmark_options,
+            )
+        self._sync_signal_selection_vars()
 
         self.optimization_trials_var.set(str(optimization.get("n_trials", self.optimization_trials_var.get())))
         self.optimization_sampler_var.set(str(optimization.get("sampler", self.optimization_sampler_var.get())))
@@ -1946,6 +2080,7 @@ class ResearchLabPage(ttk.Frame):
         self.stress_synthetic_vol_cluster_multiplier_var.set(f"{float(stress_controls.get('synthetic_vol_cluster_multiplier', self.stress_synthetic_vol_cluster_multiplier_var.get())):.2f}")
         self.stress_overlay_spread_multiplier_var.set(f"{float(stress_controls.get('overlay_spread_multiplier', self.stress_overlay_spread_multiplier_var.get())):.2f}")
         self.stress_overlay_liquidity_multiplier_var.set(f"{float(stress_controls.get('overlay_liquidity_multiplier', self.stress_overlay_liquidity_multiplier_var.get())):.2f}")
+        self._refresh_workflow_validation_hints()
 
     def run_walk_forward(self) -> None:
         self._start_worker(self._run_walk_forward_workflow, "Walk-forward validation")
@@ -1983,24 +2118,27 @@ class ResearchLabPage(ttk.Frame):
         return parsed
 
     def _build_workflow_config(self) -> ResearchWorkflowConfig | None:
-        entry_signals = self._parse_signal_csv(
-            self.entry_signals_var.get().strip(),
+        entry_signals = self._structured_or_text_selection(
+            listbox=self.entry_signals_listbox,
+            text_var=self.entry_signals_var,
             valid_options=self._signal_options,
             field_name="Entry signals",
         )
         if entry_signals is None:
             return None
 
-        exit_signals = self._parse_signal_csv(
-            self.exit_signals_var.get().strip(),
+        exit_signals = self._structured_or_text_selection(
+            listbox=self.exit_signals_listbox,
+            text_var=self.exit_signals_var,
             valid_options=self._exit_signal_options,
             field_name="Exit signals",
         )
         if exit_signals is None:
             return None
 
-        benchmark_selection = self._parse_signal_csv(
-            self.benchmark_selection_var.get().strip(),
+        benchmark_selection = self._structured_or_text_selection(
+            listbox=self.benchmark_selection_listbox,
+            text_var=self.benchmark_selection_var,
             valid_options=self._benchmark_options,
             field_name="Benchmarks",
         )
