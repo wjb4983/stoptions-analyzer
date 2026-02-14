@@ -5,8 +5,8 @@ from typing import Any
 
 import numpy as np
 
-from src.backtesting.strategies.alpha_model import probability_calibrated_position_size
-from src.backtesting.walk_forward import WalkForwardFold, build_walk_forward_folds
+from backtesting.strategies.alpha_model import probability_calibrated_position_size
+from backtesting.walk_forward import WalkForwardFold, build_walk_forward_folds
 
 
 @dataclass(frozen=True)

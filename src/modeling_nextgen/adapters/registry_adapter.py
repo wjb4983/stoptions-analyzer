@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from src.models.base import ModelInterface
-from src.models.registry import MODEL_REGISTRY, create_model
+from models.base import ModelInterface
+from models.registry import MODEL_REGISTRY, create_model
 
 from ..core.config import NextGenModelingConfig
 from ..core.registry import NextGenRegistry
