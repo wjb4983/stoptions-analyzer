@@ -8,6 +8,7 @@ import socket
 import time
 import threading
 import re
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
@@ -82,6 +83,7 @@ class GeneralAnalysisPage(ttk.Frame):
         self._grouped_ticker_pattern = re.compile(r"^[A-Z0-9]+$")
         self._latest_combined_report = ""
         self._latest_report_path = ""
+        self._run_history: list[dict[str, str]] = []
 
         header = ttk.Label(self, text="General Analysis", font=("Arial", 18, "bold"))
         header.pack(pady=10)
@@ -235,17 +237,54 @@ class GeneralAnalysisPage(ttk.Frame):
             command=lambda: controller.show_frame("MainMenu"),
         ).grid(row=0, column=2, padx=10)
 
-        output_frame = ttk.LabelFrame(self, text="Latest Analysis Output")
+        output_frame = ttk.LabelFrame(self, text="Run Timeline")
         output_frame.pack(padx=40, pady=(5, 15), fill="both", expand=True)
         output_frame.rowconfigure(0, weight=1)
         output_frame.columnconfigure(0, weight=1)
-        self.output_text = tk.Text(output_frame, height=12, wrap="word")
+
+        columns = ("run_type", "start_time", "end_time", "status", "key_metrics", "artifact_path")
+        self.run_tree = ttk.Treeview(output_frame, columns=columns, show="headings", height=12)
+        self.run_tree.heading("run_type", text="Run Type")
+        self.run_tree.heading("start_time", text="Start")
+        self.run_tree.heading("end_time", text="End")
+        self.run_tree.heading("status", text="Status")
+        self.run_tree.heading("key_metrics", text="Key Metrics")
+        self.run_tree.heading("artifact_path", text="Artifact Path")
+        self.run_tree.column("run_type", width=180, anchor="w")
+        self.run_tree.column("start_time", width=170, anchor="w")
+        self.run_tree.column("end_time", width=170, anchor="w")
+        self.run_tree.column("status", width=90, anchor="center")
+        self.run_tree.column("key_metrics", width=320, anchor="w")
+        self.run_tree.column("artifact_path", width=350, anchor="w")
+        self.run_tree.bind("<<TreeviewSelect>>", lambda _event: self._update_run_actions_state())
+        self.run_tree.bind("<Double-1>", lambda _event: self._open_selected_artifact_directory())
+
         output_scrollbar = ttk.Scrollbar(
-            output_frame, orient="vertical", command=self.output_text.yview
+            output_frame, orient="vertical", command=self.run_tree.yview
         )
-        self.output_text.configure(yscrollcommand=output_scrollbar.set)
-        self.output_text.grid(row=0, column=0, sticky="nsew")
+        self.run_tree.configure(yscrollcommand=output_scrollbar.set)
+        self.run_tree.grid(row=0, column=0, sticky="nsew")
         output_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        action_row = ttk.Frame(output_frame)
+        action_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        action_row.columnconfigure(2, weight=1)
+        self.open_artifact_button = ttk.Button(
+            action_row,
+            text="Open Artifact Directory",
+            command=self._open_selected_artifact_directory,
+            state="disabled",
+        )
+        self.open_artifact_button.grid(row=0, column=0, padx=(0, 8), sticky="w")
+        self.copy_artifact_button = ttk.Button(
+            action_row,
+            text="Copy Artifact Path",
+            command=self._copy_selected_artifact_path,
+            state="disabled",
+        )
+        self.copy_artifact_button.grid(row=0, column=1, padx=(0, 8), sticky="w")
+        self.run_actions_var = tk.StringVar(value="Select a run to open or copy its artifact path.")
+        ttk.Label(action_row, textvariable=self.run_actions_var).grid(row=0, column=2, sticky="w")
 
     def refresh(self) -> None:
         settings = dict(DEFAULT_GENERAL_ANALYSIS_SETTINGS)
@@ -301,11 +340,29 @@ class GeneralAnalysisPage(ttk.Frame):
             widget.configure(state=state)
 
     def run_analysis(self) -> None:
+        run_started_at = datetime.now()
+        run_type = self.analysis_type_var.get().strip() or "Unknown"
         if not self.controller.api_key:
             messagebox.showinfo("Missing key", "Enter a Massive API key first.")
+            self._record_run(
+                run_type=run_type,
+                start_time=run_started_at,
+                end_time=datetime.now(),
+                status="failed",
+                key_metrics="Missing API key",
+                artifact_path="",
+            )
             return
         if not self.controller.state.tickers:
             messagebox.showinfo("Missing universe", "Please add tickers first.")
+            self._record_run(
+                run_type=run_type,
+                start_time=run_started_at,
+                end_time=datetime.now(),
+                status="failed",
+                key_metrics="Missing ticker universe",
+                artifact_path="",
+            )
             return
         lookback_days = parse_int(self.lookback_var.get())
         skip_days = parse_int(self.skip_var.get())
@@ -384,6 +441,14 @@ class GeneralAnalysisPage(ttk.Frame):
                 as_of,
             )
             if cross_result is None:
+                self._record_run(
+                    run_type=analysis_type,
+                    start_time=run_started_at,
+                    end_time=datetime.now(),
+                    status="failed",
+                    key_metrics="Cross-sectional run failed",
+                    artifact_path="",
+                )
                 return
             reports.append(cross_result)
             report_labels.append("cross_sectional")
@@ -403,22 +468,133 @@ class GeneralAnalysisPage(ttk.Frame):
                 as_of,
             )
             if time_series_result is None:
+                self._record_run(
+                    run_type=analysis_type,
+                    start_time=run_started_at,
+                    end_time=datetime.now(),
+                    status="failed",
+                    key_metrics="Time-series run failed",
+                    artifact_path="",
+                )
                 return
             reports.append(time_series_result)
             report_labels.append("time_series")
 
         combined_report = "\n\n".join(reports)
-        self.output_text.delete("1.0", tk.END)
-        self.output_text.insert(tk.END, combined_report)
 
         analysis_slug = "combined" if len(report_labels) > 1 else report_labels[0]
         output_path = self._write_report(combined_report, output_dir, strategy, analysis_slug)
         self._latest_combined_report = combined_report
         self._latest_report_path = str(output_path)
+        self._record_run(
+            run_type=analysis_type,
+            start_time=run_started_at,
+            end_time=datetime.now(),
+            status="success",
+            key_metrics=self._summarize_key_metrics(combined_report),
+            artifact_path=str(output_path),
+        )
         messagebox.showinfo(
             "Analysis complete",
             f"{analysis_type} {strategy.lower()} results written to:\n{output_path}",
         )
+
+
+    def _summarize_key_metrics(self, combined_report: str) -> str:
+        metrics: list[str] = []
+        metric_patterns = [
+            ("Sharpe", r"Sharpe(?:\s+Ratio)?\s*:\s*([^\n]+)"),
+            ("CAGR", r"CAGR\s*:\s*([^\n]+)"),
+            ("Total Return", r"Total\s+Return\s*:\s*([^\n]+)"),
+            ("Max DD", r"Max\s+Drawdown\s*:\s*([^\n]+)"),
+            ("Win Rate", r"Win\s+Rate\s*:\s*([^\n]+)"),
+        ]
+        for label, pattern in metric_patterns:
+            match = re.search(pattern, combined_report, flags=re.IGNORECASE)
+            if match:
+                metrics.append(f"{label} {match.group(1).strip()}")
+            if len(metrics) == 3:
+                break
+        if not metrics:
+            first_line = next((line.strip() for line in combined_report.splitlines() if line.strip()), "")
+            return first_line[:120] if first_line else "Report generated"
+        return " | ".join(metrics)
+
+    def _record_run(
+        self,
+        *,
+        run_type: str,
+        start_time: datetime,
+        end_time: datetime,
+        status: str,
+        key_metrics: str,
+        artifact_path: str,
+    ) -> None:
+        row = {
+            "run_type": run_type,
+            "start_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "status": status,
+            "key_metrics": key_metrics,
+            "artifact_path": artifact_path,
+        }
+        self._run_history.insert(0, row)
+        self._refresh_run_tree()
+
+    def _refresh_run_tree(self) -> None:
+        for item_id in self.run_tree.get_children():
+            self.run_tree.delete(item_id)
+        for row in self._run_history:
+            self.run_tree.insert(
+                "",
+                "end",
+                values=(
+                    row["run_type"],
+                    row["start_time"],
+                    row["end_time"],
+                    row["status"],
+                    row["key_metrics"],
+                    row["artifact_path"],
+                ),
+            )
+        self._update_run_actions_state()
+
+    def _selected_artifact_path(self) -> str:
+        selected = self.run_tree.selection()
+        if not selected:
+            return ""
+        values = self.run_tree.item(selected[0], "values")
+        return str(values[5]).strip() if len(values) > 5 else ""
+
+    def _update_run_actions_state(self) -> None:
+        artifact_path = self._selected_artifact_path()
+        if artifact_path:
+            self.open_artifact_button.configure(state="normal")
+            self.copy_artifact_button.configure(state="normal")
+            self.run_actions_var.set("Double-click a run row to open its artifact directory.")
+            return
+        self.open_artifact_button.configure(state="disabled")
+        self.copy_artifact_button.configure(state="disabled")
+        self.run_actions_var.set("Select a run to open or copy its artifact path.")
+
+    def _open_selected_artifact_directory(self) -> None:
+        artifact_path = self._selected_artifact_path()
+        if not artifact_path:
+            return
+        artifact = Path(artifact_path).expanduser().resolve()
+        target_dir = artifact if artifact.is_dir() else artifact.parent
+        if not target_dir.exists():
+            messagebox.showerror("Artifact missing", f"Artifact directory not found:\n{target_dir}")
+            return
+        webbrowser.open(f"file://{target_dir}")
+
+    def _copy_selected_artifact_path(self) -> None:
+        artifact_path = self._selected_artifact_path()
+        if not artifact_path:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(artifact_path)
+        self.run_actions_var.set("Artifact path copied to clipboard.")
 
     def export_prompt_pack(self) -> None:
         output_dir = self.output_dir_var.get().strip() or str(ANALYSIS_OUTPUT_DIR)
