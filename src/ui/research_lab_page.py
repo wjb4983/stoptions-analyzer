@@ -100,6 +100,8 @@ class ResearchTask:
     cancellation_confirmed: bool = False
     research_pack_path: str | None = None
     workflow_output: str | None = None
+    priority: int = 1
+    enqueue_order: int = 0
 
     def __post_init__(self) -> None:
         if self.logs is None:
@@ -113,7 +115,9 @@ class ResearchLabPage(ttk.Frame):
         super().__init__(parent)
         self.controller = controller
         self._task_queue: list[ResearchTask] = []
-        self._active_task_id: str | None = None
+        self._active_task_ids: set[str] = set()
+        self._task_enqueue_counter = 0
+        self._max_concurrent_jobs = 1
         self._research_lab_dir = BACKTEST_OUTPUT_DIR / "research_lab"
         self._sampler_options = ("tpe", "cma-es", "random", "grid")
         self._signal_options = ("ts_momentum", "ma_trend", "breakout")
@@ -328,6 +332,21 @@ class ResearchLabPage(ttk.Frame):
         self._retry_task_button = ttk.Button(controls, text="Retry Task", command=self._retry_selected_task)
         self._retry_task_button.pack(fill="x")
 
+        ttk.Label(controls, text="Priority").pack(anchor="w", pady=(8, 0))
+        self._task_priority_var = tk.StringVar(value="normal")
+        ttk.Combobox(
+            controls,
+            textvariable=self._task_priority_var,
+            values=("high", "normal", "low"),
+            state="readonly",
+            width=10,
+        ).pack(fill="x", pady=(2, 6))
+
+        ttk.Label(controls, text="Max concurrent").pack(anchor="w")
+        self._max_concurrent_jobs_var = tk.IntVar(value=1)
+        self._max_concurrent_jobs_var.trace_add("write", lambda *_: self._on_max_concurrent_jobs_changed())
+        ttk.Spinbox(controls, from_=1, to=8, textvariable=self._max_concurrent_jobs_var, width=8).pack(fill="x")
+
         self._refresh_task_queue_ui()
 
     def _get_task_by_id(self, task_id: str | None) -> ResearchTask | None:
@@ -348,7 +367,7 @@ class ResearchLabPage(ttk.Frame):
         return self._task_queue[index]
 
     def _refresh_task_queue_ui(self) -> None:
-        rows = [f"[{task.state}] {task.label}" for task in self._task_queue]
+        rows = [f"[{task.state}|p{task.priority}] {task.label}" for task in self._task_queue]
         self._task_list_var.set(rows)
         task = self._selected_task()
         self._cancel_task_button.configure(state="normal" if task and task.state in {"queued", "running", "canceling"} else "disabled")
@@ -384,24 +403,48 @@ class ResearchLabPage(ttk.Frame):
         context: dict[str, Any],
         config: ResearchWorkflowConfig,
     ) -> None:
+        priority = self._priority_value_from_label(getattr(self, "_task_priority_var", None).get() if hasattr(self, "_task_priority_var") else "normal")
+        self._task_enqueue_counter += 1
+        task_id = uuid.uuid4().hex
+        task_context = dict(context)
+        cache_root = Path(task_context.get("cache_root", BACKTEST_OUTPUT_DIR))
+        task_context["cache_root"] = cache_root / "research_lab_tasks" / task_id
+        task_context["run_namespace"] = f"task_{task_id}"
         task = ResearchTask(
-            task_id=uuid.uuid4().hex,
+            task_id=task_id,
             label=label,
             target=target,
-            context=dict(context),
+            context=task_context,
             config=config,
+            priority=priority,
+            enqueue_order=self._task_enqueue_counter,
         )
         self._task_queue.append(task)
         self._refresh_task_queue_ui()
-        self._run_next_task()
+        self._schedule_tasks()
 
-    def _run_next_task(self) -> None:
-        if self._active_task_id is not None:
+    def _priority_value_from_label(self, label: str) -> int:
+        normalized = str(label).strip().lower()
+        return {"low": 0, "normal": 1, "high": 2}.get(normalized, 1)
+
+    def _on_max_concurrent_jobs_changed(self) -> None:
+        if hasattr(self, "_max_concurrent_jobs_var"):
+            self._max_concurrent_jobs = max(1, int(self._max_concurrent_jobs_var.get() or 1))
+        self._schedule_tasks()
+
+    def _schedule_tasks(self) -> None:
+        available_slots = max(0, int(self._max_concurrent_jobs) - len(self._active_task_ids))
+        if available_slots <= 0:
             return
-        next_task = next((task for task in self._task_queue if task.state == "queued"), None)
-        if next_task is None:
-            return
-        self._active_task_id = next_task.task_id
+        queued_tasks = sorted(
+            [task for task in self._task_queue if task.state == "queued"],
+            key=lambda task: (-int(task.priority), int(task.enqueue_order)),
+        )
+        for next_task in queued_tasks[:available_slots]:
+            self._start_task_worker(next_task)
+
+    def _start_task_worker(self, next_task: ResearchTask) -> None:
+        self._active_task_ids.add(next_task.task_id)
         next_task.state = "running"
         self._task_log(next_task, "Task started.")
 
@@ -446,9 +489,9 @@ class ResearchLabPage(ttk.Frame):
                 message = f"Research pack exported: {pack_path}"
                 task.logs.append(message)
                 self._append_output(f"[{task.label}] {message}")
-        self._active_task_id = None
+        self._active_task_ids.discard(task_id)
         self._refresh_task_queue_ui()
-        self._run_next_task()
+        self._schedule_tasks()
 
     def _append_explainability_cards(self, task: ResearchTask, output_text: str) -> None:
         manifest_path = self._extract_manifest_path_from_output(output_text)
@@ -873,6 +916,10 @@ class ResearchLabPage(ttk.Frame):
         elif task.state == "running":
             task.state = "canceling"
             task.logs.append("Cancellation requested. Waiting for workflow cancellation checkpoint.")
+        elif task.state == "retrying":
+            task.state = "canceled"
+            task.cancellation_confirmed = True
+            task.logs.append("Retry canceled before task re-entered queue.")
         else:
             task.logs.append("Cancellation already requested.")
         self._refresh_task_queue_ui()
@@ -881,6 +928,8 @@ class ResearchLabPage(ttk.Frame):
         task = self._selected_task()
         if task is None or task.state not in {"failed", "canceled"}:
             return
+        task.state = "retrying"
+        task.logs.append("Retry requested.")
         task.state = "queued"
         task.cancel_requested = False
         task.cancellation_reason = None
@@ -888,7 +937,7 @@ class ResearchLabPage(ttk.Frame):
         task.cancellation_token = CancellationToken()
         task.logs.append("Task re-queued for retry.")
         self._refresh_task_queue_ui()
-        self._run_next_task()
+        self._schedule_tasks()
 
     def _build_workflow_controls(self) -> None:
         controls = ttk.LabelFrame(self, text="Workflow Controls")
@@ -2073,6 +2122,7 @@ class ResearchLabPage(ttk.Frame):
             stress_controls=dict(config.stress_controls),
             benchmarks=list(config.benchmark_selection),
             cancellation_token=cancellation_token,
+            run_namespace=str(context.get("run_namespace", "")).strip() or None,
         )
 
     def _run_optimization_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
@@ -2103,6 +2153,7 @@ class ResearchLabPage(ttk.Frame):
             stress_controls=dict(config.stress_controls),
             benchmarks=list(config.benchmark_selection),
             cancellation_token=cancellation_token,
+            run_namespace=str(context.get("run_namespace", "")).strip() or None,
         )
 
     def _run_stress_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
@@ -2126,6 +2177,7 @@ class ResearchLabPage(ttk.Frame):
             stress_controls=dict(config.stress_controls),
             benchmarks=list(config.benchmark_selection),
             cancellation_token=cancellation_token,
+            run_namespace=str(context.get("run_namespace", "")).strip() or None,
         )
 
     def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
