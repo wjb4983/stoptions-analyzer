@@ -14,6 +14,8 @@ from tkinter import messagebox, ttk
 from typing import Any, Callable
 
 from backtesting.cache_runner import (
+    CancellationToken,
+    TaskCancellationError,
     run_multi_signal_backtest,
     run_strategy_optimization,
     run_walk_forward_backtest,
@@ -87,18 +89,23 @@ DEFAULT_RESEARCH_WORKFLOW_PRESETS: dict[str, Any] = {
 class ResearchTask:
     task_id: str
     label: str
-    target: Callable[[dict[str, Any], ResearchWorkflowConfig], str]
+    target: Callable[[dict[str, Any], ResearchWorkflowConfig, CancellationToken], str]
     context: dict[str, Any]
     config: ResearchWorkflowConfig
     state: str = "queued"
     logs: list[str] | None = None
     cancel_requested: bool = False
+    cancellation_token: CancellationToken | None = None
+    cancellation_reason: str | None = None
+    cancellation_confirmed: bool = False
     research_pack_path: str | None = None
     workflow_output: str | None = None
 
     def __post_init__(self) -> None:
         if self.logs is None:
             self.logs = []
+        if self.cancellation_token is None:
+            self.cancellation_token = CancellationToken()
 
 
 class ResearchLabPage(ttk.Frame):
@@ -344,7 +351,7 @@ class ResearchLabPage(ttk.Frame):
         rows = [f"[{task.state}] {task.label}" for task in self._task_queue]
         self._task_list_var.set(rows)
         task = self._selected_task()
-        self._cancel_task_button.configure(state="normal" if task and task.state in {"queued", "running"} else "disabled")
+        self._cancel_task_button.configure(state="normal" if task and task.state in {"queued", "running", "canceling"} else "disabled")
         self._retry_task_button.configure(state="normal" if task and task.state in {"failed", "canceled"} else "disabled")
         self._refresh_selected_task_logs()
         if hasattr(self, "_wizard_next_button"):
@@ -373,7 +380,7 @@ class ResearchLabPage(ttk.Frame):
         self,
         *,
         label: str,
-        target: Callable[[dict[str, Any], ResearchWorkflowConfig], str],
+        target: Callable[[dict[str, Any], ResearchWorkflowConfig, CancellationToken], str],
         context: dict[str, Any],
         config: ResearchWorkflowConfig,
     ) -> None:
@@ -403,8 +410,10 @@ class ResearchLabPage(ttk.Frame):
                 self._schedule_ui_update(lambda: self._finish_task(task.task_id, "", canceled=True))
                 return
             try:
-                output = task.target(task.context, task.config)
+                output = task.target(task.context, task.config, task.cancellation_token or CancellationToken())
                 self._schedule_ui_update(lambda: self._finish_task(task.task_id, output))
+            except TaskCancellationError as exc:
+                self._schedule_ui_update(lambda: self._finish_task(task.task_id, str(exc), canceled=True))
             except Exception as exc:
                 self._schedule_ui_update(lambda: self._finish_task(task.task_id, f"Research workflow failed: {exc}", failed=True))
 
@@ -417,6 +426,7 @@ class ResearchLabPage(ttk.Frame):
         output_text = str(output)
         if canceled or task.cancel_requested:
             task.state = "canceled"
+            task.cancellation_confirmed = True
             task.logs.append("Task canceled.")
             self._append_output(f"[{task.label}] Task canceled.")
         elif failed:
@@ -639,6 +649,10 @@ class ResearchLabPage(ttk.Frame):
                 "id": task.task_id,
                 "label": task.label,
                 "state": task.state,
+                "cancel_requested": bool(task.cancel_requested),
+                "cancellation_reason": task.cancellation_reason,
+                "cancellation_confirmed": bool(task.cancellation_confirmed),
+                "cancellation": task.cancellation_token.snapshot() if task.cancellation_token else {},
             },
             "generated_at": datetime.now().isoformat(),
             "source_manifest_path": str(manifest_path) if manifest_path else None,
@@ -720,6 +734,7 @@ class ResearchLabPage(ttk.Frame):
             "## Overview",
             f"- Task ID: `{task.task_id}`",
             f"- Status: `{task.state}`",
+            f"- Cancellation requested: `{bool(task.cancel_requested)}`",
             f"- Generated: `{datetime.now().isoformat()}`",
             "",
             "## Included Components",
@@ -848,11 +863,18 @@ class ResearchLabPage(ttk.Frame):
         if task is None:
             return
         task.cancel_requested = True
+        task.cancellation_reason = "Canceled from Research Lab UI"
+        if task.cancellation_token is not None:
+            task.cancellation_token.cancel(task.cancellation_reason)
         if task.state == "queued":
             task.state = "canceled"
+            task.cancellation_confirmed = True
             task.logs.append("Task canceled before execution.")
+        elif task.state == "running":
+            task.state = "canceling"
+            task.logs.append("Cancellation requested. Waiting for workflow cancellation checkpoint.")
         else:
-            task.logs.append("Cancellation requested. Task will be marked canceled when current run returns.")
+            task.logs.append("Cancellation already requested.")
         self._refresh_task_queue_ui()
 
     def _retry_selected_task(self) -> None:
@@ -861,6 +883,9 @@ class ResearchLabPage(ttk.Frame):
             return
         task.state = "queued"
         task.cancel_requested = False
+        task.cancellation_reason = None
+        task.cancellation_confirmed = False
+        task.cancellation_token = CancellationToken()
         task.logs.append("Task re-queued for retry.")
         self._refresh_task_queue_ui()
         self._run_next_task()
@@ -2024,7 +2049,7 @@ class ResearchLabPage(ttk.Frame):
         }
         return entry_grid, exit_grid, core_grid
 
-    def _run_walk_forward_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
+    def _run_walk_forward_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
         entry_grid, exit_grid, core_grid = self._build_signal_grids(context, config)
         return run_walk_forward_backtest(
             tickers=list(context["tickers"]),
@@ -2047,9 +2072,10 @@ class ResearchLabPage(ttk.Frame):
             },
             stress_controls=dict(config.stress_controls),
             benchmarks=list(config.benchmark_selection),
+            cancellation_token=cancellation_token,
         )
 
-    def _run_optimization_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
+    def _run_optimization_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
         entry_grid, exit_grid, core_grid = self._build_signal_grids(context, config)
         return run_strategy_optimization(
             tickers=list(context["tickers"]),
@@ -2076,9 +2102,10 @@ class ResearchLabPage(ttk.Frame):
             },
             stress_controls=dict(config.stress_controls),
             benchmarks=list(config.benchmark_selection),
+            cancellation_token=cancellation_token,
         )
 
-    def _run_stress_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
+    def _run_stress_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
         return run_multi_signal_backtest(
             tickers=list(context["tickers"]),
             start_date=context["start_date"],
@@ -2098,9 +2125,10 @@ class ResearchLabPage(ttk.Frame):
             },
             stress_controls=dict(config.stress_controls),
             benchmarks=list(config.benchmark_selection),
+            cancellation_token=cancellation_token,
         )
 
-    def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
+    def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
         self._research_lab_dir.mkdir(parents=True, exist_ok=True)
         hypothesis_id = f"hyp_{uuid.uuid4().hex}"
         idea_record = self._build_idea_record(hypothesis_id=hypothesis_id, context=context)

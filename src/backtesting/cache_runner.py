@@ -13,6 +13,7 @@ import platform
 import socket
 import subprocess
 import sys
+import threading
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -121,6 +122,43 @@ DEFAULT_BENCHMARK_SELECTION: tuple[str, ...] = (
     BENCHMARK_EQUAL_WEIGHT_MOMENTUM,
     BENCHMARK_VOLATILITY_PARITY,
 )
+
+
+class TaskCancellationError(RuntimeError):
+    """Raised when a cooperative cancellation request interrupts a workflow."""
+
+
+class CancellationToken:
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._reason: str | None = None
+        self._requested_at: str | None = None
+
+    def cancel(self, reason: str = "Cancellation requested") -> None:
+        with self._lock:
+            if self._event.is_set():
+                return
+            self._reason = str(reason)
+            self._requested_at = datetime.now(timezone.utc).isoformat()
+            self._event.set()
+
+    @property
+    def is_canceled(self) -> bool:
+        return self._event.is_set()
+
+    def checkpoint(self, location: str) -> None:
+        if not self._event.is_set():
+            return
+        reason = self._reason or "Cancellation requested"
+        raise TaskCancellationError(f"{reason} at {location}")
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "requested": self.is_canceled,
+            "requested_at": self._requested_at,
+            "reason": self._reason,
+        }
 
 
 def _resolve_benchmark_selection(selected: list[str] | None) -> list[str]:
@@ -1556,7 +1594,10 @@ def run_walk_forward_backtest(
     strategy_key: str | None = None,
     prior_strategy_keys: list[str] | None = None,
     history_path: Path | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> str:
+    cancellation = cancellation_token or CancellationToken()
+    cancellation.checkpoint("run_walk_forward_backtest:start")
     random.seed(int(cv_seed))
     np.random.seed(int(cv_seed))
     combos, invalid_rows = generate_sweep_combinations(
@@ -1570,7 +1611,9 @@ def run_walk_forward_backtest(
     governance_payload = _build_governance_metadata(governance_metadata)
 
     max_lookback = 1
-    for combo in combos:
+    for combo_idx, combo in enumerate(combos):
+        if combo_idx % 10 == 0:
+            cancellation.checkpoint("run_walk_forward_backtest:combo_validation")
         entry_cfg = parse_entry_signal_config(
             str(combo["entry_signal"]),
             dict(combo.get("entry_signal_params", {})),
@@ -1585,6 +1628,7 @@ def run_walk_forward_backtest(
         )
         max_lookback = max(max_lookback, required_lookback_window(entry_cfg, exit_cfg))
 
+    cancellation.checkpoint("run_walk_forward_backtest:before_data_load")
     arrays = load_backtest_engine_arrays(
         tickers=tickers,
         start=datetime.combine(start_date, datetime.min.time()).isoformat(),
@@ -1630,6 +1674,7 @@ def run_walk_forward_backtest(
     elif train_bars is None or validation_bars is None or test_bars is None:
         raise ValueError("Either explicit bar windows or train/validation/test fractions are required")
 
+    cancellation.checkpoint("run_walk_forward_backtest:before_fold_generation")
     if cv_scheme == "cpcv":
         folds = build_cpcv_walk_forward_folds(
             total_bars=total_bars,
@@ -1769,6 +1814,7 @@ def run_walk_forward_backtest(
             if filtered_inner_folds:
                 nested_inner_folds[outer_fold.fold_id] = filtered_inner_folds
 
+    cancellation.checkpoint("run_walk_forward_backtest:before_walk_forward_optimization")
     wf_result = run_walk_forward_optimization(
         folds=folds,
         parameter_candidates=combos,
@@ -1894,6 +1940,7 @@ def run_walk_forward_backtest(
         "missing_required_checks": list(governance_payload["missing_required_checks"]),
     })
 
+    cancellation.checkpoint("run_walk_forward_backtest:before_manifest")
     manifest_parameters = {
         "tickers": list(tickers),
         "start_date": start_date.isoformat(),
@@ -1910,6 +1957,7 @@ def run_walk_forward_backtest(
         "split_policy": normalized_split_policy,
         "stress_controls": dict(stress_controls or {}),
         "governance_metadata": governance_payload,
+        "cancellation": cancellation.snapshot(),
     }
     manifest = _build_run_manifest(
         run_type="walk_forward",
@@ -1929,6 +1977,7 @@ def run_walk_forward_backtest(
         lineage={
             "lineage_parent_manifest": lineage_parent_manifest,
             "merged_leaderboard_sources": [str(run_dir / "fold_scores.csv"), str(run_dir / "fold_details.json")],
+            "cancellation": cancellation.snapshot(),
         },
         extra_fingerprint_payload={"lineage_parent_manifest": lineage_parent_manifest},
     )
@@ -2001,7 +2050,10 @@ def run_strategy_optimization(
     prune_on_lcb: bool = True,
     min_completed_for_pruning: int = 5,
     staged_budgets: list[dict[str, Any]] | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> str:
+    cancellation = cancellation_token or CancellationToken()
+    cancellation.checkpoint("run_strategy_optimization:start")
     random.seed(int(seed))
     np.random.seed(int(seed))
     combos, invalid_rows = generate_sweep_combinations(
@@ -2046,6 +2098,7 @@ def run_strategy_optimization(
         return RandomSampler()
 
     def _evaluate(params: dict[str, Any], period_fraction: float) -> dict[str, float]:
+        cancellation.checkpoint("run_strategy_optimization:evaluate_trial")
         combo = combos[int(params["combo_index"])]
         row = _execute_sweep_combo(
             {
@@ -2077,6 +2130,7 @@ def run_strategy_optimization(
     stage_summaries: list[dict[str, Any]] = []
     result: dict[str, Any] = {}
     for stage_idx, stage in enumerate(stages):
+        cancellation.checkpoint(f"run_strategy_optimization:stage_{stage_idx}")
         stage_label = str(stage.get("label", f"stage_{stage_idx + 1}"))
         stage_trials = int(stage.get("n_trials", n_trials))
         if stage_trials <= 0:
@@ -2090,6 +2144,7 @@ def run_strategy_optimization(
         else:
             parsed_stage_fractions = partial_period_fractions
 
+        cancellation.checkpoint(f"run_strategy_optimization:before_optimize_stage_{stage_idx}")
         result = optimize(
             space=stage_space,
             evaluate=_evaluate,
@@ -2173,6 +2228,7 @@ def run_strategy_optimization(
                 "objective_weights": dict(objective_weights or {}),
                 "overfitting_penalty": dict(overfitting_penalty or {}),
                 "strategy_key": strategy_key,
+                "cancellation": cancellation.snapshot(),
                 "prior_strategy_keys": list(prior_strategy_keys or []),
                 "history_path": str(optimization_history_path),
             },
@@ -2203,6 +2259,7 @@ def run_strategy_optimization(
             "partial_period_fractions": partial_period_fractions,
             "stress_controls": dict(stress_controls or {}),
             "governance_metadata": governance_payload,
+            "cancellation": cancellation.snapshot(),
         },
         data_snapshot=_build_sweep_snapshot_identifiers({
             "tickers": tickers,
@@ -2214,7 +2271,7 @@ def run_strategy_optimization(
         }),
         random_seed=int(seed),
         governance=governance_payload,
-        extra_fingerprint_payload={"best_trials": result.get("pareto_trials", [])},
+        extra_fingerprint_payload={"best_trials": result.get("pareto_trials", []), "cancellation": cancellation.snapshot()},
     )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     (run_dir / "artifact_metadata.json").write_text(json.dumps({
@@ -2845,8 +2902,12 @@ def run_multi_signal_backtest(
     stress_controls: dict[str, Any] | None = None,
     scenario_packs: list[str] | None = None,
     benchmarks: list[str] | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> str:
     """Run all selected entry/exit combinations with shared core parameters."""
+
+    cancellation = cancellation_token or CancellationToken()
+    cancellation.checkpoint("run_multi_signal_backtest:start")
 
     if not entry_signals:
         raise ValueError("At least one entry signal must be selected")
@@ -2859,8 +2920,10 @@ def run_multi_signal_backtest(
     selected_scenario_packs = [str(pack) for pack in (scenario_packs or [])]
     resolved_pack_templates = resolve_scenario_pack_templates(selected_scenario_packs)
 
-    for entry_signal in entry_signals:
-        for exit_signal in exit_signals:
+    for entry_idx, entry_signal in enumerate(entry_signals):
+        cancellation.checkpoint(f"run_multi_signal_backtest:entry_{entry_idx}")
+        for exit_idx, exit_signal in enumerate(exit_signals):
+            cancellation.checkpoint(f"run_multi_signal_backtest:entry_{entry_idx}_exit_{exit_idx}")
             report = run_time_series_momentum_backtest(
                 tickers=tickers,
                 start_date=start_date,
@@ -2943,6 +3006,7 @@ def run_multi_signal_backtest(
 
     ranked_rows = sorted(rows, key=lambda row: (bool(row.get("stress_passed", False)), float(row["sharpe"])), reverse=True)
     leaderboard_dir = _persist_multi_signal_outputs(ranked_rows)
+    (leaderboard_dir / "cancellation.json").write_text(json.dumps(cancellation.snapshot(), indent=2), encoding="utf-8")
 
     summary_lines = [
         "Multi-signal backtest completed.",
@@ -2957,6 +3021,7 @@ def run_multi_signal_backtest(
             + f" (available: {', '.join(list_scenario_pack_templates())})"
         ),
         f"Scenario pack templates expanded: {len(resolved_pack_templates)}",
+        f"Cancellation requested: {cancellation.snapshot().get('requested', False)}",
         "Ranked combinations (by sharpe):",
     ]
     for idx, row in enumerate(ranked_rows, start=1):
