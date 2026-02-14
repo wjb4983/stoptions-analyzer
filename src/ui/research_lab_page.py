@@ -5,7 +5,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -108,6 +108,7 @@ class ResearchLabPage(ttk.Frame):
         self._hypothesis_rubric_templates_path = HYPOTHESIS_RUBRIC_TEMPLATES_PATH
         self._rubric_templates = self._load_rubric_templates()
         self._workflow_presets = self._load_workflow_presets()
+        self._wizard_comments: list[dict[str, str]] = []
 
 
         ttk.Label(self, text="Research Lab", font=("Arial", 18, "bold")).pack(pady=(12, 8))
@@ -821,10 +822,47 @@ class ResearchLabPage(ttk.Frame):
         ttk.Label(frame, text="[STEP 5] REVIEW + PROMOTE/REJECT", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
         ttk.Label(frame, text="Review notes").grid(row=1, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.wizard_review_notes_var).grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        owner_row = ttk.Frame(frame)
+        owner_row.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        owner_row.columnconfigure(1, weight=1)
+        ttk.Label(owner_row, text="Note owner").grid(row=0, column=0, sticky="w")
+        self.wizard_review_owner_var = tk.StringVar(value="")
+        ttk.Entry(owner_row, textvariable=self.wizard_review_owner_var).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        ttk.Button(owner_row, text="Append note", command=self._wizard_append_review_note).grid(row=0, column=2, padx=(8, 0))
+        self.wizard_review_log_text = tk.Text(frame, height=5)
+        self.wizard_review_log_text.grid(row=4, column=0, sticky="ew", pady=(0, 6))
+        self.wizard_review_log_text.configure(state="disabled")
         decision_row = ttk.Frame(frame)
-        decision_row.grid(row=3, column=0, sticky="w")
+        decision_row.grid(row=5, column=0, sticky="w")
         ttk.Radiobutton(decision_row, text="Promote", value="promote", variable=self.wizard_promotion_decision_var).pack(side="left")
         ttk.Radiobutton(decision_row, text="Reject", value="reject", variable=self.wizard_promotion_decision_var).pack(side="left", padx=(8, 0))
+
+    def _wizard_append_review_note(self) -> None:
+        note = self.wizard_review_notes_var.get().strip()
+        if not note:
+            return
+        owner = self.wizard_review_owner_var.get().strip() or self.wizard_idea_owner_var.get().strip() or "research_lab_ui"
+        entry = {
+            "owner": owner,
+            "note": note,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+        self._wizard_comments.append(entry)
+        self.wizard_review_notes_var.set("")
+        self._wizard_render_comments_log()
+        self._wizard_persist_state()
+
+    def _wizard_render_comments_log(self) -> None:
+        if not hasattr(self, "wizard_review_log_text"):
+            return
+        self.wizard_review_log_text.configure(state="normal")
+        self.wizard_review_log_text.delete("1.0", tk.END)
+        for row in self._wizard_comments:
+            self.wizard_review_log_text.insert(
+                tk.END,
+                f"[{row.get('timestamp', '')}] {row.get('owner', 'research_lab_ui')}: {row.get('note', '')}\n",
+            )
+        self.wizard_review_log_text.configure(state="disabled")
 
     def _wizard_attach_state_traces(self) -> None:
         tracked_vars = (
@@ -980,6 +1018,8 @@ class ResearchLabPage(ttk.Frame):
             f"idea={self.wizard_idea_name_var.get().strip() or 'n/a'} | "
             f"decision={decision} | notes={note}"
         )
+        if note:
+            self._wizard_append_review_note()
         self._wizard_persist_state()
 
     def _wizard_state_payload(self) -> dict[str, Any]:
@@ -1010,6 +1050,7 @@ class ResearchLabPage(ttk.Frame):
             "run_stress": bool(self.wizard_run_stress_var.get()),
             "review_notes": self.wizard_review_notes_var.get().strip(),
             "promotion_decision": self.wizard_promotion_decision_var.get().strip(),
+            "wizard_comments": list(self._wizard_comments),
         }
 
     def _wizard_persist_state(self) -> None:
@@ -1049,6 +1090,10 @@ class ResearchLabPage(ttk.Frame):
         self.wizard_run_stress_var.set(bool(payload.get("run_stress", self.wizard_run_stress_var.get())))
         self.wizard_review_notes_var.set(str(payload.get("review_notes", self.wizard_review_notes_var.get())))
         self.wizard_promotion_decision_var.set(str(payload.get("promotion_decision", self.wizard_promotion_decision_var.get())))
+        saved_comments = payload.get("wizard_comments", [])
+        if isinstance(saved_comments, list):
+            self._wizard_comments = [dict(row) for row in saved_comments if isinstance(row, dict)]
+        self._wizard_render_comments_log()
         loaded_step = int(payload.get("current_step", 0))
         self._wizard_step_index = max(0, min(loaded_step, len(self._wizard_steps) - 1))
 
@@ -1655,6 +1700,31 @@ class ResearchLabPage(ttk.Frame):
                     "commented_at": generated_at,
                 }
             ],
+            "comments": [
+                {
+                    "owner": str(item.get("owner", "research_lab_ui")),
+                    "note": str(item.get("note", "")),
+                    "timestamp": str(item.get("timestamp", generated_at)),
+                }
+                for item in getattr(self, "_wizard_comments", [])
+                if str(item.get("note", "")).strip()
+            ],
+            "review_actions": [
+                {
+                    "owner": str(record.get("results_review", {}).get("reviewer", "research_lab_ui")),
+                    "action": "review_completed",
+                    "status": str(record.get("results_review", {}).get("status", "pending")),
+                    "timestamp": generated_at,
+                }
+            ],
+            "decision_log": [
+                {
+                    "owner": str(record.get("results_review", {}).get("reviewer", "research_lab_ui")),
+                    "decision": str(record.get("decision", "pending")),
+                    "reason": str(record.get("decision_reason", "")),
+                    "timestamp": generated_at,
+                }
+            ],
             "promotion_history": [
                 {
                     "state": str(record.get("promotion_or_rejection", {}).get("state", "pending")),
@@ -1674,7 +1744,15 @@ class ResearchLabPage(ttk.Frame):
             except (OSError, json.JSONDecodeError):
                 existing = {}
             if isinstance(existing, dict):
-                for key in ("run_references", "gate_outcomes", "reviewer_comments", "promotion_history"):
+                for key in (
+                    "run_references",
+                    "gate_outcomes",
+                    "reviewer_comments",
+                    "promotion_history",
+                    "comments",
+                    "review_actions",
+                    "decision_log",
+                ):
                     merged = list(existing.get(key, []))
                     merged.extend(manifest[key])
                     deduped: list[dict[str, Any]] = []
