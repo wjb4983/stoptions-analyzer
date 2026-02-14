@@ -26,6 +26,7 @@ CORE_TEST_FILES = {
     "tests/test_quality_gate_artifacts.py",
     "tests/test_benchmark_bundle.py",
     "tests/test_governance_artifact_validator.py",
+    "tests/test_performance_quality_thresholds.py",
 }
 
 SLOW_TEST_PATH_SNIPPETS = (
