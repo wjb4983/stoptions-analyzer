@@ -20,6 +20,7 @@ from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PR
 from ui.backtesting_insights import (
     build_guardrails,
     build_scenario_comparison,
+    compare_robustness_frontiers,
     fold_variance_rows,
     metric_deltas,
     parameter_diffs,
@@ -806,10 +807,12 @@ class BacktestingPage(ttk.Frame):
         params_frame = ttk.Labelframe(cmp_pane, text="Parameter Diffs")
         variance_frame = ttk.Labelframe(cmp_pane, text="Fold-by-fold WF Variance")
         scenario_frame = ttk.Labelframe(cmp_pane, text="Scenario Comparison")
+        frontier_frame = ttk.Labelframe(cmp_pane, text="Robustness Frontier")
         cmp_pane.add(metrics_frame, weight=1)
         cmp_pane.add(params_frame, weight=1)
         cmp_pane.add(variance_frame, weight=1)
         cmp_pane.add(scenario_frame, weight=1)
+        cmp_pane.add(frontier_frame, weight=1)
         metrics_frame.columnconfigure(0, weight=1)
         metrics_frame.rowconfigure(0, weight=1)
         params_frame.columnconfigure(0, weight=1)
@@ -826,6 +829,10 @@ class BacktestingPage(ttk.Frame):
         scenario_frame.rowconfigure(0, weight=1)
         self.scenario_compare_tree = ttk.Treeview(scenario_frame, show="headings", height=12)
         self.scenario_compare_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        frontier_frame.columnconfigure(0, weight=1)
+        frontier_frame.rowconfigure(0, weight=1)
+        self.frontier_compare_tree = ttk.Treeview(frontier_frame, show="headings", height=12)
+        self.frontier_compare_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
 
         heatmap_tab = ttk.Frame(self.section_notebook)
         heatmap_tab.columnconfigure(0, weight=1)
@@ -1519,6 +1526,7 @@ class BacktestingPage(ttk.Frame):
             "fold_summary",
             "capacity_frontier",
             "stress_scenarios",
+            "robustness_frontier",
         ]
         for stem in stems:
             rows = self._load_rows(run_dir, stem)
@@ -1611,6 +1619,14 @@ class BacktestingPage(ttk.Frame):
         )
         self._set_tree_data(self.fold_variance_tree, fold_rows[:120])
 
+        base_frontier = self._read_json(base_run / "robustness_frontier.json")
+        other_frontier = self._read_json(other_run / "robustness_frontier.json")
+        frontier_rows = compare_robustness_frontiers(
+            base_frontier if isinstance(base_frontier, dict) else {},
+            other_frontier if isinstance(other_frontier, dict) else {},
+        )
+        self._set_tree_data(self.frontier_compare_tree, frontier_rows[:120])
+
     def _render_guardrails(self, run_dir: Path) -> None:
         for child in self.guardrail_frame.winfo_children():
             child.destroy()
@@ -1629,6 +1645,7 @@ class BacktestingPage(ttk.Frame):
             "weak_spa": str(run_dir / "robustness_report.json"),
             "alpha_not_robust": str(run_dir / "robustness_report.json"),
             "default": str(run_dir / "manifest.json"),
+            "robustness_frontier": str(run_dir / "robustness_frontier.json"),
         }
         badges = build_guardrails(metrics, fold_rows=rows, trade_count=trade_count, robustness=robustness_payload, evidence_links=evidence_links)
         scenario_payload = read_stress_scenarios(run_dir)

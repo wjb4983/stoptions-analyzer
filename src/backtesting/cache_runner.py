@@ -3949,6 +3949,40 @@ def _write_capacity_frontier_artifacts(*, run_dir: Path, robustness_report: dict
         for row in normalized:
             writer.writerow(row)
 
+    max_abs_alpha = max(abs(float(row.get("expected_alpha_net_cost_bps", 0.0))) for row in normalized)
+    scale = max(max_abs_alpha, 1e-9)
+    frontier_summary: list[dict[str, float]] = []
+    for row in normalized:
+        alpha = float(row.get("expected_alpha_net_cost_bps", 0.0))
+        sharpe = float(row.get("projected_post_cost_sharpe", 0.0))
+        robustness_score = 0.6 * (alpha / scale) + 0.4 * sharpe
+        frontier_summary.append(
+            {
+                "aum_scale": float(row.get("aum_scale", 0.0)),
+                "expected_alpha_net_cost_bps": alpha,
+                "projected_post_cost_sharpe": sharpe,
+                "participation_rate": float(row.get("participation_rate", 0.0)),
+                "robustness_score": robustness_score,
+            }
+        )
+    frontier_summary.sort(key=lambda item: float(item["aum_scale"]))
+    (run_dir / "robustness_frontier.json").write_text(
+        json.dumps({"schema_version": "1.0", "frontier": frontier_summary}, indent=2)
+    )
+    with (run_dir / "robustness_frontier.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "aum_scale",
+                "expected_alpha_net_cost_bps",
+                "projected_post_cost_sharpe",
+                "participation_rate",
+                "robustness_score",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(frontier_summary)
+
     chart_series = capacity.get("capacity_chart_series", {}) if isinstance(capacity, dict) else {}
     if isinstance(chart_series, dict) and chart_series:
         (run_dir / "capacity_frontier_series.json").write_text(json.dumps(chart_series, indent=2))

@@ -327,6 +327,58 @@ def build_scenario_comparison(base_payload: dict[str, Any], other_payload: dict[
     return merged
 
 
+def build_robustness_frontier_view(frontier_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = frontier_payload.get("frontier", []) if isinstance(frontier_payload, dict) else []
+    if not isinstance(rows, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        normalized.append(
+            {
+                "aum_scale": float(row.get("aum_scale", 0.0)),
+                "expected_alpha_net_cost_bps": float(row.get("expected_alpha_net_cost_bps", 0.0)),
+                "projected_post_cost_sharpe": float(row.get("projected_post_cost_sharpe", 0.0)),
+                "participation_rate": float(row.get("participation_rate", 0.0)),
+                "robustness_score": float(row.get("robustness_score", 0.0)),
+            }
+        )
+    normalized.sort(key=lambda row: float(row["aum_scale"]))
+    return normalized
+
+
+def compare_robustness_frontiers(base_payload: dict[str, Any], other_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    base_rows = {float(row["aum_scale"]): row for row in build_robustness_frontier_view(base_payload)}
+    other_rows = {float(row["aum_scale"]): row for row in build_robustness_frontier_view(other_payload)}
+    merged: list[dict[str, Any]] = []
+    for scale in sorted(set(base_rows) | set(other_rows)):
+        a = base_rows.get(scale, {})
+        b = other_rows.get(scale, {})
+        base_alpha = float(a.get("expected_alpha_net_cost_bps", 0.0))
+        other_alpha = float(b.get("expected_alpha_net_cost_bps", 0.0))
+        base_sharpe = float(a.get("projected_post_cost_sharpe", 0.0))
+        other_sharpe = float(b.get("projected_post_cost_sharpe", 0.0))
+        base_score = float(a.get("robustness_score", 0.0))
+        other_score = float(b.get("robustness_score", 0.0))
+        merged.append(
+            {
+                "aum_scale": scale,
+                "base_alpha_bps": base_alpha,
+                "compare_alpha_bps": other_alpha,
+                "delta_alpha_bps": other_alpha - base_alpha,
+                "base_sharpe": base_sharpe,
+                "compare_sharpe": other_sharpe,
+                "delta_sharpe": other_sharpe - base_sharpe,
+                "base_robustness": base_score,
+                "compare_robustness": other_score,
+                "delta_robustness": other_score - base_score,
+            }
+        )
+    merged.sort(key=lambda row: abs(float(row["delta_alpha_bps"])), reverse=True)
+    return merged
+
+
 def read_stress_scenarios(run_dir: Path) -> dict[str, Any]:
     path = run_dir / "stress_scenarios.json"
     if not path.exists():
