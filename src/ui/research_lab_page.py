@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import shutil
 import json
 import re
 import uuid
@@ -88,6 +89,8 @@ class ResearchTask:
     state: str = "queued"
     logs: list[str] | None = None
     cancel_requested: bool = False
+    research_pack_path: str | None = None
+    workflow_output: str | None = None
 
     def __post_init__(self) -> None:
         if self.logs is None:
@@ -192,6 +195,13 @@ class ResearchLabPage(ttk.Frame):
 
         output_frame = ttk.LabelFrame(self, text="Research Lab Output")
         output_frame.pack(fill="both", expand=True, padx=40, pady=(4, 20))
+        output_controls = ttk.Frame(output_frame)
+        output_controls.pack(fill="x", padx=8, pady=(8, 0))
+        ttk.Button(
+            output_controls,
+            text="Export Research Pack",
+            command=self.export_research_pack,
+        ).pack(side="right")
         self.output_text = tk.Text(output_frame, height=8, wrap="word")
         self.output_text.pack(fill="both", expand=True, padx=8, pady=8)
 
@@ -374,11 +384,169 @@ class ResearchLabPage(ttk.Frame):
         else:
             task.state = "succeeded"
             task.logs.append(output_text)
+            task.workflow_output = output_text
             self._append_output(f"[{task.label}] Succeeded.")
             self._refresh_governance_dashboard_from_output(output_text)
+            pack_path = self._emit_research_pack(task, output_text)
+            if pack_path is not None:
+                task.research_pack_path = str(pack_path)
+                message = f"Research pack exported: {pack_path}"
+                task.logs.append(message)
+                self._append_output(f"[{task.label}] {message}")
         self._active_task_id = None
         self._refresh_task_queue_ui()
         self._run_next_task()
+
+    def export_research_pack(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            task = next((item for item in reversed(self._task_queue) if item.state == "succeeded"), None)
+        if task is None:
+            messagebox.showinfo("Export Research Pack", "Run a workflow first to export a research pack.")
+            return
+        if task.state != "succeeded" or not task.logs:
+            messagebox.showinfo("Export Research Pack", "Selected task has not completed successfully.")
+            return
+
+        output_text = task.workflow_output or (str(task.logs[-1]) if task.logs else "")
+        pack_path = self._emit_research_pack(task, output_text)
+        if pack_path is None:
+            messagebox.showinfo("Export Research Pack", "Unable to export research pack for this task.")
+            return
+        task.research_pack_path = str(pack_path)
+        messagebox.showinfo("Export Research Pack", f"Research pack exported to:\n{pack_path}")
+
+    def _emit_research_pack(self, task: ResearchTask, output_text: str) -> Path | None:
+        manifest_path = self._extract_manifest_path_from_output(output_text)
+        run_dir = manifest_path.parent if manifest_path is not None else None
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_label = re.sub(r"[^a-z0-9]+", "_", task.label.lower()).strip("_") or "workflow"
+        if run_dir is not None:
+            pack_dir = run_dir / f"research_pack_{timestamp}"
+        else:
+            pack_dir = self._research_lab_dir / "research_packs" / f"{safe_label}_{timestamp}"
+        pack_dir.mkdir(parents=True, exist_ok=True)
+
+        source_manifest: dict[str, Any] = {}
+        if manifest_path is not None and manifest_path.exists():
+            try:
+                source_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                source_manifest = {}
+
+        metrics_tables = self._build_metrics_tables_payload(run_dir, source_manifest)
+        stress_outputs = self._build_stress_outputs_payload(run_dir)
+        parameter_set = self._build_parameter_set_payload(source_manifest)
+
+        packaged_manifest = {
+            "task": {
+                "id": task.task_id,
+                "label": task.label,
+                "state": task.state,
+            },
+            "generated_at": datetime.now().isoformat(),
+            "source_manifest_path": str(manifest_path) if manifest_path else None,
+            "source_run_dir": str(run_dir) if run_dir else None,
+            "included_files": [
+                "manifest.json",
+                "metrics_tables.json",
+                "stress_outputs.json",
+                "parameter_set.json",
+                "summary.md",
+            ],
+        }
+
+        (pack_dir / "manifest.json").write_text(json.dumps(packaged_manifest, indent=2), encoding="utf-8")
+        (pack_dir / "metrics_tables.json").write_text(json.dumps(metrics_tables, indent=2), encoding="utf-8")
+        (pack_dir / "stress_outputs.json").write_text(json.dumps(stress_outputs, indent=2), encoding="utf-8")
+        (pack_dir / "parameter_set.json").write_text(json.dumps(parameter_set, indent=2), encoding="utf-8")
+        (pack_dir / "summary.md").write_text(
+            self._build_research_pack_summary(task, output_text, metrics_tables, stress_outputs, parameter_set),
+            encoding="utf-8",
+        )
+
+        if manifest_path is not None and manifest_path.exists():
+            shutil.copy2(manifest_path, pack_dir / "source_manifest.json")
+        return pack_dir
+
+    def _build_metrics_tables_payload(self, run_dir: Path | None, manifest_payload: dict[str, Any]) -> dict[str, Any]:
+        payload: dict[str, Any] = {"tables": {}, "manifest_metrics": manifest_payload.get("metrics", {})}
+        if run_dir is None:
+            return payload
+        for file_name in ("metrics.json", "aggregate_metrics.json", "leaderboard.json", "fold_summary.json"):
+            path = run_dir / file_name
+            if not path.exists():
+                continue
+            try:
+                payload["tables"][file_name] = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload["tables"][file_name] = {"error": f"failed to parse {file_name}"}
+        return payload
+
+    def _build_stress_outputs_payload(self, run_dir: Path | None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"stress_outputs": {}}
+        if run_dir is None:
+            return payload
+        for file_name in ("stress_scenarios.json", "risk_diagnostics.json", "robustness_frontier.json"):
+            path = run_dir / file_name
+            if not path.exists():
+                continue
+            try:
+                payload["stress_outputs"][file_name] = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload["stress_outputs"][file_name] = {"error": f"failed to parse {file_name}"}
+        return payload
+
+    def _build_parameter_set_payload(self, manifest_payload: dict[str, Any]) -> dict[str, Any]:
+        if not manifest_payload:
+            return {"parameters": {}}
+        parameters = manifest_payload.get("parameters", {})
+        return {
+            "parameters": parameters if isinstance(parameters, dict) else {},
+            "strategy": manifest_payload.get("strategy"),
+            "timeframe": manifest_payload.get("timeframe"),
+        }
+
+    def _build_research_pack_summary(
+        self,
+        task: ResearchTask,
+        output_text: str,
+        metrics_tables: dict[str, Any],
+        stress_outputs: dict[str, Any],
+        parameter_set: dict[str, Any],
+    ) -> str:
+        metric_files = sorted(metrics_tables.get("tables", {}).keys()) if isinstance(metrics_tables.get("tables"), dict) else []
+        stress_files = sorted(stress_outputs.get("stress_outputs", {}).keys()) if isinstance(stress_outputs.get("stress_outputs"), dict) else []
+        parameter_keys = sorted((parameter_set.get("parameters") or {}).keys()) if isinstance(parameter_set.get("parameters"), dict) else []
+        lines = [
+            f"# Research Pack Summary: {task.label}",
+            "",
+            "## Overview",
+            f"- Task ID: `{task.task_id}`",
+            f"- Status: `{task.state}`",
+            f"- Generated: `{datetime.now().isoformat()}`",
+            "",
+            "## Included Components",
+            "- manifest.json",
+            "- metrics_tables.json",
+            "- stress_outputs.json",
+            "- parameter_set.json",
+            "- summary.md",
+            "",
+            "## Metrics Tables",
+            f"- Files captured: {', '.join(metric_files) if metric_files else 'None detected'}",
+            "",
+            "## Stress Outputs",
+            f"- Files captured: {', '.join(stress_files) if stress_files else 'None detected'}",
+            "",
+            "## Parameter Set",
+            f"- Parameter keys: {', '.join(parameter_keys[:20]) if parameter_keys else 'None detected'}",
+            "",
+            "## Plain-English Result Summary",
+            f"The workflow '{task.label}' completed and produced the output below.\n\n{output_text.strip()}",
+            "",
+        ]
+        return "\n".join(lines)
 
     def _refresh_governance_dashboard_from_output(self, output_text: str) -> None:
         governance_payload = self._load_governance_payload_from_output(output_text)
