@@ -5,6 +5,7 @@ STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
 HYPOTHESIS_RUBRIC_TEMPLATES_PATH = CONFIG_DIR / "hypothesis_rubric_templates.json"
+RESEARCH_LAB_PRESETS_PATH = Path(__file__).resolve().parent.parent / "config" / "research_lab_presets.json"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
 HORIZON_CONFIGS = [

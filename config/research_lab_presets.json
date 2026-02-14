@@ -1,0 +1,83 @@
+{
+  "default_preset": "balanced_baseline",
+  "presets": {
+    "balanced_baseline": {
+      "label": "Balanced Baseline",
+      "description": "General-purpose baseline with diversified entry/exit signals, moderate optimization budget, and balanced stress settings.",
+      "entry_signals": ["ts_momentum", "breakout"],
+      "exit_signals": ["none", "momentum_flip"],
+      "optimization": {
+        "n_trials": 20,
+        "sampler": "tpe"
+      },
+      "walk_forward": {
+        "train_fraction": 0.7,
+        "validation_fraction": 0.15,
+        "test_fraction": 0.15,
+        "step_fraction": 0.15
+      },
+      "stress_controls": {
+        "enable_historical_replay_regimes": true,
+        "historical_window_fraction": 0.2,
+        "historical_replay_window_bars": 20,
+        "synthetic_jump_magnitude": 0.02,
+        "synthetic_jump_interval": 7,
+        "synthetic_vol_cluster_multiplier": 1.6,
+        "overlay_spread_multiplier": 2.5,
+        "overlay_liquidity_multiplier": 0.4
+      }
+    },
+    "fast_iteration": {
+      "label": "Fast Iteration",
+      "description": "Smaller optimization/search budget and quicker WF cadence for rapid hypothesis triage.",
+      "entry_signals": ["ts_momentum"],
+      "exit_signals": ["none", "trailing_stop"],
+      "optimization": {
+        "n_trials": 8,
+        "sampler": "random"
+      },
+      "walk_forward": {
+        "train_fraction": 0.6,
+        "validation_fraction": 0.2,
+        "test_fraction": 0.2,
+        "step_fraction": 0.1
+      },
+      "stress_controls": {
+        "enable_historical_replay_regimes": false,
+        "historical_window_fraction": 0.15,
+        "historical_replay_window_bars": 12,
+        "synthetic_jump_magnitude": 0.01,
+        "synthetic_jump_interval": 10,
+        "synthetic_vol_cluster_multiplier": 1.2,
+        "overlay_spread_multiplier": 1.8,
+        "overlay_liquidity_multiplier": 0.6
+      }
+    },
+    "robustness_hardening": {
+      "label": "Robustness Hardening",
+      "description": "Higher optimization depth and harsher synthetic + overlay stress controls for robustness validation.",
+      "entry_signals": ["ts_momentum", "ma_trend", "breakout"],
+      "exit_signals": ["momentum_flip", "trailing_stop", "max_hold"],
+      "optimization": {
+        "n_trials": 40,
+        "sampler": "bayesian"
+      },
+      "walk_forward": {
+        "train_fraction": 0.65,
+        "validation_fraction": 0.2,
+        "test_fraction": 0.15,
+        "step_fraction": 0.2
+      },
+      "stress_controls": {
+        "enable_historical_replay_regimes": true,
+        "historical_window_fraction": 0.3,
+        "historical_replay_window_bars": 30,
+        "synthetic_jump_magnitude": 0.035,
+        "synthetic_jump_interval": 5,
+        "synthetic_vol_cluster_multiplier": 2.1,
+        "overlay_spread_multiplier": 3.2,
+        "overlay_liquidity_multiplier": 0.3
+      }
+    }
+  }
+}
