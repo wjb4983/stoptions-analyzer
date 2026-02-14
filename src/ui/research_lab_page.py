@@ -42,6 +42,7 @@ class ResearchWorkflowConfig:
     validation_fraction: float
     test_fraction: float
     step_fraction: float
+    walk_forward_split_policy: str
     stress_controls: dict[str, object]
 
 
@@ -59,6 +60,7 @@ DEFAULT_RESEARCH_WORKFLOW_PRESETS: dict[str, Any] = {
                 "validation_fraction": 0.15,
                 "test_fraction": 0.15,
                 "step_fraction": 0.15,
+                "split_policy": "calendar-based",
             },
             "stress_controls": {
                 "enable_historical_replay_regimes": True,
@@ -385,6 +387,7 @@ class ResearchLabPage(ttk.Frame):
         self.wf_validation_fraction_var = tk.StringVar(value="0.15")
         self.wf_test_fraction_var = tk.StringVar(value="0.15")
         self.wf_step_fraction_var = tk.StringVar(value="0.15")
+        self.wf_split_policy_var = tk.StringVar(value="calendar-based")
 
         self.stress_enable_historical_replay_var = tk.BooleanVar(value=True)
         self.stress_historical_window_fraction_var = tk.StringVar(value="0.20")
@@ -473,6 +476,16 @@ class ResearchLabPage(ttk.Frame):
         ttk.Entry(wf_row, textvariable=self.wf_test_fraction_var, width=6).pack(side="left")
         ttk.Label(wf_row, text=" / ").pack(side="left")
         ttk.Entry(wf_row, textvariable=self.wf_step_fraction_var, width=6).pack(side="left")
+
+        row += 1
+        ttk.Label(controls, text="Walk-forward split policy").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        ttk.Combobox(
+            controls,
+            textvariable=self.wf_split_policy_var,
+            values=("calendar-based", "volatility-regime-stratified", "event-exclusion windows"),
+            state="readonly",
+            width=32,
+        ).grid(row=row, column=1, sticky="w", padx=8, pady=5)
 
         row += 1
         ttk.Label(controls, text="Stress: Replay/Jump/Overlay").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -984,6 +997,7 @@ class ResearchLabPage(ttk.Frame):
         self.wf_validation_fraction_var.set(f"{float(walk_forward.get('validation_fraction', self.wf_validation_fraction_var.get())):.2f}")
         self.wf_test_fraction_var.set(f"{float(walk_forward.get('test_fraction', self.wf_test_fraction_var.get())):.2f}")
         self.wf_step_fraction_var.set(f"{float(walk_forward.get('step_fraction', self.wf_step_fraction_var.get())):.2f}")
+        self.wf_split_policy_var.set(str(walk_forward.get("split_policy", self.wf_split_policy_var.get())))
 
         self.stress_enable_historical_replay_var.set(bool(stress_controls.get("enable_historical_replay_regimes", self.stress_enable_historical_replay_var.get())))
         self.stress_historical_window_fraction_var.set(f"{float(stress_controls.get('historical_window_fraction', self.stress_historical_window_fraction_var.get())):.2f}")
@@ -1077,6 +1091,11 @@ class ResearchLabPage(ttk.Frame):
             messagebox.showinfo("Invalid input", "Walk-forward train + validation + test fractions must sum to 1.0.")
             return None
 
+        split_policy = self.wf_split_policy_var.get().strip().lower()
+        if split_policy not in {"calendar-based", "volatility-regime-stratified", "event-exclusion windows"}:
+            messagebox.showinfo("Invalid input", "Walk-forward split policy selection is invalid.")
+            return None
+
         stress_controls = {
             "enable_historical_replay_regimes": bool(self.stress_enable_historical_replay_var.get()),
             "historical_window_fraction": float(parse_float(self.stress_historical_window_fraction_var.get()) or 0.20),
@@ -1103,6 +1122,7 @@ class ResearchLabPage(ttk.Frame):
             validation_fraction=validation_fraction,
             test_fraction=test_fraction,
             step_fraction=step_fraction,
+            walk_forward_split_policy=split_policy,
             stress_controls=stress_controls,
         )
 
@@ -1134,6 +1154,7 @@ class ResearchLabPage(ttk.Frame):
             validation_fraction=config.validation_fraction,
             test_fraction=config.test_fraction,
             step_fraction=config.step_fraction,
+            split_policy=config.walk_forward_split_policy,
             governance_metadata={"promotion_state": "research", "approval_status": "pending", "workflow_preset": config.preset_name},
             stress_controls=dict(config.stress_controls),
         )

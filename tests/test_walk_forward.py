@@ -255,6 +255,9 @@ def test_run_walk_forward_backtest_persists_fold_artifacts(monkeypatch, tmp_path
     assert (run_dirs[0] / "fold_boundaries.csv").exists()
     assert (run_dirs[0] / "fold_performance.csv").exists()
     assert (run_dirs[0] / "validation" / "report.json").exists()
+    split_metadata = __import__("json").loads((run_dirs[0] / "split_metadata.json").read_text())
+    assert split_metadata
+    assert split_metadata[0]["metadata"]["split_policy"] == "calendar-based"
     summary = (run_dirs[0] / "fold_summary.json").read_text()
     assert "excluded_ranges" in summary
     assert "leakage_checks" in summary
@@ -394,6 +397,57 @@ def test_run_walk_forward_backtest_manifest_includes_lineage_parent(monkeypatch,
     manifest = __import__("json").loads((run_dir / "manifest.json").read_text())
     assert manifest["lineage"]["lineage_parent_manifest"] == "/tmp/ancestor-manifest.json"
 
+
+
+
+def test_run_walk_forward_backtest_supports_split_policies_and_manifest(monkeypatch, tmp_path) -> None:
+    cache_runner.BACKTEST_OUTPUT_DIR = tmp_path / "outputs"
+
+    class _Arrays:
+        def __init__(self) -> None:
+            import numpy as np
+            from datetime import datetime, timedelta
+
+            self.close_prices = np.ones((80, 1), dtype=float)
+            self.missing_mask = np.zeros((80, 1), dtype=bool)
+            t0 = datetime(2024, 1, 1)
+            self.date_index = [t0 + timedelta(minutes=i) for i in range(80)]
+
+    monkeypatch.setattr(cache_runner, "load_backtest_engine_arrays", lambda **kwargs: _Arrays())
+
+    class _Result:
+        def __init__(self, n: int) -> None:
+            import numpy as np
+
+            self.metrics = {"sharpe": 1.0, "total_return": 0.01 * n}
+            self.equity_curve = np.linspace(1.0, 1.0 + (0.01 * n), num=n)
+
+    monkeypatch.setattr(cache_runner, "build_targets", lambda **kwargs: kwargs["close_prices"] * 0.0)
+    monkeypatch.setattr(cache_runner, "backtest_vectorized", lambda **kwargs: _Result(kwargs["prices"].shape[0]))
+
+    cache_runner.run_walk_forward_backtest(
+        tickers=["AAA"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 2),
+        cache_root=tmp_path / "cache",
+        entry_grid={"ts_momentum": [{"lookback_days": 5, "skip_days": 1}]},
+        exit_grid={"none": [{}]},
+        core_grid={"lookback_days": [5], "skip_days": [1], "costs_bps": [1.0]},
+        train_fraction=0.6,
+        validation_fraction=0.2,
+        test_fraction=0.2,
+        step_fraction=0.2,
+        split_policy="event-exclusion windows",
+        stress_controls={"event_exclusion_windows": [[2, 4], [30, 31]]},
+    )
+
+    run_dir = sorted((tmp_path / "outputs").glob("tsmom_walk_forward_*"))[-1]
+    split_metadata = __import__("json").loads((run_dir / "split_metadata.json").read_text())
+    assert split_metadata[0]["metadata"]["split_policy"] == "event-exclusion windows"
+    assert "event_exclusion_windows" in split_metadata[0]["metadata"]
+
+    manifest = __import__("json").loads((run_dir / "manifest.json").read_text())
+    assert manifest["parameters"]["split_policy"] == "event-exclusion windows"
 
 def test_build_cpcv_walk_forward_folds_generates_combinatorial_partitions() -> None:
     folds = build_cpcv_walk_forward_folds(total_bars=60, n_groups=6, n_test_groups=2)

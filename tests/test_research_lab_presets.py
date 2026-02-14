@@ -20,6 +20,7 @@ def test_load_workflow_presets_uses_repo_config(monkeypatch, tmp_path):
                     "validation_fraction": 0.2,
                     "test_fraction": 0.2,
                     "step_fraction": 0.1,
+                    "split_policy": "volatility-regime-stratified",
                 },
                 "stress_controls": {"enable_historical_replay_regimes": False},
             }
@@ -33,6 +34,7 @@ def test_load_workflow_presets_uses_repo_config(monkeypatch, tmp_path):
 
     assert loaded["default_preset"] == "fast_iteration"
     assert loaded["presets"]["fast_iteration"]["optimization"]["n_trials"] == 5
+    assert loaded["presets"]["fast_iteration"]["walk_forward"]["split_policy"] == "volatility-regime-stratified"
 
 
 def test_load_workflow_presets_falls_back_on_invalid_payload(monkeypatch, tmp_path):

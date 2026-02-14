@@ -4,8 +4,14 @@
     "balanced_baseline": {
       "label": "Balanced Baseline",
       "description": "General-purpose baseline with diversified entry/exit signals, moderate optimization budget, and balanced stress settings.",
-      "entry_signals": ["ts_momentum", "breakout"],
-      "exit_signals": ["none", "momentum_flip"],
+      "entry_signals": [
+        "ts_momentum",
+        "breakout"
+      ],
+      "exit_signals": [
+        "none",
+        "momentum_flip"
+      ],
       "optimization": {
         "n_trials": 20,
         "sampler": "tpe"
@@ -14,7 +20,8 @@
         "train_fraction": 0.7,
         "validation_fraction": 0.15,
         "test_fraction": 0.15,
-        "step_fraction": 0.15
+        "step_fraction": 0.15,
+        "split_policy": "calendar-based"
       },
       "stress_controls": {
         "enable_historical_replay_regimes": true,
@@ -30,8 +37,13 @@
     "fast_iteration": {
       "label": "Fast Iteration",
       "description": "Smaller optimization/search budget and quicker WF cadence for rapid hypothesis triage.",
-      "entry_signals": ["ts_momentum"],
-      "exit_signals": ["none", "trailing_stop"],
+      "entry_signals": [
+        "ts_momentum"
+      ],
+      "exit_signals": [
+        "none",
+        "trailing_stop"
+      ],
       "optimization": {
         "n_trials": 8,
         "sampler": "random"
@@ -40,7 +52,8 @@
         "train_fraction": 0.6,
         "validation_fraction": 0.2,
         "test_fraction": 0.2,
-        "step_fraction": 0.1
+        "step_fraction": 0.1,
+        "split_policy": "calendar-based"
       },
       "stress_controls": {
         "enable_historical_replay_regimes": false,
@@ -56,8 +69,16 @@
     "robustness_hardening": {
       "label": "Robustness Hardening",
       "description": "Higher optimization depth and harsher synthetic + overlay stress controls for robustness validation.",
-      "entry_signals": ["ts_momentum", "ma_trend", "breakout"],
-      "exit_signals": ["momentum_flip", "trailing_stop", "max_hold"],
+      "entry_signals": [
+        "ts_momentum",
+        "ma_trend",
+        "breakout"
+      ],
+      "exit_signals": [
+        "momentum_flip",
+        "trailing_stop",
+        "max_hold"
+      ],
       "optimization": {
         "n_trials": 40,
         "sampler": "bayesian"
@@ -66,7 +87,8 @@
         "train_fraction": 0.65,
         "validation_fraction": 0.2,
         "test_fraction": 0.15,
-        "step_fraction": 0.2
+        "step_fraction": 0.2,
+        "split_policy": "calendar-based"
       },
       "stress_controls": {
         "enable_historical_replay_regimes": true,

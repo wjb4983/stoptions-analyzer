@@ -1371,6 +1371,7 @@ def run_walk_forward_backtest(
     cpcv_n_groups: int = 6,
     cpcv_n_test_groups: int = 2,
     cv_seed: int = 42,
+    split_policy: str = "calendar-based",
     governance_metadata: dict[str, Any] | None = None,
     lineage_parent_manifest: str | None = None,
     stress_controls: dict[str, Any] | None = None,
@@ -1476,6 +1477,17 @@ def run_walk_forward_backtest(
     if not folds:
         raise ValueError("No folds generated; increase date range or reduce window sizes")
 
+    supported_split_policies = {
+        "calendar-based",
+        "volatility-regime-stratified",
+        "event-exclusion windows",
+    }
+    normalized_split_policy = str(split_policy).strip().lower()
+    if normalized_split_policy not in supported_split_policies:
+        raise ValueError(
+            "split_policy must be one of calendar-based, volatility-regime-stratified, event-exclusion windows"
+        )
+
     if cv_scheme == "cpcv":
         split_rows = [
             split.to_dict()
@@ -1500,6 +1512,14 @@ def run_walk_forward_backtest(
                 label_horizon_bars=int(label_horizon_bars),
             )
         ]
+
+    _apply_split_policy_metadata(
+        split_rows=split_rows,
+        split_policy=normalized_split_policy,
+        date_index=arrays.date_index,
+        prices=prices,
+        stress_controls=stress_controls,
+    )
 
     def evaluate_segment(candidate: dict[str, Any], start_idx: int, end_idx: int) -> dict[str, Any]:
         if end_idx <= start_idx:
@@ -1600,6 +1620,7 @@ def run_walk_forward_backtest(
                 "cpcv_n_groups": int(cpcv_n_groups),
                 "cpcv_n_test_groups": int(cpcv_n_test_groups),
                 "cv_seed": int(cv_seed),
+                "split_policy": normalized_split_policy,
                 "random_seeds": {"run_seed": int(cv_seed), "python_random_seed": int(cv_seed), "numpy_random_seed": int(cv_seed)},
                 "windowing": {
                     "train_bars": train_bars,
@@ -1710,6 +1731,7 @@ def run_walk_forward_backtest(
         "cpcv_n_groups": int(cpcv_n_groups),
         "cpcv_n_test_groups": int(cpcv_n_test_groups),
         "cv_seed": int(cv_seed),
+        "split_policy": normalized_split_policy,
     }
     manifest = _build_run_manifest(
         run_type="walk_forward",
@@ -2052,6 +2074,109 @@ def run_strategy_optimization(
         f"{result['pareto_count']} Pareto-optimal across {len(stage_summaries)} stage(s). "
         f"Top robust sets: {len(result.get('best_robust_params', []))}. Saved outputs to: {run_dir}"
     )
+
+
+def _apply_split_policy_metadata(
+    *,
+    split_rows: list[dict[str, Any]],
+    split_policy: str,
+    date_index: Any,
+    prices: np.ndarray,
+    stress_controls: dict[str, Any] | None,
+) -> None:
+    event_windows = _resolve_event_exclusion_windows(date_index=date_index, stress_controls=stress_controls)
+    regime_boundaries = _resolve_volatility_regime_boundaries(prices=prices)
+
+    for row in split_rows:
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            row["metadata"] = metadata
+        metadata["split_policy"] = split_policy
+
+        if split_policy == "volatility-regime-stratified":
+            metadata["volatility_regime_boundaries"] = regime_boundaries
+        elif split_policy == "event-exclusion windows":
+            metadata["event_exclusion_windows"] = event_windows
+            test_ranges = row.get("test_ranges", [])
+            metadata["excluded_event_windows"] = _intersect_ranges(test_ranges, event_windows)
+
+
+def _resolve_volatility_regime_boundaries(*, prices: np.ndarray) -> list[list[int]]:
+    if prices.ndim != 2 or prices.shape[0] < 3:
+        return []
+    anchor = prices[:, 0]
+    returns = np.diff(np.log(np.clip(anchor, 1e-12, None)))
+    rolling = np.zeros(anchor.shape[0], dtype=float)
+    if returns.size > 0:
+        for idx in range(anchor.shape[0]):
+            left = max(0, idx - 20)
+            right = max(0, idx - 1)
+            if right > left:
+                window = returns[left:right]
+                rolling[idx] = float(np.std(window, ddof=0)) if window.size else 0.0
+    valid = rolling[rolling > 0]
+    if valid.size == 0:
+        return []
+    low = float(np.quantile(valid, 0.33))
+    high = float(np.quantile(valid, 0.66))
+    low_idx = np.where(rolling <= low)[0]
+    mid_idx = np.where((rolling > low) & (rolling <= high))[0]
+    high_idx = np.where(rolling > high)[0]
+    return [
+        _indices_to_span(low_idx),
+        _indices_to_span(mid_idx),
+        _indices_to_span(high_idx),
+    ]
+
+
+def _indices_to_span(indices: np.ndarray) -> list[int]:
+    if indices.size == 0:
+        return [0, 0]
+    return [int(indices[0]), int(indices[-1]) + 1]
+
+
+def _resolve_event_exclusion_windows(*, date_index: Any, stress_controls: dict[str, Any] | None) -> list[list[int]]:
+    controls = stress_controls or {}
+    configured = controls.get("event_exclusion_windows", [])
+    windows: list[list[int]] = []
+    if isinstance(configured, list):
+        for item in configured:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            start = int(item[0])
+            end = int(item[1])
+            if end > start:
+                windows.append([start, end])
+    if windows:
+        return windows
+
+    # Fallback synthetic event windows based on calendar month boundaries.
+    month_starts: list[int] = []
+    prev_key: tuple[int, int] | None = None
+    for idx, ts in enumerate(date_index):
+        dt = _timestamp_to_datetime(ts)
+        key = (dt.year, dt.month)
+        if key != prev_key:
+            month_starts.append(idx)
+            prev_key = key
+    for start in month_starts[:3]:
+        windows.append([int(start), int(start + 1)])
+    return windows
+
+
+def _intersect_ranges(primary: list[Any], secondary: list[list[int]]) -> list[list[int]]:
+    intersections: list[list[int]] = []
+    for left in primary:
+        if not isinstance(left, list) or len(left) != 2:
+            continue
+        a0, a1 = int(left[0]), int(left[1])
+        for b0, b1 in secondary:
+            start = max(a0, int(b0))
+            end = min(a1, int(b1))
+            if end > start:
+                intersections.append([start, end])
+    return intersections
 
 
 def _format_walk_forward_report(
@@ -4484,6 +4609,38 @@ def _append_experiment_index(entry: dict[str, Any]) -> None:
 
 
 
+def _timestamp_to_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value
+
+    if isinstance(value, np.datetime64):
+        nanos = value.astype("datetime64[ns]").astype(np.int64)
+        return datetime.utcfromtimestamp(float(nanos) / 1_000_000_000.0)
+
+    if isinstance(value, (np.integer, int, np.floating, float)):
+        numeric = float(value)
+        abs_numeric = abs(numeric)
+        if abs_numeric >= 1e17:
+            seconds = numeric / 1_000_000_000.0
+        elif abs_numeric >= 1e14:
+            seconds = numeric / 1_000_000.0
+        elif abs_numeric >= 1e11:
+            seconds = numeric / 1_000.0
+        else:
+            seconds = numeric
+        return datetime.utcfromtimestamp(seconds)
+
+    if hasattr(value, "to_pydatetime"):
+        try:
+            dt = value.to_pydatetime()
+            if isinstance(dt, datetime):
+                return dt
+        except Exception:
+            pass
+
+    return datetime.fromisoformat(str(value))
+
+
 def _timestamp_to_iso8601(value: object) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -5062,6 +5219,7 @@ def _build_parser() -> argparse.ArgumentParser:
     wf_parser.add_argument("--cpcv-n-groups", type=int, default=6)
     wf_parser.add_argument("--cpcv-n-test-groups", type=int, default=2)
     wf_parser.add_argument("--cv-seed", type=int, default=42)
+    wf_parser.add_argument("--split-policy", choices=["calendar-based", "volatility-regime-stratified", "event-exclusion windows"], default="calendar-based")
 
     opt_parser = subparsers.add_parser("optimize", help="Run constrained multi-objective optimization.")
     _add_common_args(opt_parser)
@@ -5176,6 +5334,7 @@ def main() -> None:
             cpcv_n_groups=int(args.cpcv_n_groups),
             cpcv_n_test_groups=int(args.cpcv_n_test_groups),
             cv_seed=int(args.cv_seed),
+            split_policy=str(args.split_policy),
         )
     elif args.command == "optimize":
         output = run_strategy_optimization(
