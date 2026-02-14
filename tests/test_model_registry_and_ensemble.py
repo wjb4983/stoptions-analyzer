@@ -119,3 +119,27 @@ def test_config_activation_weighted_and_stacking_ensemble() -> None:
     assert np.all(stacked.probability >= 0.0)
     assert np.all(stacked.probability <= 1.0)
     assert set(stacked.model_weights.keys()) == {"momentum", "mean_reversion"}
+
+
+def test_hierarchical_moe_adapter_for_benchmarking() -> None:
+    config = ModelActivationConfig.from_dict(
+        {
+            "paradigms": [
+                {"name": "momentum", "enabled": True, "weight": 1.0},
+                {"name": "mean_reversion", "enabled": True, "weight": 1.0},
+            ]
+        }
+    )
+    active = activated_models(config)
+    features = _build_feature_dict()
+    labels = (features["returns_1m"] > 0).astype(float)
+
+    ensembler = ModelEnsembler(active)
+    ensembler.fit(features, labels)
+    moe = ensembler.hierarchical_moe_vote(features)
+
+    assert moe.signal.shape == labels.shape
+    assert np.all(moe.probability >= 0.0)
+    assert np.all(moe.probability <= 1.0)
+    assert set(moe.model_weights.keys()) == {"momentum", "mean_reversion"}
+    assert np.isclose(sum(moe.model_weights.values()), 1.0, atol=1e-6)

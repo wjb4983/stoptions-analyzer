@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from modeling_nextgen.models.ensemble import HierarchicalMoE
+
 from .base import ModelInterface
 from backtesting.validation import generate_purged_kfold_splits
 
@@ -40,14 +42,17 @@ class ModelEnsembler:
         self.base_performance_: dict[str, float] = {}
         self.regime_fit_: dict[str, dict[str, float]] = {}
         self.contribution_history_: list[ContributionSnapshot] = []
+        self.hierarchical_moe_ = HierarchicalMoE()
 
     def fit(self, features: dict[str, np.ndarray], labels: np.ndarray) -> None:
         y = np.asarray(labels, dtype=float)
         regime_labels = _extract_regimes(features, y.shape[0])
+        expert_predictions: dict[str, np.ndarray] = {}
         for model, _ in self.models:
             model.fit(features, y)
             LOGGER.info("fit model=%s importances=%s", model.name, model.feature_importances_)
             probs = model.predict_proba(features)
+            expert_predictions[model.name] = probs
             recent_start = max(0, y.size - self.recent_window)
             recent_acc = np.mean((probs[recent_start:] >= 0.5) == (y[recent_start:] >= 0.5))
             self.base_performance_[model.name] = float(recent_acc)
@@ -58,6 +63,8 @@ class ModelEnsembler:
                 if np.any(mask):
                     per_regime[regime] = float(np.mean((probs[mask] >= 0.5) == (y[mask] >= 0.5)))
             self.regime_fit_[model.name] = per_regime
+
+        self.hierarchical_moe_.fit(expert_predictions=expert_predictions, labels=y, features=features)
 
     def weighted_vote(self, features: dict[str, np.ndarray], labels: np.ndarray | None = None) -> EnsembleOutput:
         probs = []
@@ -146,6 +153,31 @@ class ModelEnsembler:
             feature_importances=feature_importances,
             model_weights={model.name: float(self.stacking_weights_[idx]) for idx, (model, _) in enumerate(self.models)},
             model_contributions={model.name: probs[:, idx] * float(self.stacking_weights_[idx]) for idx, (model, _) in enumerate(self.models)},
+        )
+
+    def hierarchical_moe_vote(
+        self,
+        features: dict[str, np.ndarray],
+        labels: np.ndarray | None = None,
+        *,
+        fallback_confidence_threshold: float = 0.55,
+    ) -> EnsembleOutput:
+        if labels is not None:
+            self.hierarchical_moe_ = HierarchicalMoE(fallback_confidence_threshold=fallback_confidence_threshold)
+            train_probs = {model.name: model.predict_proba(features) for model, _ in self.models}
+            self.hierarchical_moe_.fit(expert_predictions=train_probs, labels=np.asarray(labels, dtype=float), features=features)
+
+        infer_probs = {model.name: model.predict_proba(features) for model, _ in self.models}
+        moe_output = self.hierarchical_moe_.predict(expert_predictions=infer_probs, features=features)
+        feature_importances = {model.name: dict(model.feature_importances_) for model, _ in self.models}
+        confidence = np.abs(moe_output.probability - 0.5) * 2.0
+        return EnsembleOutput(
+            signal=moe_output.signal,
+            probability=moe_output.probability,
+            confidence_scores=confidence,
+            feature_importances=feature_importances,
+            model_weights=moe_output.expert_average_weights,
+            model_contributions=moe_output.model_contributions,
         )
 
     def contribution_by_regime(self) -> dict[str, dict[str, float]]:
