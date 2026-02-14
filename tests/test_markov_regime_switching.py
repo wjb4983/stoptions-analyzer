@@ -5,6 +5,10 @@ from modeling_nextgen.models.markov.regime_switching import (
     estimate_transition_matrix,
     fit_regime_switching_model,
 )
+from modeling_nextgen.models.markov.semi_markov import (
+    SemiMarkovConfig,
+    fit_semi_markov_model,
+)
 from regime.classifier import (
     RegimeMarkovAdapterConfig,
     classify_regimes_with_markov_adapter,
@@ -75,3 +79,42 @@ def test_classifier_markov_adapter_emits_ensemble_signals() -> None:
     assert out["markov_transition_matrix"].shape == (3, 3)
     assert out["ensemble_regime_labels"].shape[0] == features.shape[0]
     assert np.all((out["regime_signal_agreement"] >= 0.0) & (out["regime_signal_agreement"] <= 1.0))
+
+
+def test_semi_markov_duration_features_reduce_regime_churn() -> None:
+    observations = np.array(
+        [
+            [-1.0, -0.7],
+            [-0.8, -0.6],
+            [0.2, 0.1],
+            [0.3, 0.0],
+            [0.4, 0.2],
+            [1.1, 0.9],
+            [1.2, 1.0],
+            [1.0, 0.8],
+        ],
+        dtype=float,
+    )
+
+    weak_duration = np.zeros(observations.shape[0], dtype=float)
+    strong_persistence = np.linspace(0.0, 2.0, observations.shape[0])
+
+    weak_fit = fit_semi_markov_model(
+        observations,
+        duration_features=weak_duration,
+        config=SemiMarkovConfig(em_iterations=8, max_duration=8, duration_feature_beta=0.0),
+    )
+    strong_fit = fit_semi_markov_model(
+        observations,
+        duration_features=strong_persistence,
+        config=SemiMarkovConfig(em_iterations=8, max_duration=8, duration_feature_beta=2.0),
+    )
+
+    weak_switches = np.sum(weak_fit.regime_state_argmax[1:] != weak_fit.regime_state_argmax[:-1])
+    strong_switches = np.sum(strong_fit.regime_state_argmax[1:] != strong_fit.regime_state_argmax[:-1])
+
+    assert strong_fit.posterior_probabilities.shape == (observations.shape[0], 3)
+    assert np.allclose(np.sum(strong_fit.posterior_probabilities, axis=1), 1.0)
+    assert strong_fit.duration_distributions.shape == (3, 8)
+    assert np.allclose(np.sum(strong_fit.duration_distributions, axis=1), 1.0)
+    assert strong_switches <= weak_switches

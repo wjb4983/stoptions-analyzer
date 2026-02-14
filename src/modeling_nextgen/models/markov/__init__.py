@@ -7,6 +7,7 @@ from .regime_switching import (
     estimate_transition_matrix,
     fit_regime_switching_model,
 )
+from .semi_markov import SemiMarkovConfig, SemiMarkovOutput, fit_semi_markov_model
 
 
 @dataclass
@@ -18,6 +19,9 @@ __all__ = [
     "MarkovModel",
     "RegimeSwitchingConfig",
     "RegimeSwitchingOutput",
+    "SemiMarkovConfig",
+    "SemiMarkovOutput",
     "estimate_transition_matrix",
     "fit_regime_switching_model",
+    "fit_semi_markov_model",
 ]
