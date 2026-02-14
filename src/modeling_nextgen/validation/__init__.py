@@ -15,6 +15,7 @@ from .walkforward_hpo import (
     export_walkforward_hpo_reports,
     run_walkforward_hpo,
 )
+from .quality_gates import QualityGateThresholds, evaluate_modeling_quality_gates, promotion_blocked
 
 __all__ = [
     "PurgedCrossValidator",
@@ -34,4 +35,7 @@ __all__ = [
     "export_walkforward_hpo_reports",
     "StressTemplateConfig",
     "build_stress_template_scenarios",
+    "QualityGateThresholds",
+    "evaluate_modeling_quality_gates",
+    "promotion_blocked",
 ]
