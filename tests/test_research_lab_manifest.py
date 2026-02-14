@@ -109,3 +109,46 @@ def test_build_signal_grids_serializes_universe_filters_into_core_grid():
     assert entry_grid == {"ts_momentum": [{}]}
     assert exit_grid == {"none": [{}]}
     assert core_grid["universe_filters"][0]["options_eligibility"]["require_weeklies"] is True
+
+
+class _Var:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def set(self, value: str) -> None:
+        self.value = value
+
+
+def test_extract_manifest_path_from_output_resolves_saved_outputs_line(tmp_path):
+    page = object.__new__(ResearchLabPage)
+    run_dir = tmp_path / "wf_run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = run_dir / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    output = f"Walk-forward complete. Saved outputs to: {run_dir}"
+    extracted = ResearchLabPage._extract_manifest_path_from_output(page, output)
+
+    assert extracted == manifest_path
+
+
+def test_refresh_governance_dashboard_updates_summary_fields():
+    page = object.__new__(ResearchLabPage)
+    page._governance_gate_counts_var = _Var()
+    page._governance_missing_checks_var = _Var()
+    page._governance_promotion_ready_var = _Var()
+    page._governance_approval_status_var = _Var()
+    page._load_governance_payload_from_output = lambda _output: {
+        "gate_checks": {"a": True, "b": False, "c": True},
+        "missing_required_checks": ["b"],
+        "is_promotion_ready": False,
+        "approval_status": "pending",
+        "promotion_state": "research",
+    }
+
+    ResearchLabPage._refresh_governance_dashboard_from_output(page, "Saved outputs to: /tmp/path")
+
+    assert page._governance_gate_counts_var.value == "2 passed / 1 failed (3 total)"
+    assert page._governance_missing_checks_var.value == "b"
+    assert page._governance_promotion_ready_var.value == "Not ready"
+    assert page._governance_approval_status_var.value == "pending (research)"
