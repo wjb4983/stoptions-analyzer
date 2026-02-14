@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 
 import numpy as np
+import pytest
 
 from src.analysis.reporting import (
     build_backtest_robustness_report,
@@ -16,7 +17,7 @@ from src.analysis.reporting import (
     format_backtest_report,
 )
 from src.backtesting import cache_runner
-from src.ui.backtesting_insights import fold_variance_rows, insights_table_schema, metric_deltas
+from src.ui.backtesting_insights import compare_robustness_frontiers, fold_variance_rows, insights_table_schema, metric_deltas
 
 
 
@@ -148,6 +149,8 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "capacity_frontier.csv",
         "capacity_frontier_series.json",
         "capacity_frontier_series.csv",
+        "robustness_frontier.json",
+        "robustness_frontier.csv",
         "attribution_timeseries.csv",
         "attribution_timeseries.json",
         "attribution_summary.csv",
@@ -546,3 +549,29 @@ def test_insights_table_schema_snapshot_for_fold_variance() -> None:
         "base_n",
         "compare_n",
     ]
+
+
+def test_compare_robustness_frontiers_joins_aum_scales() -> None:
+    base = {
+        "schema_version": "1.0",
+        "frontier": [
+            {"aum_scale": 1.0, "expected_alpha_net_cost_bps": 20.0, "projected_post_cost_sharpe": 1.1, "robustness_score": 1.0},
+            {"aum_scale": 2.0, "expected_alpha_net_cost_bps": 15.0, "projected_post_cost_sharpe": 0.9, "robustness_score": 0.8},
+        ],
+    }
+    other = {
+        "schema_version": "1.0",
+        "frontier": [
+            {"aum_scale": 1.0, "expected_alpha_net_cost_bps": 18.0, "projected_post_cost_sharpe": 1.0, "robustness_score": 0.9},
+            {"aum_scale": 3.0, "expected_alpha_net_cost_bps": 10.0, "projected_post_cost_sharpe": 0.5, "robustness_score": 0.4},
+        ],
+    }
+
+    rows = compare_robustness_frontiers(base, other)
+
+    assert len(rows) == 3
+    scales = {float(row["aum_scale"]) for row in rows}
+    assert scales == {1.0, 2.0, 3.0}
+    scale_one = next(row for row in rows if float(row["aum_scale"]) == 1.0)
+    assert float(scale_one["delta_alpha_bps"]) == -2.0
+    assert float(scale_one["delta_sharpe"]) == pytest.approx(-0.1)
