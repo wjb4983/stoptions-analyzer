@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import shutil
 import json
+import hashlib
 import re
 import uuid
 import statistics
@@ -10,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
 from backtesting.cache_runner import (
@@ -86,6 +87,9 @@ DEFAULT_RESEARCH_WORKFLOW_PRESETS: dict[str, Any] = {
 }
 
 
+WIZARD_STATE_SCHEMA_VERSION = 2
+
+
 @dataclass
 class ResearchTask:
     task_id: str
@@ -129,6 +133,7 @@ class ResearchLabPage(ttk.Frame):
         self._rubric_templates = self._load_rubric_templates()
         self._workflow_presets = self._load_workflow_presets()
         self._wizard_comments: list[dict[str, str]] = []
+        self._wizard_history: list[dict[str, str]] = []
 
 
         ttk.Label(self, text="Research Lab", font=("Arial", 18, "bold")).pack(pady=(12, 8))
@@ -1257,6 +1262,7 @@ class ResearchLabPage(ttk.Frame):
         self.wizard_run_stress_var = tk.BooleanVar(value=True)
         self.wizard_review_notes_var = tk.StringVar(value="")
         self.wizard_promotion_decision_var = tk.StringVar(value="pending")
+        self.wizard_session_label_var = tk.StringVar(value="")
 
         wizard = ttk.LabelFrame(self, text="Wizard Mode — Hypothesis Lifecycle")
         wizard.pack(fill="x", padx=40, pady=(8, 8))
@@ -1281,8 +1287,14 @@ class ResearchLabPage(ttk.Frame):
 
         nav = ttk.Frame(wizard)
         nav.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 10))
+        session_tools = ttk.Frame(nav)
+        session_tools.pack(side="left")
+        ttk.Label(session_tools, text="Session label").pack(side="left")
+        ttk.Entry(session_tools, textvariable=self.wizard_session_label_var, width=20).pack(side="left", padx=(6, 6))
+        ttk.Button(session_tools, text="Export Session", command=self._wizard_export_session).pack(side="left")
+        ttk.Button(session_tools, text="Import Session", command=self._wizard_import_session).pack(side="left", padx=(6, 0))
         self._wizard_back_button = ttk.Button(nav, text="Back", command=self._wizard_go_back)
-        self._wizard_back_button.pack(side="left")
+        self._wizard_back_button.pack(side="left", padx=(12, 0))
         self._wizard_next_button = ttk.Button(nav, text="Next", command=self._wizard_go_next)
         self._wizard_next_button.pack(side="right")
 
@@ -1419,6 +1431,7 @@ class ResearchLabPage(ttk.Frame):
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         }
         self._wizard_comments.append(entry)
+        self._wizard_append_history_event("review_note", {"owner": owner, "note": note})
         self.wizard_review_notes_var.set("")
         self._wizard_render_comments_log()
         self._wizard_persist_state()
@@ -1434,6 +1447,16 @@ class ResearchLabPage(ttk.Frame):
                 f"[{row.get('timestamp', '')}] {row.get('owner', 'research_lab_ui')}: {row.get('note', '')}\n",
             )
         self.wizard_review_log_text.configure(state="disabled")
+
+    def _wizard_append_history_event(self, event: str, details: dict[str, Any] | None = None) -> None:
+        row: dict[str, str] = {
+            "event": event,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+        if details:
+            for key, value in details.items():
+                row[str(key)] = str(value)
+        self._wizard_history.append(row)
 
     def _wizard_attach_state_traces(self) -> None:
         tracked_vars = (
@@ -1622,19 +1645,55 @@ class ResearchLabPage(ttk.Frame):
             "review_notes": self.wizard_review_notes_var.get().strip(),
             "promotion_decision": self.wizard_promotion_decision_var.get().strip(),
             "wizard_comments": list(self._wizard_comments),
+            "wizard_history": list(self._wizard_history),
         }
 
-    def _wizard_persist_state(self) -> None:
-        self._research_lab_dir.mkdir(parents=True, exist_ok=True)
-        self._wizard_state_path.write_text(json.dumps(self._wizard_state_payload(), indent=2, sort_keys=True), encoding="utf-8")
+    def _wizard_state_document(self, payload: dict[str, Any]) -> dict[str, Any]:
+        doc: dict[str, Any] = {
+            "schema_version": WIZARD_STATE_SCHEMA_VERSION,
+            "payload": payload,
+        }
+        digest = hashlib.sha256(json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        doc["checksum"] = f"sha256:{digest}"
+        return doc
 
-    def _wizard_load_state(self) -> None:
-        if not self._wizard_state_path.exists():
-            return
-        try:
-            payload = json.loads(self._wizard_state_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return
+    def _wizard_extract_payload(self, raw: Any) -> tuple[dict[str, Any] | None, bool]:
+        if not isinstance(raw, dict):
+            return None, False
+        if "payload" not in raw:
+            return dict(raw), True
+        payload = raw.get("payload")
+        if not isinstance(payload, dict):
+            return None, False
+        schema_version = int(raw.get("schema_version", 0) or 0)
+        expected = raw.get("checksum")
+        check_doc = {
+            "schema_version": schema_version,
+            "payload": payload,
+        }
+        digest = hashlib.sha256(json.dumps(check_doc, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        if isinstance(expected, str) and expected.startswith("sha256:") and expected != f"sha256:{digest}":
+            return None, False
+        return dict(payload), schema_version < WIZARD_STATE_SCHEMA_VERSION
+
+    def _merge_wizard_activity_rows(self, existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged = list(existing) + list(incoming)
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in merged:
+            if not isinstance(row, dict):
+                continue
+            fingerprint = json.dumps(row, sort_keys=True)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            deduped.append(dict(row))
+        deduped.sort(key=lambda row: str(row.get("timestamp") or row.get("recorded_at") or row.get("commented_at") or ""))
+        return deduped
+
+    def _wizard_apply_payload(self, payload: dict[str, Any], *, merge_activity: bool) -> None:
+        current_comments = list(self._wizard_comments)
+        current_history = list(self._wizard_history)
 
         self.wizard_idea_name_var.set(str(payload.get("idea_name", self.wizard_idea_name_var.get())))
         self.wizard_idea_thesis_var.set(str(payload.get("idea_thesis", self.wizard_idea_thesis_var.get())))
@@ -1661,12 +1720,80 @@ class ResearchLabPage(ttk.Frame):
         self.wizard_run_stress_var.set(bool(payload.get("run_stress", self.wizard_run_stress_var.get())))
         self.wizard_review_notes_var.set(str(payload.get("review_notes", self.wizard_review_notes_var.get())))
         self.wizard_promotion_decision_var.set(str(payload.get("promotion_decision", self.wizard_promotion_decision_var.get())))
+
         saved_comments = payload.get("wizard_comments", [])
         if isinstance(saved_comments, list):
-            self._wizard_comments = [dict(row) for row in saved_comments if isinstance(row, dict)]
+            incoming_comments = [dict(row) for row in saved_comments if isinstance(row, dict)]
+            self._wizard_comments = self._merge_wizard_activity_rows(current_comments, incoming_comments) if merge_activity else incoming_comments
+
+        saved_history = payload.get("wizard_history", [])
+        if isinstance(saved_history, list):
+            incoming_history = [dict(row) for row in saved_history if isinstance(row, dict)]
+            self._wizard_history = self._merge_wizard_activity_rows(current_history, incoming_history) if merge_activity else incoming_history
+
         self._wizard_render_comments_log()
         loaded_step = int(payload.get("current_step", 0))
         self._wizard_step_index = max(0, min(loaded_step, len(self._wizard_steps) - 1))
+
+    def _wizard_persist_state(self) -> None:
+        self._research_lab_dir.mkdir(parents=True, exist_ok=True)
+        payload = self._wizard_state_payload()
+        self._wizard_state_path.write_text(json.dumps(self._wizard_state_document(payload), indent=2, sort_keys=True), encoding="utf-8")
+
+    def _wizard_load_state(self) -> None:
+        if not self._wizard_state_path.exists():
+            return
+        try:
+            raw = json.loads(self._wizard_state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return
+        payload, upgraded = self._wizard_extract_payload(raw)
+        if payload is None:
+            self._append_output("Skipped wizard state load due to checksum mismatch or invalid schema.")
+            return
+        self._wizard_apply_payload(payload, merge_activity=False)
+        if upgraded:
+            self._wizard_persist_state()
+
+    def _wizard_session_storage_dir(self) -> Path:
+        return self._research_lab_dir / "sessions"
+
+    def _wizard_export_session(self) -> None:
+        payload = self._wizard_state_payload()
+        label_raw = self.wizard_session_label_var.get().strip() or payload.get("idea_name", "") or "session"
+        safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(label_raw)).strip("_") or "session"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = self._wizard_session_storage_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_path = out_dir / f"{timestamp}_{safe_label}.json"
+        output_path.write_text(json.dumps(self._wizard_state_document(payload), indent=2, sort_keys=True), encoding="utf-8")
+        self._wizard_append_history_event("session_export", {"label": label_raw, "path": str(output_path)})
+        self._wizard_persist_state()
+        self._append_output(f"Wizard session exported to {output_path}.")
+        messagebox.showinfo("Session exported", f"Saved wizard session to:\n{output_path}")
+
+    def _wizard_import_session(self) -> None:
+        source = filedialog.askopenfilename(
+            title="Import wizard session",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialdir=str(self._wizard_session_storage_dir()),
+        )
+        if not source:
+            return
+        try:
+            raw = json.loads(Path(source).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            messagebox.showinfo("Invalid session", "Could not read wizard session JSON.")
+            return
+        payload, _ = self._wizard_extract_payload(raw)
+        if payload is None:
+            messagebox.showinfo("Invalid session", "Session checksum validation failed.")
+            return
+        self._wizard_apply_payload(payload, merge_activity=True)
+        self._wizard_append_history_event("session_import", {"path": source})
+        self._wizard_persist_state()
+        self._wizard_refresh_nav_state()
+        self._append_output(f"Wizard session imported from {source}.")
 
     def _start_worker(self, target: Callable[[dict[str, Any], ResearchWorkflowConfig], str], label: str) -> None:
         context = self._build_common_context()
@@ -2568,6 +2695,18 @@ class ResearchLabPage(ttk.Frame):
                 for item in getattr(self, "_wizard_comments", [])
                 if str(item.get("note", "")).strip()
             ],
+            "hypothesis_history": [
+                {
+                    "event": str(item.get("event", "update")),
+                    "timestamp": str(item.get("timestamp", generated_at)),
+                    "details": {
+                        str(key): str(value)
+                        for key, value in item.items()
+                        if str(key) not in {"event", "timestamp"}
+                    },
+                }
+                for item in getattr(self, "_wizard_history", [])
+            ],
             "review_actions": [
                 {
                     "owner": str(record.get("results_review", {}).get("reviewer", "research_lab_ui")),
@@ -2610,6 +2749,7 @@ class ResearchLabPage(ttk.Frame):
                     "reviewer_comments",
                     "promotion_history",
                     "comments",
+                    "hypothesis_history",
                     "review_actions",
                     "decision_log",
                 ):
