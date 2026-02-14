@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -866,8 +867,9 @@ class ResearchLabPage(ttk.Frame):
 
     def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
         self._research_lab_dir.mkdir(parents=True, exist_ok=True)
-        hypothesis_id = f"hyp_{date.today().strftime('%Y%m%d')}_{len(context['tickers'])}t"
+        hypothesis_id = f"hyp_{uuid.uuid4().hex}"
         idea_record = self._build_idea_record(hypothesis_id=hypothesis_id, context=context)
+        idea_record["lineage"] = self._build_pipeline_lineage(hypothesis_id=hypothesis_id)
         scored = self._score_hypothesis(idea_record, context)
         promoted = scored["decision"] == "accept"
         experiment_path = self._write_experiment_skeleton(scored, context) if promoted else None
@@ -887,6 +889,31 @@ class ResearchLabPage(ttk.Frame):
             ),
         ]
         return "\n".join(lines)
+
+    def _build_pipeline_lineage(self, *, hypothesis_id: str) -> dict[str, Any]:
+        optimization_run_id = f"opt_{uuid.uuid4().hex}"
+        walk_forward_run_id = f"wf_{uuid.uuid4().hex}"
+        stress_run_id = f"stress_{uuid.uuid4().hex}"
+        return {
+            "hypothesis_id": hypothesis_id,
+            "optimization_run_id": optimization_run_id,
+            "walk_forward_run_id": walk_forward_run_id,
+            "stress_run_id": stress_run_id,
+            "links": {
+                "hypothesis_to_optimization": {
+                    "parent_id": hypothesis_id,
+                    "child_id": optimization_run_id,
+                },
+                "optimization_to_walk_forward": {
+                    "parent_id": optimization_run_id,
+                    "child_id": walk_forward_run_id,
+                },
+                "walk_forward_to_stress": {
+                    "parent_id": walk_forward_run_id,
+                    "child_id": stress_run_id,
+                },
+            },
+        }
 
     def _build_idea_record(self, *, hypothesis_id: str, context: dict[str, Any]) -> dict[str, Any]:
         tickers = [str(t).upper() for t in context["tickers"]]
@@ -987,6 +1014,7 @@ class ResearchLabPage(ttk.Frame):
         output_path = skeleton_dir / f"{record['hypothesis_id']}.json"
         payload = {
             "hypothesis_id": record["hypothesis_id"],
+            "lineage": dict(record.get("lineage", {})),
             "workflow_stages": [
                 "idea_intake",
                 "economic_rationale",
@@ -996,9 +1024,27 @@ class ResearchLabPage(ttk.Frame):
                 "promotion_or_rejection",
             ],
             "run_plan": [
-                {"step": "walk_forward_validation", "call": "run_walk_forward_backtest", "status": "todo"},
-                {"step": "parameter_optimization", "call": "run_strategy_optimization", "status": "todo"},
-                {"step": "stress_testing", "call": "run_multi_signal_backtest", "status": "todo"},
+                {
+                    "step": "parameter_optimization",
+                    "call": "run_strategy_optimization",
+                    "status": "todo",
+                    "run_id": record["lineage"]["optimization_run_id"],
+                    "parent_id": record["lineage"]["hypothesis_id"],
+                },
+                {
+                    "step": "walk_forward_validation",
+                    "call": "run_walk_forward_backtest",
+                    "status": "todo",
+                    "run_id": record["lineage"]["walk_forward_run_id"],
+                    "parent_id": record["lineage"]["optimization_run_id"],
+                },
+                {
+                    "step": "stress_testing",
+                    "call": "run_multi_signal_backtest",
+                    "status": "todo",
+                    "run_id": record["lineage"]["stress_run_id"],
+                    "parent_id": record["lineage"]["walk_forward_run_id"],
+                },
             ],
             "context": {
                 "tickers": list(context["tickers"]),
@@ -1018,6 +1064,7 @@ class ResearchLabPage(ttk.Frame):
         event_path = self._research_lab_dir / "idea_funnel_events.jsonl"
         event = {
             "hypothesis_id": record["hypothesis_id"],
+            "lineage": dict(record.get("lineage", {})),
             "date": date.today().isoformat(),
             "decision": record["decision"],
             "rubric_total": float(record["rubric"]["total_score"]),
