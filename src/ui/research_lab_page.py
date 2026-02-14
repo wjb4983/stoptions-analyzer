@@ -33,6 +33,11 @@ class ResearchWorkflowConfig:
     exit_signals: list[str]
     optimization_n_trials: int
     optimization_sampler: str
+    optimization_enable_pruning: bool
+    optimization_prune_on_constraint: bool
+    optimization_prune_on_lcb: bool
+    optimization_min_completed_for_pruning: int
+    optimization_staged_budgets: list[dict[str, object]]
     train_fraction: float
     validation_fraction: float
     test_fraction: float
@@ -48,7 +53,7 @@ DEFAULT_RESEARCH_WORKFLOW_PRESETS: dict[str, Any] = {
             "description": "General-purpose baseline with diversified signals and balanced stress settings.",
             "entry_signals": ["ts_momentum", "breakout"],
             "exit_signals": ["none", "momentum_flip"],
-            "optimization": {"n_trials": 20, "sampler": "tpe"},
+            "optimization": {"n_trials": 20, "sampler": "tpe", "enable_pruning": True, "prune_on_constraint": True, "prune_on_lcb": True, "min_completed_for_pruning": 5, "staged_budgets": [{"label": "coarse", "n_trials": 12, "sampler": "random", "partial_period_fractions": [0.33, 0.66]}, {"label": "fine", "n_trials": 20, "sampler": "tpe", "partial_period_fractions": [0.5, 1.0]}]},
             "walk_forward": {
                 "train_fraction": 0.70,
                 "validation_fraction": 0.15,
@@ -93,7 +98,7 @@ class ResearchLabPage(ttk.Frame):
         self._task_queue: list[ResearchTask] = []
         self._active_task_id: str | None = None
         self._research_lab_dir = BACKTEST_OUTPUT_DIR / "research_lab"
-        self._sampler_options = ("tpe", "bayesian", "random")
+        self._sampler_options = ("tpe", "cma-es", "random", "grid")
         self._signal_options = ("ts_momentum", "ma_trend", "breakout")
         self._exit_signal_options = ("none", "momentum_flip", "trailing_stop", "max_hold")
         self._wizard_state_path = self._research_lab_dir / "wizard_state.json"
@@ -371,6 +376,11 @@ class ResearchLabPage(ttk.Frame):
         self.exit_signals_var = tk.StringVar(value="none, momentum_flip")
         self.optimization_trials_var = tk.StringVar(value="20")
         self.optimization_sampler_var = tk.StringVar(value="tpe")
+        self.optimization_enable_pruning_var = tk.BooleanVar(value=True)
+        self.optimization_prune_constraint_var = tk.BooleanVar(value=True)
+        self.optimization_prune_lcb_var = tk.BooleanVar(value=True)
+        self.optimization_min_completed_var = tk.StringVar(value="5")
+        self.optimization_staged_budgets_var = tk.StringVar(value='[{"label":"coarse","n_trials":12,"sampler":"random","partial_period_fractions":[0.33,0.66]},{"label":"fine","n_trials":20,"sampler":"tpe","partial_period_fractions":[0.5,1.0]}]')
         self.wf_train_fraction_var = tk.StringVar(value="0.70")
         self.wf_validation_fraction_var = tk.StringVar(value="0.15")
         self.wf_test_fraction_var = tk.StringVar(value="0.15")
@@ -438,6 +448,19 @@ class ResearchLabPage(ttk.Frame):
             state="readonly",
             width=12,
         ).pack(side="left")
+
+        row += 1
+        ttk.Label(controls, text="Pruning enable/constraint/lcb/min").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        prune_row = ttk.Frame(controls)
+        prune_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Checkbutton(prune_row, text="Enable", variable=self.optimization_enable_pruning_var).pack(side="left")
+        ttk.Checkbutton(prune_row, text="Constraint", variable=self.optimization_prune_constraint_var).pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(prune_row, text="LCB", variable=self.optimization_prune_lcb_var).pack(side="left", padx=(8, 0))
+        ttk.Entry(prune_row, textvariable=self.optimization_min_completed_var, width=5).pack(side="left", padx=(8, 0))
+
+        row += 1
+        ttk.Label(controls, text="Staged budgets (JSON)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        ttk.Entry(controls, textvariable=self.optimization_staged_budgets_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
 
         row += 1
         ttk.Label(controls, text="Walk-forward train/val/test/step").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -951,6 +974,11 @@ class ResearchLabPage(ttk.Frame):
 
         self.optimization_trials_var.set(str(optimization.get("n_trials", self.optimization_trials_var.get())))
         self.optimization_sampler_var.set(str(optimization.get("sampler", self.optimization_sampler_var.get())))
+        self.optimization_enable_pruning_var.set(bool(optimization.get("enable_pruning", self.optimization_enable_pruning_var.get())))
+        self.optimization_prune_constraint_var.set(bool(optimization.get("prune_on_constraint", self.optimization_prune_constraint_var.get())))
+        self.optimization_prune_lcb_var.set(bool(optimization.get("prune_on_lcb", self.optimization_prune_lcb_var.get())))
+        self.optimization_min_completed_var.set(str(optimization.get("min_completed_for_pruning", self.optimization_min_completed_var.get())))
+        self.optimization_staged_budgets_var.set(json.dumps(optimization.get("staged_budgets", json.loads(self.optimization_staged_budgets_var.get())), separators=(",", ":")))
 
         self.wf_train_fraction_var.set(f"{float(walk_forward.get('train_fraction', self.wf_train_fraction_var.get())):.2f}")
         self.wf_validation_fraction_var.set(f"{float(walk_forward.get('validation_fraction', self.wf_validation_fraction_var.get())):.2f}")
@@ -1016,8 +1044,26 @@ class ResearchLabPage(ttk.Frame):
 
         sampler = self.optimization_sampler_var.get().strip().lower() or "tpe"
         if sampler not in self._sampler_options:
-            messagebox.showinfo("Invalid input", "Optimization sampler must be one of: tpe, bayesian, random.")
+            messagebox.showinfo("Invalid input", "Optimization sampler must be one of: tpe, cma-es, random, grid.")
             return None
+
+        min_completed_for_pruning = int(parse_float(self.optimization_min_completed_var.get()) or 5)
+        if min_completed_for_pruning < 1:
+            messagebox.showinfo("Invalid input", "Min completed for pruning must be >= 1.")
+            return None
+
+        staged_budgets: list[dict[str, object]] = []
+        staged_budgets_raw = self.optimization_staged_budgets_var.get().strip()
+        if staged_budgets_raw:
+            try:
+                staged_payload = json.loads(staged_budgets_raw)
+            except json.JSONDecodeError:
+                messagebox.showinfo("Invalid input", "Staged budgets must be valid JSON list.")
+                return None
+            if not isinstance(staged_payload, list):
+                messagebox.showinfo("Invalid input", "Staged budgets must be a JSON list.")
+                return None
+            staged_budgets = [dict(item) for item in staged_payload if isinstance(item, dict)]
 
         train_fraction = float(parse_float(self.wf_train_fraction_var.get()) or 0.70)
         validation_fraction = float(parse_float(self.wf_validation_fraction_var.get()) or 0.15)
@@ -1048,6 +1094,11 @@ class ResearchLabPage(ttk.Frame):
             exit_signals=exit_signals,
             optimization_n_trials=n_trials,
             optimization_sampler=sampler,
+            optimization_enable_pruning=bool(self.optimization_enable_pruning_var.get()),
+            optimization_prune_on_constraint=bool(self.optimization_prune_constraint_var.get()),
+            optimization_prune_on_lcb=bool(self.optimization_prune_lcb_var.get()),
+            optimization_min_completed_for_pruning=min_completed_for_pruning,
+            optimization_staged_budgets=staged_budgets,
             train_fraction=train_fraction,
             validation_fraction=validation_fraction,
             test_fraction=test_fraction,
@@ -1101,6 +1152,11 @@ class ResearchLabPage(ttk.Frame):
             n_trials=config.optimization_n_trials,
             sampler_name=config.optimization_sampler,
             partial_period_fractions=[0.5, 1.0],
+            enable_pruning=config.optimization_enable_pruning,
+            prune_on_constraint_violation=config.optimization_prune_on_constraint,
+            prune_on_lcb=config.optimization_prune_on_lcb,
+            min_completed_for_pruning=config.optimization_min_completed_for_pruning,
+            staged_budgets=[dict(stage) for stage in config.optimization_staged_budgets],
             governance_metadata={"promotion_state": "research", "approval_status": "pending", "workflow_preset": config.preset_name},
             stress_controls=dict(config.stress_controls),
         )

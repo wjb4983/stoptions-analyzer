@@ -36,6 +36,7 @@ STRATEGIES = ["momentum", "xsmom"]
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization", "hrp", "herc"]
 EXECUTION_MODELS = ["bps", "spread", "participation", "square_root", "latency_drift", "modular", "volatility_scaled"]
+OPTIMIZER_SAMPLERS = ["tpe", "cma-es", "random", "grid"]
 
 TIMEFRAME_HISTORY_DAYS = {"1m": 14, "5m": 30, "15m": 60, "30m": 120, "1h": 365, "1d": 3650}
 GOVERNANCE_PROMOTION_STATES = ["research", "paper", "shadow", "production"]
@@ -379,10 +380,39 @@ class BacktestingPage(ttk.Frame):
         row += 1
         ttk.Label(
             strategy_frame,
-            text="Walk-forward tunes on train+validation, then evaluates only on out-of-sample test folds. Optimizer runs constrained multi-objective search with early stopping.",
+            text="Walk-forward tunes on train+validation, then evaluates only on out-of-sample test folds. Optimizer runs constrained multi-objective search with configurable samplers and pruning.",
             wraplength=520,
             justify="left",
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
+
+        row += 1
+        self.optimizer_sampler_var = tk.StringVar(value="tpe")
+        self.optimizer_trials_var = tk.StringVar(value="20")
+        ttk.Label(strategy_frame, text="Optimizer sampler / trials").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        optimizer_row = ttk.Frame(strategy_frame)
+        optimizer_row.grid(row=row, column=1, sticky="w", padx=8, pady=6)
+        ttk.Combobox(optimizer_row, textvariable=self.optimizer_sampler_var, state="readonly", values=OPTIMIZER_SAMPLERS, width=10).pack(side="left")
+        ttk.Label(optimizer_row, text=" / ").pack(side="left")
+        ttk.Entry(optimizer_row, textvariable=self.optimizer_trials_var, width=8).pack(side="left")
+
+        row += 1
+        self.optimizer_enable_pruning_var = tk.BooleanVar(value=True)
+        self.optimizer_prune_constraint_var = tk.BooleanVar(value=True)
+        self.optimizer_prune_lcb_var = tk.BooleanVar(value=True)
+        self.optimizer_min_completed_var = tk.StringVar(value="5")
+        ttk.Label(strategy_frame, text="Pruning controls").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        prune_row = ttk.Frame(strategy_frame)
+        prune_row.grid(row=row, column=1, sticky="w", padx=8, pady=6)
+        ttk.Checkbutton(prune_row, text="Enable", variable=self.optimizer_enable_pruning_var).pack(side="left")
+        ttk.Checkbutton(prune_row, text="Constraint", variable=self.optimizer_prune_constraint_var).pack(side="left", padx=(8,0))
+        ttk.Checkbutton(prune_row, text="LCB", variable=self.optimizer_prune_lcb_var).pack(side="left", padx=(8,0))
+        ttk.Label(prune_row, text="min done").pack(side="left", padx=(8,0))
+        ttk.Entry(prune_row, textvariable=self.optimizer_min_completed_var, width=5).pack(side="left")
+
+        row += 1
+        self.optimizer_staged_budgets_var = tk.StringVar(value='[{"label":"coarse","n_trials":12,"sampler":"random","partial_period_fractions":[0.33,0.66]},{"label":"fine","n_trials":20,"sampler":"tpe","partial_period_fractions":[0.5,1.0]}]')
+        ttk.Label(strategy_frame, text="Staged budgets (JSON)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        ttk.Entry(strategy_frame, textvariable=self.optimizer_staged_budgets_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         self.walk_forward_frame = ttk.LabelFrame(strategy_frame, text="Walk-Forward Windows (fractions of data)")
@@ -2057,6 +2087,13 @@ class BacktestingPage(ttk.Frame):
         self.timeframe_var.set(timeframe if timeframe in TIMEFRAMES else "1m")
         self.use_walk_forward_var.set(bool(settings.get("use_walk_forward", False)))
         self.use_optimizer_var.set(bool(settings.get("use_optimizer", False)))
+        self.optimizer_sampler_var.set(str(settings.get("optimizer_sampler", "tpe")))
+        self.optimizer_trials_var.set(str(settings.get("optimizer_n_trials", "20")))
+        self.optimizer_enable_pruning_var.set(bool(settings.get("optimizer_enable_pruning", True)))
+        self.optimizer_prune_constraint_var.set(bool(settings.get("optimizer_prune_constraint", True)))
+        self.optimizer_prune_lcb_var.set(bool(settings.get("optimizer_prune_lcb", True)))
+        self.optimizer_min_completed_var.set(str(settings.get("optimizer_min_completed_for_pruning", "5")))
+        self.optimizer_staged_budgets_var.set(str(settings.get("optimizer_staged_budgets", self.optimizer_staged_budgets_var.get())))
         self.portfolio_method_var.set(str(settings.get("portfolio_method", "equal_weight")))
         self.portfolio_vol_lookback_var.set(str(settings.get("portfolio_vol_lookback_bars", "20")))
         self.portfolio_target_vol_var.set(str(settings.get("portfolio_target_volatility", "0.10")))
@@ -2193,6 +2230,13 @@ class BacktestingPage(ttk.Frame):
             "timeframe": self.timeframe_var.get().strip() or "1m",
             "use_walk_forward": bool(self.use_walk_forward_var.get()),
             "use_optimizer": bool(self.use_optimizer_var.get()),
+            "optimizer_sampler": self.optimizer_sampler_var.get().strip() or "tpe",
+            "optimizer_n_trials": self.optimizer_trials_var.get().strip() or "20",
+            "optimizer_enable_pruning": bool(self.optimizer_enable_pruning_var.get()),
+            "optimizer_prune_constraint": bool(self.optimizer_prune_constraint_var.get()),
+            "optimizer_prune_lcb": bool(self.optimizer_prune_lcb_var.get()),
+            "optimizer_min_completed_for_pruning": self.optimizer_min_completed_var.get().strip() or "5",
+            "optimizer_staged_budgets": self.optimizer_staged_budgets_var.get().strip(),
             "wf_train_fraction": f"{float(self.wf_train_fraction_var.get()):.2f}",
             "wf_validation_fraction": f"{float(self.wf_validation_fraction_var.get()):.2f}",
             "wf_test_fraction": f"{float(self.wf_test_fraction_var.get()):.2f}",
@@ -2381,6 +2425,31 @@ class BacktestingPage(ttk.Frame):
                 messagebox.showinfo("Invalid input", "Select at least one exit signal.")
                 return
 
+            optimizer_n_trials = int(parse_float(self.optimizer_trials_var.get()) or 20)
+            if optimizer_n_trials <= 0:
+                messagebox.showinfo("Invalid input", "Optimizer trials must be greater than zero.")
+                return False
+            optimizer_sampler = (self.optimizer_sampler_var.get().strip().lower() or "tpe")
+            if optimizer_sampler not in set(OPTIMIZER_SAMPLERS):
+                messagebox.showinfo("Invalid input", "Optimizer sampler must be one of: tpe, cma-es, random, grid.")
+                return False
+            optimizer_min_completed = int(parse_float(self.optimizer_min_completed_var.get()) or 5)
+            if optimizer_min_completed < 1:
+                messagebox.showinfo("Invalid input", "Min completed for pruning must be >= 1.")
+                return False
+            staged_budgets_raw = self.optimizer_staged_budgets_var.get().strip()
+            staged_budgets: list[dict[str, object]] | None = None
+            if staged_budgets_raw:
+                try:
+                    parsed_stage = json.loads(staged_budgets_raw)
+                except json.JSONDecodeError:
+                    messagebox.showinfo("Invalid input", "Staged budgets must be valid JSON list.")
+                    return False
+                if not isinstance(parsed_stage, list):
+                    messagebox.showinfo("Invalid input", "Staged budgets must be a JSON list.")
+                    return False
+                staged_budgets = [dict(item) for item in parsed_stage if isinstance(item, dict)]
+
             if bool(self.use_optimizer_var.get()):
                 worker_target = self._run_optimizer_worker
                 worker_args = (
@@ -2397,6 +2466,13 @@ class BacktestingPage(ttk.Frame):
                     execution_model_params,
                     governance_payload,
                     stress_controls,
+                    optimizer_n_trials,
+                    optimizer_sampler,
+                    bool(self.optimizer_enable_pruning_var.get()),
+                    bool(self.optimizer_prune_constraint_var.get()),
+                    bool(self.optimizer_prune_lcb_var.get()),
+                    optimizer_min_completed,
+                    staged_budgets,
                 )
                 status_line = f"Running optimizer across {len(selected_entries) * len(selected_exits)} candidates...\n"
             elif bool(self.use_walk_forward_var.get()):
@@ -2607,6 +2683,13 @@ class BacktestingPage(ttk.Frame):
         execution_model_params: dict[str, object],
         governance_payload: dict[str, object],
         stress_controls: dict[str, object],
+        optimizer_n_trials: int,
+        optimizer_sampler: str,
+        enable_pruning: bool,
+        prune_on_constraint_violation: bool,
+        prune_on_lcb: bool,
+        min_completed_for_pruning: int,
+        staged_budgets: list[dict[str, object]] | None,
     ) -> None:
         try:
             entry_grid = {signal: [{}] for signal in entry_signals}
@@ -2625,9 +2708,14 @@ class BacktestingPage(ttk.Frame):
                 exit_grid=exit_grid,
                 core_grid=core_grid,
                 seed=42,
-                n_trials=max(10, len(entry_signals) * len(exit_signals) * 4),
-                sampler_name="tpe",
+                n_trials=max(1, int(optimizer_n_trials)),
+                sampler_name=str(optimizer_sampler),
                 partial_period_fractions=[0.33, 0.66, 1.0],
+                enable_pruning=bool(enable_pruning),
+                prune_on_constraint_violation=bool(prune_on_constraint_violation),
+                prune_on_lcb=bool(prune_on_lcb),
+                min_completed_for_pruning=int(min_completed_for_pruning),
+                staged_budgets=None if staged_budgets is None else [dict(stage) for stage in staged_budgets],
                 governance_metadata=dict(governance_payload),
                 stress_controls=dict(stress_controls),
             )
@@ -2762,6 +2850,13 @@ class BacktestingPage(ttk.Frame):
         portfolio_cfg: dict[str, object],
         governance_payload: dict[str, object],
         stress_controls: dict[str, object],
+        optimizer_n_trials: int,
+        optimizer_sampler: str,
+        enable_pruning: bool,
+        prune_on_constraint_violation: bool,
+        prune_on_lcb: bool,
+        min_completed_for_pruning: int,
+        staged_budgets: list[dict[str, object]] | None,
     ) -> None:
         try:
             output_text = run_time_series_momentum_backtest(
