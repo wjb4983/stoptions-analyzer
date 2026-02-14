@@ -1,0 +1,14 @@
+{
+  "model_gate": {
+    "pass": true,
+    "threshold": 0
+  },
+  "diagnostics": {
+    "calendar_violations": 0,
+    "butterfly_violations": 0,
+    "total_variance_monotonicity_violations": 0,
+    "max_calendar_violation": 0.0,
+    "max_butterfly_violation": 0.0,
+    "max_total_variance_monotonicity_violation": 0.0
+  }
+}

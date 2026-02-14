@@ -49,15 +49,17 @@ This writes a single artifact per run:
 
 ## Merge/deploy quality gates and cards
 
-Evaluate the required merge/deploy gates (data quality, leakage tests, validation integrity, calibration, friction-adjusted performance), then generate standardized cards:
+Evaluate no-arbitrage diagnostics and required merge/deploy gates (data quality, leakage tests, validation integrity, calibration, friction-adjusted performance, no-arbitrage surface), then generate standardized cards:
 
 ```bash
+python reports/no_arb_diagnostics.py --surface reports/surface_total_variance_snapshot.npz
 python reports/quality_gates.py
 python reports/generate_cards.py
 ```
 
 Artifacts written in `reports/`:
 
+- `no_arb_diagnostics_report.json`
 - `quality_gates_report.json`
 - `model_card.json`
 - `strategy_card.json`

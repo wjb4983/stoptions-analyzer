@@ -20,6 +20,7 @@ def test_quality_gates_pass_with_repo_artifacts() -> None:
         "validation_integrity",
         "calibration",
         "friction_adjusted_performance",
+        "no_arbitrage_surface",
     }
 
 

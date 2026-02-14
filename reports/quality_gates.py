@@ -12,6 +12,7 @@ REPORTS_DIR = Path(__file__).resolve().parent
 DEFAULT_SCORECARD_PATH = REPORTS_DIR / "benchmark_scorecard.json"
 DEFAULT_CALIBRATION_PATH = REPORTS_DIR / "calibration_report.json"
 DEFAULT_BASELINE_PATH = REPORTS_DIR / "baseline_metrics_summary.json"
+DEFAULT_NO_ARB_PATH = REPORTS_DIR / "no_arb_diagnostics_report.json"
 DEFAULT_OUTPUT_PATH = REPORTS_DIR / "quality_gates_report.json"
 
 
@@ -31,6 +32,7 @@ def evaluate_quality_gates(
     scorecard: dict[str, Any],
     calibration_report: dict[str, Any],
     baseline_rows: list[dict[str, Any]],
+    no_arb_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     baseline = list(baseline_rows)
     if not baseline:
@@ -92,7 +94,17 @@ def evaluate_quality_gates(
         },
     )
 
-    gates = [data_quality, leakage_tests, validation_integrity, calibration, friction_adjusted]
+    no_arb_model_gate = no_arb_report.get("model_gate", {}) if isinstance(no_arb_report, dict) else {}
+    no_arb_gate = _bool_gate(
+        "no_arbitrage_surface",
+        bool(no_arb_model_gate.get("pass", True)),
+        {
+            "threshold": int(no_arb_model_gate.get("threshold", 0)),
+            "diagnostics": no_arb_report.get("diagnostics", {}) if isinstance(no_arb_report, dict) else {},
+        },
+    )
+
+    gates = [data_quality, leakage_tests, validation_integrity, calibration, friction_adjusted, no_arb_gate]
     all_pass = all(bool(gate["pass"]) for gate in gates)
 
     return {
@@ -108,6 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scorecard", default=str(DEFAULT_SCORECARD_PATH))
     parser.add_argument("--calibration", default=str(DEFAULT_CALIBRATION_PATH))
     parser.add_argument("--baseline", default=str(DEFAULT_BASELINE_PATH))
+    parser.add_argument("--no-arb", default=str(DEFAULT_NO_ARB_PATH))
     parser.add_argument("--out", default=str(DEFAULT_OUTPUT_PATH))
     return parser.parse_args()
 
@@ -119,6 +132,7 @@ def main() -> int:
         scorecard=_load_json(Path(args.scorecard)),
         calibration_report=_load_json(Path(args.calibration)),
         baseline_rows=_load_json(Path(args.baseline)),
+        no_arb_report=_load_json(Path(args.no_arb)),
     )
     out_path = Path(args.out)
     out_path.write_text(json.dumps(result, indent=2) + "\n")
