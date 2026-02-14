@@ -7,6 +7,7 @@ import hashlib
 import re
 import uuid
 import statistics
+import webbrowser
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -262,6 +263,46 @@ class ResearchLabPage(ttk.Frame):
         ttk.Label(frame, text="Approval status").grid(row=3, column=0, sticky="w", padx=8, pady=(4, 8))
         ttk.Label(frame, textvariable=self._governance_approval_status_var).grid(row=3, column=1, sticky="w", padx=8, pady=(4, 8))
 
+        ttk.Separator(frame, orient="horizontal").grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 8))
+        ttk.Label(frame, text="Pipeline graph").grid(row=5, column=0, sticky="nw", padx=8, pady=(0, 6))
+
+        graph_frame = ttk.Frame(frame)
+        graph_frame.grid(row=5, column=1, sticky="ew", padx=8, pady=(0, 8))
+        graph_frame.columnconfigure(0, weight=1)
+
+        self._pipeline_graph_items_var = tk.StringVar(value=[])
+        self._pipeline_graph_listbox = tk.Listbox(
+            graph_frame,
+            listvariable=self._pipeline_graph_items_var,
+            height=6,
+            exportselection=False,
+        )
+        self._pipeline_graph_listbox.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self._pipeline_graph_listbox.bind("<<ListboxSelect>>", lambda _event: self._refresh_pipeline_graph_node_details())
+
+        self._pipeline_graph_node_details_var = tk.StringVar(value="No lineage graph loaded.")
+        ttk.Label(graph_frame, textvariable=self._pipeline_graph_node_details_var, wraplength=680, justify="left").grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(4, 6),
+        )
+        ttk.Button(graph_frame, text="Open Artifact", command=lambda: self._open_pipeline_graph_reference("artifact_path")).grid(
+            row=2,
+            column=0,
+            sticky="w",
+        )
+        ttk.Button(graph_frame, text="Open Logs", command=lambda: self._open_pipeline_graph_reference("logs_path")).grid(
+            row=2,
+            column=1,
+            sticky="w",
+            padx=(6, 0),
+        )
+
+        self._pipeline_graph_payload: dict[str, Any] = {"nodes": [], "edges": []}
+        self._pipeline_graph_nodes_by_id: dict[str, dict[str, Any]] = {}
+
     def _build_funnel_kpi_dashboard(self) -> None:
         frame = ttk.LabelFrame(self, text="Idea Funnel KPI Dashboard")
         frame.pack(fill="x", padx=40, pady=(0, 8))
@@ -488,6 +529,7 @@ class ResearchLabPage(ttk.Frame):
             task.workflow_output = output_text
             self._append_output(f"[{task.label}] Succeeded.")
             self._refresh_governance_dashboard_from_output(output_text)
+            self._refresh_pipeline_graph_from_output(output_text)
             self._append_explainability_cards(task, output_text)
             pack_path = self._emit_research_pack(task, output_text)
             if pack_path is not None:
@@ -692,6 +734,7 @@ class ResearchLabPage(ttk.Frame):
         metrics_tables = self._build_metrics_tables_payload(run_dir, source_manifest)
         stress_outputs = self._build_stress_outputs_payload(run_dir)
         parameter_set = self._build_parameter_set_payload(source_manifest)
+        pipeline_graph = self._build_pipeline_graph_payload(source_manifest, manifest_path=manifest_path) if manifest_path is not None and source_manifest else {"nodes": [], "edges": []}
 
         packaged_manifest = {
             "task": {
@@ -711,6 +754,7 @@ class ResearchLabPage(ttk.Frame):
                 "metrics_tables.json",
                 "stress_outputs.json",
                 "parameter_set.json",
+                "pipeline_graph.json",
                 "summary.md",
             ],
         }
@@ -719,8 +763,9 @@ class ResearchLabPage(ttk.Frame):
         (pack_dir / "metrics_tables.json").write_text(json.dumps(metrics_tables, indent=2), encoding="utf-8")
         (pack_dir / "stress_outputs.json").write_text(json.dumps(stress_outputs, indent=2), encoding="utf-8")
         (pack_dir / "parameter_set.json").write_text(json.dumps(parameter_set, indent=2), encoding="utf-8")
+        (pack_dir / "pipeline_graph.json").write_text(json.dumps(pipeline_graph, indent=2), encoding="utf-8")
         (pack_dir / "summary.md").write_text(
-            self._build_research_pack_summary(task, output_text, metrics_tables, stress_outputs, parameter_set),
+            self._build_research_pack_summary(task, output_text, metrics_tables, stress_outputs, parameter_set, pipeline_graph),
             encoding="utf-8",
         )
 
@@ -773,10 +818,13 @@ class ResearchLabPage(ttk.Frame):
         metrics_tables: dict[str, Any],
         stress_outputs: dict[str, Any],
         parameter_set: dict[str, Any],
+        pipeline_graph: dict[str, Any],
     ) -> str:
         metric_files = sorted(metrics_tables.get("tables", {}).keys()) if isinstance(metrics_tables.get("tables"), dict) else []
         stress_files = sorted(stress_outputs.get("stress_outputs", {}).keys()) if isinstance(stress_outputs.get("stress_outputs"), dict) else []
         parameter_keys = sorted((parameter_set.get("parameters") or {}).keys()) if isinstance(parameter_set.get("parameters"), dict) else []
+        graph_nodes = pipeline_graph.get("nodes", []) if isinstance(pipeline_graph.get("nodes"), list) else []
+        graph_edges = pipeline_graph.get("edges", []) if isinstance(pipeline_graph.get("edges"), list) else []
         lines = [
             f"# Research Pack Summary: {task.label}",
             "",
@@ -791,6 +839,7 @@ class ResearchLabPage(ttk.Frame):
             "- metrics_tables.json",
             "- stress_outputs.json",
             "- parameter_set.json",
+            "- pipeline_graph.json",
             "- summary.md",
             "",
             "## Metrics Tables",
@@ -801,6 +850,10 @@ class ResearchLabPage(ttk.Frame):
             "",
             "## Parameter Set",
             f"- Parameter keys: {', '.join(parameter_keys[:20]) if parameter_keys else 'None detected'}",
+            "",
+            "## Pipeline Graph",
+            f"- Nodes: {len(graph_nodes)}",
+            f"- Edges: {len(graph_edges)}",
             "",
             "## Plain-English Result Summary",
             f"The workflow '{task.label}' completed and produced the output below.\n\n{output_text.strip()}",
@@ -835,6 +888,176 @@ class ResearchLabPage(ttk.Frame):
         )
         self._governance_promotion_ready_var.set("Ready" if readiness else "Not ready")
         self._governance_approval_status_var.set(f"{approval_status} ({promotion_state})")
+
+    def _refresh_pipeline_graph_from_output(self, output_text: str) -> None:
+        manifest_path = self._extract_lineage_manifest_path_from_output(output_text)
+        if manifest_path is None or not manifest_path.exists():
+            return
+        try:
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(manifest_payload, dict):
+            return
+        graph_payload = self._build_pipeline_graph_payload(manifest_payload, manifest_path=manifest_path)
+        self._set_pipeline_graph_payload(graph_payload)
+
+    def _set_pipeline_graph_payload(self, graph_payload: dict[str, Any]) -> None:
+        nodes = graph_payload.get("nodes", []) if isinstance(graph_payload.get("nodes"), list) else []
+        rows = [f"{node.get('label', node.get('id', 'node'))} [{node.get('status', 'pending')}]" for node in nodes]
+        self._pipeline_graph_payload = graph_payload
+        self._pipeline_graph_nodes_by_id = {
+            str(node.get("id")): node for node in nodes if isinstance(node, dict) and str(node.get("id", "")).strip()
+        }
+        if hasattr(self, "_pipeline_graph_items_var"):
+            self._pipeline_graph_items_var.set(rows)
+        if hasattr(self, "_pipeline_graph_listbox") and rows:
+            self._pipeline_graph_listbox.selection_clear(0, tk.END)
+            self._pipeline_graph_listbox.selection_set(0)
+        self._refresh_pipeline_graph_node_details()
+
+    def _selected_pipeline_graph_node(self) -> dict[str, Any] | None:
+        if not hasattr(self, "_pipeline_graph_listbox"):
+            return None
+        selection = self._pipeline_graph_listbox.curselection()
+        if not selection:
+            return None
+        index = int(selection[0])
+        nodes = self._pipeline_graph_payload.get("nodes", []) if isinstance(self._pipeline_graph_payload, dict) else []
+        if not isinstance(nodes, list) or index < 0 or index >= len(nodes):
+            return None
+        node = nodes[index]
+        return node if isinstance(node, dict) else None
+
+    def _refresh_pipeline_graph_node_details(self) -> None:
+        if not hasattr(self, "_pipeline_graph_node_details_var"):
+            return
+        node = self._selected_pipeline_graph_node()
+        if not node:
+            self._pipeline_graph_node_details_var.set("No lineage graph loaded.")
+            return
+        details = [
+            f"Node: {node.get('label', node.get('id', 'unknown'))}",
+            f"Status: {node.get('status', 'pending')}",
+            f"Artifact: {node.get('artifact_path') or 'n/a'}",
+            f"Logs: {node.get('logs_path') or 'n/a'}",
+        ]
+        self._pipeline_graph_node_details_var.set("\n".join(details))
+
+    def _open_pipeline_graph_reference(self, key: str) -> None:
+        node = self._selected_pipeline_graph_node()
+        if not node:
+            return
+        raw_path = str(node.get(key, "")).strip()
+        if not raw_path:
+            self._append_output(f"No {key} available for selected node.")
+            return
+        path = Path(raw_path)
+        if not path.exists():
+            self._append_output(f"{key} path does not exist: {path}")
+            return
+        self._append_output(f"Opening {key}: {path}")
+        try:
+            webbrowser.open(path.resolve().as_uri())
+        except Exception:
+            pass
+
+    def _build_pipeline_graph_payload(self, manifest_payload: dict[str, Any], *, manifest_path: Path) -> dict[str, Any]:
+        lineage = manifest_payload.get("lineage", {})
+        run_references_raw = manifest_payload.get("run_references", [])
+        gate_outcomes_raw = manifest_payload.get("gate_outcomes", [])
+        promotion_history_raw = manifest_payload.get("promotion_history", [])
+        decision_log_raw = manifest_payload.get("decision_log", [])
+        run_references = [item for item in run_references_raw if isinstance(item, dict)] if isinstance(run_references_raw, list) else []
+        gate_outcomes = [item for item in gate_outcomes_raw if isinstance(item, dict)] if isinstance(gate_outcomes_raw, list) else []
+        promotion_history = [item for item in promotion_history_raw if isinstance(item, dict)] if isinstance(promotion_history_raw, list) else []
+        decision_log = [item for item in decision_log_raw if isinstance(item, dict)] if isinstance(decision_log_raw, list) else []
+        lineage_map = lineage if isinstance(lineage, dict) else {}
+
+        nodes: list[dict[str, Any]] = []
+        edges: list[dict[str, str]] = []
+        run_reference_by_id = {
+            str(item.get("run_id")): item
+            for item in run_references
+            if str(item.get("run_id", "")).strip()
+        }
+
+        def _append_node(node_id: str, *, label: str, node_type: str, status: str = "pending") -> None:
+            if any(existing.get("id") == node_id for existing in nodes):
+                return
+            run_ref = run_reference_by_id.get(node_id, {})
+            nodes.append(
+                {
+                    "id": node_id,
+                    "label": label,
+                    "type": node_type,
+                    "status": str(run_ref.get("status", status)),
+                    "artifact_path": run_ref.get("artifact_path"),
+                    "logs_path": run_ref.get("logs_path"),
+                    "step": run_ref.get("step"),
+                }
+            )
+
+        hypothesis_id = str(lineage_map.get("hypothesis_id") or manifest_payload.get("hypothesis", {}).get("hypothesis_id") or "hypothesis")
+        _append_node(hypothesis_id, label="Hypothesis", node_type="hypothesis", status="accepted")
+        nodes[-1]["artifact_path"] = str(manifest_path)
+        nodes[-1]["logs_path"] = str(manifest_path.parent / "logs.txt")
+
+        stage_specs = [
+            ("optimization_run_id", "Optimization", "optimization"),
+            ("walk_forward_run_id", "Walk-forward", "walk_forward"),
+            ("stress_run_id", "Stress", "stress"),
+        ]
+        for key, label, node_type in stage_specs:
+            stage_id = str(lineage_map.get(key, "")).strip()
+            if stage_id:
+                _append_node(stage_id, label=label, node_type=node_type)
+
+        gate_node_id = f"gate_checks_{hypothesis_id}"
+        gate_status = "passed" if all(str(item.get("status", "")).lower() in {"accept", "pass", "passed"} for item in gate_outcomes) else "pending"
+        _append_node(gate_node_id, label="Gate checks", node_type="gate_checks", status=gate_status)
+        nodes[-1]["artifact_path"] = str(manifest_path)
+
+        latest_promotion = promotion_history[-1] if promotion_history else {}
+        latest_decision = decision_log[-1] if decision_log else {}
+        promotion_status = str(latest_promotion.get("state") or latest_decision.get("decision") or "pending")
+        promotion_node_id = f"promotion_decision_{hypothesis_id}"
+        _append_node(promotion_node_id, label="Promotion decision", node_type="promotion_decision", status=promotion_status)
+        nodes[-1]["artifact_path"] = str(manifest_path)
+
+        links_payload = lineage_map.get("links", {}) if isinstance(lineage_map.get("links"), dict) else {}
+        for link in links_payload.values():
+            if not isinstance(link, dict):
+                continue
+            parent_id = str(link.get("parent_id", "")).strip()
+            child_id = str(link.get("child_id", "")).strip()
+            if parent_id and child_id:
+                edges.append({"source": parent_id, "target": child_id})
+
+        for run_ref in run_references:
+            parent_id = str(run_ref.get("parent_id", "")).strip()
+            run_id = str(run_ref.get("run_id", "")).strip()
+            if parent_id and run_id:
+                edges.append({"source": parent_id, "target": run_id})
+        stress_id = str(lineage_map.get("stress_run_id", "")).strip()
+        if stress_id:
+            edges.append({"source": stress_id, "target": gate_node_id})
+        edges.append({"source": gate_node_id, "target": promotion_node_id})
+
+        deduped_edges: list[dict[str, str]] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        for edge in edges:
+            key = (edge["source"], edge["target"])
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            deduped_edges.append(edge)
+        return {
+            "schema_version": "1.0",
+            "manifest_path": str(manifest_path),
+            "nodes": nodes,
+            "edges": deduped_edges,
+        }
 
     def _refresh_funnel_kpi_dashboard(self) -> None:
         funnel = self._compute_funnel_metrics()
@@ -905,6 +1128,22 @@ class ResearchLabPage(ttk.Frame):
                 manifest_path = candidate / "manifest.json"
                 if manifest_path.exists():
                     return manifest_path
+        return None
+
+    def _extract_lineage_manifest_path_from_output(self, output_text: str) -> Path | None:
+        manifest_path = self._extract_manifest_path_from_output(output_text)
+        if manifest_path is not None:
+            return manifest_path
+        for match in re.findall(r"Generated experiment skeleton:\s*(.+)", output_text):
+            raw = match.strip().splitlines()[0].strip()
+            if not raw:
+                continue
+            candidate = Path(raw)
+            if candidate.is_file() and candidate.name == "research_project.json":
+                return candidate
+        direct_path = Path(output_text.strip())
+        if direct_path.exists() and direct_path.is_file() and direct_path.suffix == ".json":
+            return direct_path
         return None
 
     def _cancel_selected_task(self) -> None:
@@ -2623,6 +2862,15 @@ class ResearchLabPage(ttk.Frame):
         output_path = skeleton_dir / "research_project.json"
         generated_at = date.today().isoformat()
         lineage = dict(record.get("lineage", {}))
+        optimization_run_id = str(lineage.get("optimization_run_id", "")).strip()
+        walk_forward_run_id = str(lineage.get("walk_forward_run_id", "")).strip()
+        stress_run_id = str(lineage.get("stress_run_id", "")).strip()
+        run_artifacts_dir = skeleton_dir / "run_artifacts"
+
+        def _artifact_path_for(run_id: str, suffix: str) -> str | None:
+            if not run_id:
+                return None
+            return str(run_artifacts_dir / run_id / suffix)
 
         manifest = {
             "schema_version": "1.0",
@@ -2651,22 +2899,28 @@ class ResearchLabPage(ttk.Frame):
                     "step": "parameter_optimization",
                     "call": "run_strategy_optimization",
                     "status": "todo",
-                    "run_id": lineage.get("optimization_run_id"),
+                    "run_id": optimization_run_id or None,
                     "parent_id": lineage.get("hypothesis_id"),
+                    "artifact_path": _artifact_path_for(optimization_run_id, "manifest.json"),
+                    "logs_path": _artifact_path_for(optimization_run_id, "logs.txt"),
                 },
                 {
                     "step": "walk_forward_validation",
                     "call": "run_walk_forward_backtest",
                     "status": "todo",
-                    "run_id": lineage.get("walk_forward_run_id"),
-                    "parent_id": lineage.get("optimization_run_id"),
+                    "run_id": walk_forward_run_id or None,
+                    "parent_id": optimization_run_id or None,
+                    "artifact_path": _artifact_path_for(walk_forward_run_id, "manifest.json"),
+                    "logs_path": _artifact_path_for(walk_forward_run_id, "logs.txt"),
                 },
                 {
                     "step": "stress_testing",
                     "call": "run_multi_signal_backtest",
                     "status": "todo",
-                    "run_id": lineage.get("stress_run_id"),
-                    "parent_id": lineage.get("walk_forward_run_id"),
+                    "run_id": stress_run_id or None,
+                    "parent_id": walk_forward_run_id or None,
+                    "artifact_path": _artifact_path_for(stress_run_id, "manifest.json"),
+                    "logs_path": _artifact_path_for(stress_run_id, "logs.txt"),
                 },
             ],
             "gate_outcomes": [
@@ -2736,6 +2990,7 @@ class ResearchLabPage(ttk.Frame):
             "generated_at": generated_at,
             "last_updated": generated_at,
         }
+        manifest["pipeline_graph"] = self._build_pipeline_graph_payload(manifest, manifest_path=output_path)
 
         if output_path.exists():
             try:
@@ -2769,6 +3024,8 @@ class ResearchLabPage(ttk.Frame):
                     if key in existing:
                         manifest[key] = existing[key]
                 manifest["last_updated"] = generated_at
+
+        manifest["pipeline_graph"] = self._build_pipeline_graph_payload(manifest, manifest_path=output_path)
 
         output_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         return output_path
