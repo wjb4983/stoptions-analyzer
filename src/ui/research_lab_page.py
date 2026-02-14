@@ -48,6 +48,7 @@ class ResearchWorkflowConfig:
     step_fraction: float
     walk_forward_split_policy: str
     stress_controls: dict[str, object]
+    benchmark_selection: list[str]
 
 
 DEFAULT_RESEARCH_WORKFLOW_PRESETS: dict[str, Any] = {
@@ -66,6 +67,7 @@ DEFAULT_RESEARCH_WORKFLOW_PRESETS: dict[str, Any] = {
                 "step_fraction": 0.15,
                 "split_policy": "calendar-based",
             },
+            "benchmark_selection": ["buy_hold", "equal_weight_momentum", "volatility_parity"],
             "stress_controls": {
                 "enable_historical_replay_regimes": True,
                 "historical_window_fraction": 0.20,
@@ -109,6 +111,7 @@ class ResearchLabPage(ttk.Frame):
         self._sampler_options = ("tpe", "cma-es", "random", "grid")
         self._signal_options = ("ts_momentum", "ma_trend", "breakout")
         self._exit_signal_options = ("none", "momentum_flip", "trailing_stop", "max_hold")
+        self._benchmark_options = ("buy_hold", "equal_weight_momentum", "volatility_parity")
         self._wizard_state_path = self._research_lab_dir / "wizard_state.json"
         self._hypothesis_rubric_templates_path = HYPOTHESIS_RUBRIC_TEMPLATES_PATH
         self._rubric_templates = self._load_rubric_templates()
@@ -870,6 +873,7 @@ class ResearchLabPage(ttk.Frame):
 
         self.entry_signals_var = tk.StringVar(value="ts_momentum, breakout")
         self.exit_signals_var = tk.StringVar(value="none, momentum_flip")
+        self.benchmark_selection_var = tk.StringVar(value="buy_hold, equal_weight_momentum, volatility_parity")
         self.optimization_trials_var = tk.StringVar(value="20")
         self.optimization_sampler_var = tk.StringVar(value="tpe")
         self.optimization_enable_pruning_var = tk.BooleanVar(value=True)
@@ -965,6 +969,10 @@ class ResearchLabPage(ttk.Frame):
         ttk.Label(controls, text="Exit signals (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
         ttk.Entry(controls, textvariable=self.exit_signals_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
         add_help(row, help_text["exit"])
+
+        row += 1
+        ttk.Label(controls, text="Benchmarks (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        ttk.Entry(controls, textvariable=self.benchmark_selection_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
 
         row += 1
         ttk.Label(controls, text="Optimization trials / sampler").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -1833,11 +1841,14 @@ class ResearchLabPage(ttk.Frame):
         optimization = preset.get("optimization", {})
         walk_forward = preset.get("walk_forward", {})
         stress_controls = preset.get("stress_controls", {})
+        benchmark_selection = preset.get("benchmark_selection", list(self._benchmark_options))
 
         if isinstance(entry_signals, list) and entry_signals:
             self.entry_signals_var.set(", ".join(str(signal) for signal in entry_signals))
         if isinstance(exit_signals, list) and exit_signals:
             self.exit_signals_var.set(", ".join(str(signal) for signal in exit_signals))
+        if isinstance(benchmark_selection, list) and benchmark_selection:
+            self.benchmark_selection_var.set(", ".join(str(item) for item in benchmark_selection))
 
         self.optimization_trials_var.set(str(optimization.get("n_trials", self.optimization_trials_var.get())))
         self.optimization_sampler_var.set(str(optimization.get("sampler", self.optimization_sampler_var.get())))
@@ -1914,6 +1925,14 @@ class ResearchLabPage(ttk.Frame):
         if exit_signals is None:
             return None
 
+        benchmark_selection = self._parse_signal_csv(
+            self.benchmark_selection_var.get().strip(),
+            valid_options=self._benchmark_options,
+            field_name="Benchmarks",
+        )
+        if benchmark_selection is None:
+            return None
+
         n_trials = int(parse_float(self.optimization_trials_var.get()) or 20)
         if n_trials <= 0:
             messagebox.showinfo("Invalid input", "Optimization trials must be greater than zero.")
@@ -1987,6 +2006,7 @@ class ResearchLabPage(ttk.Frame):
             step_fraction=step_fraction,
             walk_forward_split_policy=split_policy,
             stress_controls=stress_controls,
+            benchmark_selection=benchmark_selection,
         )
 
     def _build_signal_grids(
@@ -2026,6 +2046,7 @@ class ResearchLabPage(ttk.Frame):
                 "universe_filters": dict(context.get("universe_filters", {})),
             },
             stress_controls=dict(config.stress_controls),
+            benchmarks=list(config.benchmark_selection),
         )
 
     def _run_optimization_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
@@ -2054,6 +2075,7 @@ class ResearchLabPage(ttk.Frame):
                 "universe_filters": dict(context.get("universe_filters", {})),
             },
             stress_controls=dict(config.stress_controls),
+            benchmarks=list(config.benchmark_selection),
         )
 
     def _run_stress_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:
@@ -2075,6 +2097,7 @@ class ResearchLabPage(ttk.Frame):
                 "universe_filters": dict(context.get("universe_filters", {})),
             },
             stress_controls=dict(config.stress_controls),
+            benchmarks=list(config.benchmark_selection),
         )
 
     def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig) -> str:

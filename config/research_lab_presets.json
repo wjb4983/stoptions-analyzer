@@ -32,7 +32,12 @@
         "synthetic_vol_cluster_multiplier": 1.6,
         "overlay_spread_multiplier": 2.5,
         "overlay_liquidity_multiplier": 0.4
-      }
+      },
+      "benchmark_selection": [
+        "buy_hold",
+        "equal_weight_momentum",
+        "volatility_parity"
+      ]
     },
     "fast_iteration": {
       "label": "Fast Iteration",
@@ -64,7 +69,12 @@
         "synthetic_vol_cluster_multiplier": 1.2,
         "overlay_spread_multiplier": 1.8,
         "overlay_liquidity_multiplier": 0.6
-      }
+      },
+      "benchmark_selection": [
+        "buy_hold",
+        "equal_weight_momentum",
+        "volatility_parity"
+      ]
     },
     "robustness_hardening": {
       "label": "Robustness Hardening",
@@ -99,7 +109,12 @@
         "synthetic_vol_cluster_multiplier": 2.1,
         "overlay_spread_multiplier": 3.2,
         "overlay_liquidity_multiplier": 0.3
-      }
+      },
+      "benchmark_selection": [
+        "buy_hold",
+        "equal_weight_momentum",
+        "volatility_parity"
+      ]
     }
   }
 }

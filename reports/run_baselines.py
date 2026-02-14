@@ -47,6 +47,38 @@ SCENARIOS = [
     },
 ]
 
+BENCHMARKS = ("buy_hold", "equal_weight_momentum", "volatility_parity")
+
+
+def _build_benchmark_signals(prices: np.ndarray, benchmark: str, lookback: int, skip: int = 1) -> np.ndarray:
+    n_periods, n_assets = prices.shape
+    if benchmark == "buy_hold":
+        return np.ones((n_periods, n_assets), dtype=float)
+    if benchmark == "equal_weight_momentum":
+        return np.maximum(_build_signals(prices, lookback=lookback, skip=skip), 0.0)
+    if benchmark == "volatility_parity":
+        returns = np.zeros_like(prices)
+        returns[1:] = prices[1:] / np.where(prices[:-1] == 0.0, 1.0, prices[:-1]) - 1.0
+        out = np.zeros_like(prices)
+        lb = max(5, int(lookback))
+        for idx in range(lb, n_periods):
+            vol = np.std(returns[max(1, idx - lb + 1): idx + 1], axis=0)
+            inv = np.where(vol > 1e-8, 1.0 / vol, 0.0)
+            denom = float(np.sum(inv))
+            out[idx] = (inv / denom) if denom > 1e-12 else np.full(n_assets, 1.0 / max(1, n_assets))
+        out[: min(lb, n_periods)] = np.full((min(lb, n_periods), n_assets), 1.0 / max(1, n_assets))
+        return out
+    raise ValueError(f"unknown benchmark {benchmark}")
+
+
+def _alpha_ir(candidate: np.ndarray, benchmark: np.ndarray) -> tuple[float, float]:
+    active = np.asarray(candidate, dtype=float).reshape(-1) - np.asarray(benchmark, dtype=float).reshape(-1)
+    alpha = float(np.mean(active)) if active.size else 0.0
+    te = float(np.std(active)) if active.size else 0.0
+    ir = 0.0 if te <= 1e-12 else float(alpha / te)
+    return alpha, ir
+
+
 
 def _build_signals(prices: np.ndarray, lookback: int, skip: int = 1) -> np.ndarray:
     n_periods, n_assets = prices.shape
@@ -115,6 +147,20 @@ def main() -> None:
 
         extra_metrics, drawdown = _compute_extra_metrics(result)
         all_metrics = {**result.metrics, **extra_metrics}
+        bench_metrics: dict[str, float] = {}
+        for benchmark in BENCHMARKS:
+            bench_signals = _build_benchmark_signals(prices, benchmark=benchmark, lookback=cfg["lookback_days"], skip=cfg["skip_days"])
+            bench_result = backtest_vectorized(
+                prices=prices,
+                signals=bench_signals,
+                slippage_model=BpsSlippage(0.0),
+                fee_model=FixedCommission(0.0),
+                execution_mode="optimized",
+            )
+            alpha, ir = _alpha_ir(np.asarray(result.returns, dtype=float), np.asarray(bench_result.returns, dtype=float))
+            bench_metrics[f"alpha_vs_{benchmark}"] = alpha
+            bench_metrics[f"ir_vs_{benchmark}"] = ir
+
 
         required_fields = [
             "total_return",
@@ -144,6 +190,7 @@ def main() -> None:
             "runtime_seconds": runtime_seconds,
             "runtime_pass": runtime_pass,
             **all_metrics,
+            **bench_metrics,
             "required_metrics_present": required_present,
             "required_metrics_sane": required_sane,
         }

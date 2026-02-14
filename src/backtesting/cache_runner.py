@@ -113,6 +113,73 @@ PROMOTION_REQUIRED_CHECKS: dict[str, list[str]] = {
     "production": ["dataset_lock", "signal_diagnostics", "oos_periods", "stability_threshold", "turnover_capacity", "drift_monitoring", "friction_adjusted_edge", "causal_robustness", "deflated_sharpe_reality_check", "parameter_stability_penalty", "train_validation_test_drift", "experiment_id", "approval"],
 }
 
+BENCHMARK_BUY_HOLD = "buy_hold"
+BENCHMARK_EQUAL_WEIGHT_MOMENTUM = "equal_weight_momentum"
+BENCHMARK_VOLATILITY_PARITY = "volatility_parity"
+DEFAULT_BENCHMARK_SELECTION: tuple[str, ...] = (
+    BENCHMARK_BUY_HOLD,
+    BENCHMARK_EQUAL_WEIGHT_MOMENTUM,
+    BENCHMARK_VOLATILITY_PARITY,
+)
+
+
+def _resolve_benchmark_selection(selected: list[str] | None) -> list[str]:
+    allowed = set(DEFAULT_BENCHMARK_SELECTION)
+    if not selected:
+        return list(DEFAULT_BENCHMARK_SELECTION)
+    normalized: list[str] = []
+    for name in selected:
+        key = str(name).strip().lower().replace("-", "_").replace(" ", "_")
+        if key in allowed and key not in normalized:
+            normalized.append(key)
+    return normalized or list(DEFAULT_BENCHMARK_SELECTION)
+
+
+def _build_benchmark_signals(*, benchmark: str, prices: np.ndarray, lookback_days: int, skip_days: int) -> np.ndarray:
+    n_periods, n_assets = prices.shape
+    if benchmark == BENCHMARK_BUY_HOLD:
+        return np.ones((n_periods, n_assets), dtype=float)
+    if benchmark == BENCHMARK_EQUAL_WEIGHT_MOMENTUM:
+        entry_cfg = parse_entry_signal_config(
+            "ts_momentum",
+            {"lookback_days": int(lookback_days), "skip_days": int(skip_days), "long_only": True},
+            default_lookback_days=int(lookback_days),
+            default_skip_days=int(skip_days),
+        )
+        exit_cfg = parse_exit_signal_config("none", {}, default_lookback_days=int(lookback_days), default_skip_days=int(skip_days))
+        return build_targets(close_prices=prices, missing_mask=np.zeros_like(prices, dtype=bool), entry_config=entry_cfg, exit_config=exit_cfg)
+    if benchmark == BENCHMARK_VOLATILITY_PARITY:
+        returns = np.zeros_like(prices, dtype=float)
+        returns[1:] = prices[1:] / np.where(prices[:-1] == 0.0, 1.0, prices[:-1]) - 1.0
+        lookback = max(5, int(lookback_days))
+        signals = np.zeros_like(prices, dtype=float)
+        for idx in range(lookback, n_periods):
+            window = returns[max(1, idx - lookback + 1): idx + 1]
+            vol = np.std(window, axis=0)
+            inv_vol = np.where(vol > 1e-8, 1.0 / vol, 0.0)
+            denom = float(np.sum(inv_vol))
+            if denom <= 1e-12:
+                signals[idx] = np.full(n_assets, 1.0 / max(1, n_assets), dtype=float)
+            else:
+                signals[idx] = inv_vol / denom
+        if n_periods:
+            signals[:lookback] = np.full((min(lookback, n_periods), n_assets), 1.0 / max(1, n_assets), dtype=float)
+        return signals
+    raise ValueError(f"Unsupported benchmark: {benchmark}")
+
+
+def _compute_relative_alpha_ir(candidate_returns: np.ndarray, benchmark_returns: np.ndarray) -> dict[str, float]:
+    candidate = np.asarray(candidate_returns, dtype=float).reshape(-1)
+    benchmark = np.asarray(benchmark_returns, dtype=float).reshape(-1)
+    size = min(candidate.size, benchmark.size)
+    if size == 0:
+        return {"alpha": 0.0, "information_ratio": 0.0, "tracking_error": 0.0}
+    active = candidate[:size] - benchmark[:size]
+    alpha = float(np.mean(active))
+    tracking_error = float(np.std(active))
+    ir = 0.0 if tracking_error <= 1e-12 else float(alpha / tracking_error)
+    return {"alpha": alpha, "information_ratio": ir, "tracking_error": tracking_error}
+
 
 def run_backtest_cache(
     tickers: list[str],
@@ -258,6 +325,7 @@ def run_time_series_momentum_backtest(
     max_participation_rate: float | None = None,
     random_seed: int = 42,
     preflight_config: PreflightValidationConfig | None = None,
+    benchmarks: list[str] | None = None,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     random.seed(int(random_seed))
@@ -559,6 +627,64 @@ def run_time_series_momentum_backtest(
         corporate_action_dividends=arrays.dividends,
     )
 
+    selected_benchmarks = _resolve_benchmark_selection(benchmarks)
+    benchmark_rows: list[dict[str, Any]] = []
+    benchmark_lookup: dict[str, dict[str, float]] = {}
+    for benchmark_name in selected_benchmarks:
+        benchmark_signals = _build_benchmark_signals(
+            benchmark=benchmark_name,
+            prices=prices,
+            lookback_days=lookback_days,
+            skip_days=skip_days,
+        )
+        benchmark_result = backtest_vectorized(
+            prices=prices,
+            signals=benchmark_signals,
+            slippage_model=BpsSlippage(0.0),
+            fee_model=BrokerFeeModel(fee_bps=0.0, fee_per_unit=0.0, minimum_fee=0.0),
+            borrow_cost_model=ShortBorrowCost(annual_borrow_rate=0.0),
+            volumes=getattr(arrays, "volume", np.maximum(arrays.close_prices, 1.0)),
+            adv=getattr(arrays, "adv", np.maximum(arrays.close_prices, 1.0)),
+            volatility=getattr(arrays, "realized_volatility", np.zeros_like(arrays.close_prices)),
+            spread_bps=getattr(arrays, "spread_bps", np.full_like(arrays.close_prices, float(costs_bps))),
+            order_type=str((execution_model_params or {}).get("order_type", "market")),
+            latency_bars=getattr(arrays, "latency_bars", np.zeros_like(arrays.close_prices)),
+            latency_ms=getattr(arrays, "latency_ms", np.zeros_like(arrays.close_prices)),
+            queue_rank_proxy=getattr(arrays, "queue_rank_proxy", np.full_like(arrays.close_prices, 0.5)),
+            available_bar_volume=getattr(arrays, "available_bar_volume", np.maximum(arrays.close_prices, 1.0)),
+            max_participation_per_bar=getattr(arrays, "max_participation", np.ones_like(arrays.close_prices)),
+            initial_equity=float(starting_capital),
+            timeframe=timeframe,
+            dates=arrays.date_index,
+            symbols=symbol_order,
+            carry_asset_classes=[arrays.metadata.asset_class_by_symbol[symbol] for symbol in symbol_order],
+            carry_expiry_by_asset=[arrays.metadata.expiry_by_symbol[symbol] for symbol in symbol_order],
+            carry_multipliers=[arrays.metadata.multiplier_by_symbol[symbol] for symbol in symbol_order],
+            carry_borrow_availability_tiers=[
+                arrays.metadata.borrow_availability_tier_by_symbol[symbol] for symbol in symbol_order
+            ],
+            carry_financing_benchmarks=[arrays.metadata.financing_benchmark_by_symbol[symbol] for symbol in symbol_order],
+            borrow_rate_series=borrow_rate_series,
+            borrow_available_flags=borrow_available_flags,
+            corporate_action_splits=arrays.split_factors,
+            corporate_action_dividends=arrays.dividends,
+        )
+        rel = _compute_relative_alpha_ir(
+            candidate_returns=_to_numpy_1d(result.returns),
+            benchmark_returns=_to_numpy_1d(benchmark_result.returns),
+        )
+        benchmark_row = {
+            "benchmark": benchmark_name,
+            "total_return": float(benchmark_result.metrics.get("total_return", 0.0)),
+            "sharpe": float(benchmark_result.metrics.get("sharpe", 0.0)),
+            "volatility": float(benchmark_result.metrics.get("volatility", 0.0)),
+            "alpha": float(rel["alpha"]),
+            "information_ratio": float(rel["information_ratio"]),
+            "tracking_error": float(rel["tracking_error"]),
+        }
+        benchmark_rows.append(benchmark_row)
+        benchmark_lookup[benchmark_name] = benchmark_row
+
     governance_payload = _build_governance_metadata(governance_metadata)
 
     friction_edge = _friction_adjusted_edge_checks(
@@ -603,6 +729,9 @@ def run_time_series_momentum_backtest(
     metrics["cost_total"] = cost_totals.get("total", 0.0)
     metrics["friction_adjusted_edge"] = float(friction_edge["friction_adjusted_edge"])
     metrics["friction_edge_retention"] = float(friction_edge["friction_edge_retention"])
+    for benchmark_name, benchmark_row in benchmark_lookup.items():
+        metrics[f"alpha_vs_{benchmark_name}"] = float(benchmark_row.get("alpha", 0.0))
+        metrics[f"ir_vs_{benchmark_name}"] = float(benchmark_row.get("information_ratio", 0.0))
 
     regime_pnl_attribution = attribute_pnl_by_regime(pnl=pnl, regime_labels=regime_labels)
     regime_ensemble_report = _build_regime_ensemble_comparison(
@@ -618,6 +747,7 @@ def run_time_series_momentum_backtest(
         "costs_bps": costs_bps,
         "execution_model": execution_model,
         "execution_model_params": execution_model_params or {},
+        "benchmarks": benchmark_rows,
         "friction_backtests": {
             "friction_on": {"metrics": {k: float(v) for k, v in result.metrics.items() if isinstance(v, (int, float))}},
             "friction_off": {"metrics": {k: float(v) for k, v in friction_off_result.metrics.items() if isinstance(v, (int, float))}},
@@ -790,7 +920,16 @@ def run_time_series_momentum_backtest(
             ensemble_lines.append(
                 f"- {row.get('regime', '')}: uplift_pnl_mean={float(row.get('uplift_pnl_mean', 0.0)):.8f} bars={int(row.get('bars', 0))}"
             )
-    final_report = report_text + "\n\n" + trade_log_summary + "\n\n" + explainability_report + "\n\n" + "\n".join(ensemble_lines)
+    benchmark_lines = ["Benchmark comparison:"]
+    if benchmark_rows:
+        for row in benchmark_rows:
+            benchmark_lines.append(
+                f"- {row['benchmark']}: total_return={row['total_return']:.6f} sharpe={row['sharpe']:.6f} alpha={row['alpha']:.6f} ir={row['information_ratio']:.6f}"
+            )
+    else:
+        benchmark_lines.append("- none")
+
+    final_report = report_text + "\n\n" + trade_log_summary + "\n\n" + explainability_report + "\n\n" + "\n".join(ensemble_lines) + "\n\n" + "\n".join(benchmark_lines)
     (run_dir / "report.txt").write_text(final_report)
 
     return final_report + f"\n\nSaved outputs to: {run_dir}"
@@ -970,6 +1109,7 @@ def run_parameter_sweep(
     retry_policy: SweepRetryPolicy | None = None,
     lineage_parent_manifest: str | None = None,
     preflight_config: PreflightValidationConfig | None = None,
+    benchmarks: list[str] | None = None,
 ) -> str:
     """Run a parallel sweep over signal/core-parameter combinations."""
 
@@ -1410,6 +1550,7 @@ def run_walk_forward_backtest(
     governance_metadata: dict[str, Any] | None = None,
     lineage_parent_manifest: str | None = None,
     stress_controls: dict[str, Any] | None = None,
+    benchmarks: list[str] | None = None,
     objective_weights: dict[str, float] | None = None,
     overfitting_penalty: dict[str, float] | None = None,
     strategy_key: str | None = None,
@@ -1849,6 +1990,7 @@ def run_strategy_optimization(
     partial_period_fractions: list[float] | None = None,
     governance_metadata: dict[str, Any] | None = None,
     stress_controls: dict[str, Any] | None = None,
+    benchmarks: list[str] | None = None,
     objective_weights: dict[str, float] | None = None,
     overfitting_penalty: dict[str, float] | None = None,
     strategy_key: str | None = None,
@@ -2702,6 +2844,7 @@ def run_multi_signal_backtest(
     governance_metadata: dict[str, Any] | None = None,
     stress_controls: dict[str, Any] | None = None,
     scenario_packs: list[str] | None = None,
+    benchmarks: list[str] | None = None,
 ) -> str:
     """Run all selected entry/exit combinations with shared core parameters."""
 
@@ -2757,11 +2900,15 @@ def run_multi_signal_backtest(
                 governance_metadata=governance_metadata,
                 stress_controls=stress_controls,
                 scenario_packs=selected_scenario_packs,
+                benchmarks=benchmarks,
             )
             run_dir = _extract_saved_output_dir(report)
             metrics = _load_metrics_from_run_dir(run_dir)
             stress_payload = _load_stress_payload_from_run_dir(run_dir)
             stress_gate = _stress_gate_summary(stress_payload, controls=stress_controls)
+            benchmark_rows = _load_benchmark_rows_from_run_dir(run_dir)
+            alpha_vs_bench = {str(row.get("benchmark", "")): float(row.get("alpha", 0.0)) for row in benchmark_rows}
+            ir_vs_bench = {str(row.get("benchmark", "")): float(row.get("information_ratio", 0.0)) for row in benchmark_rows}
             rows.append(
                 {
                     "entry_signal": entry_signal,
@@ -2780,6 +2927,12 @@ def run_multi_signal_backtest(
                     "rolling_drawdown_worst": float(metrics.get("rolling_drawdown_worst", 0.0)),
                     "turnover_total": float(metrics.get("turnover_total", 0.0)),
                     "cost_total": float(metrics.get("cost_total", 0.0)),
+                    "alpha_vs_buy_hold": float(alpha_vs_bench.get(BENCHMARK_BUY_HOLD, 0.0)),
+                    "alpha_vs_equal_weight_momentum": float(alpha_vs_bench.get(BENCHMARK_EQUAL_WEIGHT_MOMENTUM, 0.0)),
+                    "alpha_vs_volatility_parity": float(alpha_vs_bench.get(BENCHMARK_VOLATILITY_PARITY, 0.0)),
+                    "ir_vs_buy_hold": float(ir_vs_bench.get(BENCHMARK_BUY_HOLD, 0.0)),
+                    "ir_vs_equal_weight_momentum": float(ir_vs_bench.get(BENCHMARK_EQUAL_WEIGHT_MOMENTUM, 0.0)),
+                    "ir_vs_volatility_parity": float(ir_vs_bench.get(BENCHMARK_VOLATILITY_PARITY, 0.0)),
                     "run_dir": str(run_dir),
                     **stress_gate,
                 }
@@ -2813,7 +2966,8 @@ def run_multi_signal_backtest(
             f"cagr={row['cagr']:.6f} calmar={row['calmar']:.6f} "
             f"max_drawdown={row['max_drawdown']:.6f} volatility={row['volatility']:.6f} "
             f"sortino={row['sortino']:.6f} hit_rate={row['hit_rate']:.6f} "
-            f"turnover_total={row['turnover_total']:.6f} cost_total={row['cost_total']:.6f}"
+            f"turnover_total={row['turnover_total']:.6f} cost_total={row['cost_total']:.6f} "
+            f"alpha_vs_bh={row['alpha_vs_buy_hold']:.6f} ir_vs_bh={row['ir_vs_buy_hold']:.6f}"
         )
 
     return "\n".join(summary_lines + ["", "Detailed combo reports:", "", *combo_reports])
@@ -2838,6 +2992,33 @@ def _load_metrics_from_run_dir(run_dir: Path) -> dict[str, float]:
         value = float(row.get("value", 0.0))
         metrics[metric] = value
     return metrics
+
+
+def _load_benchmark_rows_from_run_dir(run_dir: Path) -> list[dict[str, Any]]:
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.exists():
+        return []
+    try:
+        payload = json.loads(manifest_path.read_text())
+    except Exception:
+        return []
+    parameters = payload.get("parameters", {}) if isinstance(payload, dict) else {}
+    rows = parameters.get("benchmarks", []) if isinstance(parameters, dict) else []
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        out.append({
+            "benchmark": str(row.get("benchmark", "")),
+            "alpha": float(row.get("alpha", 0.0)),
+            "information_ratio": float(row.get("information_ratio", 0.0)),
+            "tracking_error": float(row.get("tracking_error", 0.0)),
+            "sharpe": float(row.get("sharpe", 0.0)),
+            "total_return": float(row.get("total_return", 0.0)),
+        })
+    return out
 
 
 
@@ -2874,6 +3055,12 @@ def _persist_multi_signal_outputs(rows: list[dict[str, Any]]) -> Path:
         "rolling_drawdown_worst",
         "turnover_total",
         "cost_total",
+        "alpha_vs_buy_hold",
+        "alpha_vs_equal_weight_momentum",
+        "alpha_vs_volatility_parity",
+        "ir_vs_buy_hold",
+        "ir_vs_equal_weight_momentum",
+        "ir_vs_volatility_parity",
         "stress_passed",
         "stress_total_scenarios",
         "stress_failed_scenarios",
@@ -3804,15 +3991,28 @@ def _build_regime_ensemble_comparison(
     weighted_schedule, weighted_diag = build_regime_weight_schedule(regime_labels=regime_labels, config=weighted_cfg)
     regime_weighted = np.sum(sleeves * weighted_schedule, axis=1)
 
+    benchmark_equal_weight_momentum = sleeves[:, 0]
+    benchmark_volatility_parity = sleeves @ np.array([0.4, 0.2, 0.4], dtype=float)
+
     series = {
         "always_on_baseline": always_on,
         "regime_gated": regime_gated,
         "regime_weighted": regime_weighted,
+        BENCHMARK_BUY_HOLD: market_ret,
+        BENCHMARK_EQUAL_WEIGHT_MOMENTUM: benchmark_equal_weight_momentum,
+        BENCHMARK_VOLATILITY_PARITY: benchmark_volatility_parity,
     }
     comparison_rows = []
+    baseline_stream = np.asarray(series["always_on_baseline"], dtype=float)
+    baseline_metrics = _compute_stream_metrics(baseline_stream)
+    baseline_sharpe = float(baseline_metrics.get("sharpe", 0.0))
     for name, stream in series.items():
         row = {"policy": name}
         row.update(_compute_stream_metrics(stream))
+        rel = _compute_relative_alpha_ir(np.asarray(stream, dtype=float), baseline_stream)
+        row["relative_alpha_vs_always_on"] = float(rel["alpha"])
+        row["relative_ir_vs_always_on"] = float(rel["information_ratio"])
+        row["delta_sharpe_vs_always_on"] = float(row.get("sharpe", 0.0) - baseline_sharpe)
         comparison_rows.append(row)
 
     regime_attribution = {
@@ -5572,7 +5772,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _write_regime_ensemble_comparison(*, run_dir: Path, report: dict[str, Any]) -> None:
     comparison = list(report.get("comparison", []))
     csv_path = run_dir / "regime_ensemble_comparison.csv"
-    fieldnames = ["policy", "total_return", "mean_return", "volatility", "sharpe", "max_drawdown"]
+    fieldnames = ["policy", "total_return", "mean_return", "volatility", "sharpe", "max_drawdown", "relative_alpha_vs_always_on", "relative_ir_vs_always_on", "delta_sharpe_vs_always_on"]
     with csv_path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
