@@ -29,6 +29,7 @@ from config import (
     HYPOTHESIS_RUBRIC_TEMPLATES_PATH,
     RESEARCH_LAB_PRESETS_PATH,
 )
+from ui.workflow_preset_validator import validate_workflow_preset_payload
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
 
@@ -987,6 +988,7 @@ class ResearchLabPage(ttk.Frame):
         self.workflow_preset_var = tk.StringVar(value=default_preset)
         self.easy_mode_var = tk.BooleanVar(value=True)
         self._workflow_validation_var = tk.StringVar(value="")
+        self._preset_validation_warnings_var = tk.StringVar(value=self._format_preset_warning_text())
         self._advanced_workflow_widgets: list[tk.Widget] = []
 
         help_text = {
@@ -1024,6 +1026,16 @@ class ResearchLabPage(ttk.Frame):
         ).grid(row=0, column=0, sticky="w")
         ttk.Button(preset_row, text="Apply preset", command=self._apply_selected_workflow_preset).grid(row=0, column=1, sticky="w", padx=(8, 0))
         add_help(row, help_text["preset"])
+
+        row += 1
+        ttk.Label(controls, textvariable=self._preset_validation_warnings_var, foreground="#8a5a00", justify="left", wraplength=780).grid(
+            row=row,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            padx=8,
+            pady=(0, 4),
+        )
 
         row += 1
         ttk.Checkbutton(
@@ -2000,21 +2012,36 @@ class ResearchLabPage(ttk.Frame):
         return DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES["profiles"]["intraday_alpha"]
 
     def _load_workflow_presets(self) -> dict[str, Any]:
+        self._workflow_preset_warnings: list[str] = []
         if not RESEARCH_LAB_PRESETS_PATH.exists():
+            self._workflow_preset_warnings.append(
+                f"Preset file not found at {RESEARCH_LAB_PRESETS_PATH}; using built-in defaults."
+            )
             return dict(DEFAULT_RESEARCH_WORKFLOW_PRESETS)
         try:
             payload = json.loads(RESEARCH_LAB_PRESETS_PATH.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            self._workflow_preset_warnings.append(
+                f"Failed to parse preset file {RESEARCH_LAB_PRESETS_PATH}; using built-in defaults."
+            )
             return dict(DEFAULT_RESEARCH_WORKFLOW_PRESETS)
 
-        presets = payload.get("presets") if isinstance(payload, dict) else None
-        if not isinstance(presets, dict) or not presets:
-            return dict(DEFAULT_RESEARCH_WORKFLOW_PRESETS)
+        result = validate_workflow_preset_payload(
+            payload,
+            fallback_payload=DEFAULT_RESEARCH_WORKFLOW_PRESETS,
+        )
+        self._workflow_preset_warnings.extend(result.warnings)
+        return result.payload
 
-        default_preset = str(payload.get("default_preset") or next(iter(presets)))
-        if default_preset not in presets:
-            default_preset = next(iter(presets))
-        return {"default_preset": default_preset, "presets": presets}
+    def _format_preset_warning_text(self) -> str:
+        warnings = getattr(self, "_workflow_preset_warnings", [])
+        if not warnings:
+            return ""
+        preview = warnings[:3]
+        lines = [f"⚠ Preset validation: {item}" for item in preview]
+        if len(warnings) > len(preview):
+            lines.append(f"⚠ ... and {len(warnings) - len(preview)} more warning(s).")
+        return "\n".join(lines)
 
     def _resolve_workflow_preset(self, preset_name: str) -> dict[str, Any] | None:
         presets = self._workflow_presets.get("presets", {})
