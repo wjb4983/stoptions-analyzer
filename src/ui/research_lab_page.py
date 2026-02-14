@@ -566,6 +566,18 @@ class ResearchLabPage(ttk.Frame):
         self.wizard_data_universe_var = tk.StringVar(value=", ".join(self.controller.state.tickers))
         self.wizard_period_start_var = tk.StringVar(value=str(DEFAULT_BACKTEST_SETTINGS.get("start_date", "")))
         self.wizard_period_end_var = tk.StringVar(value=str(DEFAULT_BACKTEST_SETTINGS.get("end_date", "")))
+        self.wizard_sector_include_var = tk.StringVar(value="")
+        self.wizard_sector_exclude_var = tk.StringVar(value="")
+        self.wizard_adv_threshold_var = tk.StringVar(value="")
+        self.wizard_liquidity_threshold_var = tk.StringVar(value="")
+        self.wizard_price_min_var = tk.StringVar(value="")
+        self.wizard_price_max_var = tk.StringVar(value="")
+        self.wizard_market_cap_min_var = tk.StringVar(value="")
+        self.wizard_market_cap_max_var = tk.StringVar(value="")
+        self.wizard_min_option_oi_var = tk.StringVar(value="")
+        self.wizard_min_option_volume_var = tk.StringVar(value="")
+        self.wizard_min_option_dte_var = tk.StringVar(value="")
+        self.wizard_require_weeklies_var = tk.BooleanVar(value=False)
         self.wizard_test_plan_var = tk.StringVar(value="walk_forward")
         self.wizard_acceptance_var = tk.StringVar(value="Sharpe >= 0.8 and drawdown >= -0.25")
         self.wizard_run_validation_var = tk.BooleanVar(value=True)
@@ -635,6 +647,56 @@ class ResearchLabPage(ttk.Frame):
         ttk.Label(period_row, text="Period end").pack(side="left")
         ttk.Entry(period_row, textvariable=self.wizard_period_end_var, width=14).pack(side="left", padx=(8, 0))
 
+        panel = ttk.LabelFrame(frame, text="Universe Builder")
+        panel.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        panel.columnconfigure(1, weight=1)
+
+        row = 0
+        ttk.Label(panel, text="Sector include / exclude").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        sector_row = ttk.Frame(panel)
+        sector_row.grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+        sector_row.columnconfigure(0, weight=1)
+        sector_row.columnconfigure(1, weight=1)
+        ttk.Entry(sector_row, textvariable=self.wizard_sector_include_var).grid(row=0, column=0, sticky="ew")
+        ttk.Entry(sector_row, textvariable=self.wizard_sector_exclude_var).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        row += 1
+        ttk.Label(panel, text="Min ADV / Min liquidity").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        adv_row = ttk.Frame(panel)
+        adv_row.grid(row=row, column=1, sticky="w", padx=8, pady=4)
+        ttk.Entry(adv_row, textvariable=self.wizard_adv_threshold_var, width=14).pack(side="left")
+        ttk.Entry(adv_row, textvariable=self.wizard_liquidity_threshold_var, width=14).pack(side="left", padx=(6, 0))
+
+        row += 1
+        ttk.Label(panel, text="Price min / max").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        price_row = ttk.Frame(panel)
+        price_row.grid(row=row, column=1, sticky="w", padx=8, pady=4)
+        ttk.Entry(price_row, textvariable=self.wizard_price_min_var, width=14).pack(side="left")
+        ttk.Entry(price_row, textvariable=self.wizard_price_max_var, width=14).pack(side="left", padx=(6, 0))
+
+        row += 1
+        ttk.Label(panel, text="Market-cap min / max").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        mcap_row = ttk.Frame(panel)
+        mcap_row.grid(row=row, column=1, sticky="w", padx=8, pady=4)
+        ttk.Entry(mcap_row, textvariable=self.wizard_market_cap_min_var, width=14).pack(side="left")
+        ttk.Entry(mcap_row, textvariable=self.wizard_market_cap_max_var, width=14).pack(side="left", padx=(6, 0))
+
+        row += 1
+        ttk.Label(panel, text="Min option OI / volume").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        options_row = ttk.Frame(panel)
+        options_row.grid(row=row, column=1, sticky="w", padx=8, pady=4)
+        ttk.Entry(options_row, textvariable=self.wizard_min_option_oi_var, width=14).pack(side="left")
+        ttk.Entry(options_row, textvariable=self.wizard_min_option_volume_var, width=14).pack(side="left", padx=(6, 0))
+
+        row += 1
+        ttk.Label(panel, text="Min option DTE").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(panel, textvariable=self.wizard_min_option_dte_var, width=14).grid(row=row, column=1, sticky="w", padx=8, pady=4)
+
+        row += 1
+        ttk.Checkbutton(panel, text="Require weekly-listed options", variable=self.wizard_require_weeklies_var).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 8)
+        )
+
     def _wizard_build_step_test_plan(self) -> None:
         frame = self._wizard_add_step_frame()
         ttk.Label(frame, text="[STEP 3] TEST PLAN", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
@@ -672,6 +734,18 @@ class ResearchLabPage(ttk.Frame):
             self.wizard_data_universe_var,
             self.wizard_period_start_var,
             self.wizard_period_end_var,
+            self.wizard_sector_include_var,
+            self.wizard_sector_exclude_var,
+            self.wizard_adv_threshold_var,
+            self.wizard_liquidity_threshold_var,
+            self.wizard_price_min_var,
+            self.wizard_price_max_var,
+            self.wizard_market_cap_min_var,
+            self.wizard_market_cap_max_var,
+            self.wizard_min_option_oi_var,
+            self.wizard_min_option_volume_var,
+            self.wizard_min_option_dte_var,
+            self.wizard_require_weeklies_var,
             self.wizard_test_plan_var,
             self.wizard_acceptance_var,
             self.wizard_run_validation_var,
@@ -772,6 +846,7 @@ class ResearchLabPage(ttk.Frame):
         context = self._build_common_context()
         if context is None:
             return
+        context["universe_filters"] = self._build_universe_filters()
         wizard_tickers = [item.strip() for item in self.wizard_data_universe_var.get().split(",") if item.strip()]
         parsed_start = parse_date(self.wizard_period_start_var.get().strip())
         parsed_end = parse_date(self.wizard_period_end_var.get().strip())
@@ -816,6 +891,18 @@ class ResearchLabPage(ttk.Frame):
             "data_universe": self.wizard_data_universe_var.get().strip(),
             "period_start": self.wizard_period_start_var.get().strip(),
             "period_end": self.wizard_period_end_var.get().strip(),
+            "sector_include": self.wizard_sector_include_var.get().strip(),
+            "sector_exclude": self.wizard_sector_exclude_var.get().strip(),
+            "adv_threshold": self.wizard_adv_threshold_var.get().strip(),
+            "liquidity_threshold": self.wizard_liquidity_threshold_var.get().strip(),
+            "price_min": self.wizard_price_min_var.get().strip(),
+            "price_max": self.wizard_price_max_var.get().strip(),
+            "market_cap_min": self.wizard_market_cap_min_var.get().strip(),
+            "market_cap_max": self.wizard_market_cap_max_var.get().strip(),
+            "min_option_oi": self.wizard_min_option_oi_var.get().strip(),
+            "min_option_volume": self.wizard_min_option_volume_var.get().strip(),
+            "min_option_dte": self.wizard_min_option_dte_var.get().strip(),
+            "require_weeklies": bool(self.wizard_require_weeklies_var.get()),
             "test_plan": self.wizard_test_plan_var.get().strip(),
             "acceptance_criteria": self.wizard_acceptance_var.get().strip(),
             "run_validation": bool(self.wizard_run_validation_var.get()),
@@ -843,6 +930,18 @@ class ResearchLabPage(ttk.Frame):
         self.wizard_data_universe_var.set(str(payload.get("data_universe", self.wizard_data_universe_var.get())))
         self.wizard_period_start_var.set(str(payload.get("period_start", self.wizard_period_start_var.get())))
         self.wizard_period_end_var.set(str(payload.get("period_end", self.wizard_period_end_var.get())))
+        self.wizard_sector_include_var.set(str(payload.get("sector_include", self.wizard_sector_include_var.get())))
+        self.wizard_sector_exclude_var.set(str(payload.get("sector_exclude", self.wizard_sector_exclude_var.get())))
+        self.wizard_adv_threshold_var.set(str(payload.get("adv_threshold", self.wizard_adv_threshold_var.get())))
+        self.wizard_liquidity_threshold_var.set(str(payload.get("liquidity_threshold", self.wizard_liquidity_threshold_var.get())))
+        self.wizard_price_min_var.set(str(payload.get("price_min", self.wizard_price_min_var.get())))
+        self.wizard_price_max_var.set(str(payload.get("price_max", self.wizard_price_max_var.get())))
+        self.wizard_market_cap_min_var.set(str(payload.get("market_cap_min", self.wizard_market_cap_min_var.get())))
+        self.wizard_market_cap_max_var.set(str(payload.get("market_cap_max", self.wizard_market_cap_max_var.get())))
+        self.wizard_min_option_oi_var.set(str(payload.get("min_option_oi", self.wizard_min_option_oi_var.get())))
+        self.wizard_min_option_volume_var.set(str(payload.get("min_option_volume", self.wizard_min_option_volume_var.get())))
+        self.wizard_min_option_dte_var.set(str(payload.get("min_option_dte", self.wizard_min_option_dte_var.get())))
+        self.wizard_require_weeklies_var.set(bool(payload.get("require_weeklies", self.wizard_require_weeklies_var.get())))
         self.wizard_test_plan_var.set(str(payload.get("test_plan", self.wizard_test_plan_var.get())))
         self.wizard_acceptance_var.set(str(payload.get("acceptance_criteria", self.wizard_acceptance_var.get())))
         self.wizard_run_validation_var.set(bool(payload.get("run_validation", self.wizard_run_validation_var.get())))
@@ -857,6 +956,7 @@ class ResearchLabPage(ttk.Frame):
         context = self._build_common_context()
         if context is None:
             return
+        context["universe_filters"] = self._build_universe_filters()
         config = self._build_workflow_config()
         if config is None:
             return
@@ -894,6 +994,7 @@ class ResearchLabPage(ttk.Frame):
             "lookback": lookback,
             "skip": skip,
             "costs_bps": costs_bps,
+            "universe_filters": self._build_universe_filters(),
             "rubric_profile": self.hypothesis_rubric_profile_var.get().strip() or "intraday_alpha",
             "hypothesis_novelty": float(parse_float(self.hypothesis_novelty_var.get()) or 3.0),
             "hypothesis_plausibility": float(parse_float(self.hypothesis_plausibility_var.get()) or 3.0),
@@ -902,6 +1003,33 @@ class ResearchLabPage(ttk.Frame):
             ),
             "hypothesis_expected_capacity": float(parse_float(self.hypothesis_expected_capacity_var.get()) or 3.0),
             "hypothesis_robustness": float(parse_float(self.hypothesis_robustness_var.get()) or 3.0),
+        }
+
+    def _build_universe_filters(self) -> dict[str, Any]:
+        def _split_csv(raw: str) -> list[str]:
+            return [item.strip() for item in raw.split(",") if item.strip()]
+
+        return {
+            "sector": {
+                "include": _split_csv(self.wizard_sector_include_var.get().strip()),
+                "exclude": _split_csv(self.wizard_sector_exclude_var.get().strip()),
+            },
+            "liquidity": {
+                "min_adv": float(parse_float(self.wizard_adv_threshold_var.get()) or 0.0),
+                "min_liquidity": float(parse_float(self.wizard_liquidity_threshold_var.get()) or 0.0),
+            },
+            "price_market_cap": {
+                "min_price": float(parse_float(self.wizard_price_min_var.get()) or 0.0),
+                "max_price": float(parse_float(self.wizard_price_max_var.get()) or 0.0),
+                "min_market_cap": float(parse_float(self.wizard_market_cap_min_var.get()) or 0.0),
+                "max_market_cap": float(parse_float(self.wizard_market_cap_max_var.get()) or 0.0),
+            },
+            "options_eligibility": {
+                "min_open_interest": int(parse_float(self.wizard_min_option_oi_var.get()) or 0),
+                "min_option_volume": int(parse_float(self.wizard_min_option_volume_var.get()) or 0),
+                "min_days_to_expiration": int(parse_float(self.wizard_min_option_dte_var.get()) or 0),
+                "require_weeklies": bool(self.wizard_require_weeklies_var.get()),
+            },
         }
 
     def _load_rubric_templates(self) -> dict[str, Any]:
@@ -1137,6 +1265,7 @@ class ResearchLabPage(ttk.Frame):
             "lookback_days": [int(context["lookback"])],
             "skip_days": [int(context["skip"])],
             "costs_bps": [float(context["costs_bps"])],
+            "universe_filters": [dict(context.get("universe_filters", {}))],
         }
         return entry_grid, exit_grid, core_grid
 
@@ -1155,7 +1284,12 @@ class ResearchLabPage(ttk.Frame):
             test_fraction=config.test_fraction,
             step_fraction=config.step_fraction,
             split_policy=config.walk_forward_split_policy,
-            governance_metadata={"promotion_state": "research", "approval_status": "pending", "workflow_preset": config.preset_name},
+            governance_metadata={
+                "promotion_state": "research",
+                "approval_status": "pending",
+                "workflow_preset": config.preset_name,
+                "universe_filters": dict(context.get("universe_filters", {})),
+            },
             stress_controls=dict(config.stress_controls),
         )
 
@@ -1178,7 +1312,12 @@ class ResearchLabPage(ttk.Frame):
             prune_on_lcb=config.optimization_prune_on_lcb,
             min_completed_for_pruning=config.optimization_min_completed_for_pruning,
             staged_budgets=[dict(stage) for stage in config.optimization_staged_budgets],
-            governance_metadata={"promotion_state": "research", "approval_status": "pending", "workflow_preset": config.preset_name},
+            governance_metadata={
+                "promotion_state": "research",
+                "approval_status": "pending",
+                "workflow_preset": config.preset_name,
+                "universe_filters": dict(context.get("universe_filters", {})),
+            },
             stress_controls=dict(config.stress_controls),
         )
 
@@ -1194,7 +1333,12 @@ class ResearchLabPage(ttk.Frame):
             timeframe=str(DEFAULT_BACKTEST_SETTINGS.get("timeframe", "1m")),
             entry_signals=list(config.entry_signals),
             exit_signals=list(config.exit_signals),
-            governance_metadata={"promotion_state": "research", "approval_status": "pending", "workflow_preset": config.preset_name},
+            governance_metadata={
+                "promotion_state": "research",
+                "approval_status": "pending",
+                "workflow_preset": config.preset_name,
+                "universe_filters": dict(context.get("universe_filters", {})),
+            },
             stress_controls=dict(config.stress_controls),
         )
 
@@ -1268,6 +1412,7 @@ class ResearchLabPage(ttk.Frame):
                 "assets": tickers,
                 "start_date": str(context["start_date"]),
                 "end_date": str(context["end_date"]),
+                "universe_filters": dict(context.get("universe_filters", {})),
                 "fields": ["open", "high", "low", "close", "volume"],
                 "quality_checks": ["missing_bar_ratio < 1%", "corporate_action_adjusted", "timezone_normalized"],
             },
@@ -1368,6 +1513,7 @@ class ResearchLabPage(ttk.Frame):
                 "lookback": int(context["lookback"]),
                 "skip": int(context["skip"]),
                 "costs_bps": float(context["costs_bps"]),
+                "universe_filters": dict(context.get("universe_filters", {})),
             },
             "run_references": [
                 {
