@@ -72,6 +72,8 @@ def test_write_experiment_skeleton_writes_research_project_manifest(tmp_path):
     assert payload["schema_version"] == "1.0"
     assert payload["hypothesis"]["hypothesis_id"] == "hyp_abc"
     assert payload["run_references"][0]["step"] == "parameter_optimization"
+    assert payload["run_references"][0]["artifact_path"].endswith("/opt_1/manifest.json")
+    assert payload["run_references"][0]["logs_path"].endswith("/opt_1/logs.txt")
     assert payload["gate_outcomes"][0]["gate"] == "rubric_score"
     assert payload["reviewer_comments"][0]["reviewer"] == "research_lab_ui"
     assert payload["promotion_history"][0]["state"] == "promoted_to_experiment"
@@ -79,6 +81,9 @@ def test_write_experiment_skeleton_writes_research_project_manifest(tmp_path):
     assert payload["review_actions"][0]["action"] == "review_completed"
     assert payload["decision_log"][0]["decision"] == "accept"
     assert payload["context"]["universe_filters"]["sector"]["include"] == ["Technology"]
+    assert payload["pipeline_graph"]["nodes"]
+    node_types = {node["type"] for node in payload["pipeline_graph"]["nodes"]}
+    assert {"hypothesis", "optimization", "walk_forward", "stress", "gate_checks", "promotion_decision"}.issubset(node_types)
 
 
 def test_write_experiment_skeleton_appends_manifest_sections_without_duplication(tmp_path):
@@ -157,3 +162,14 @@ def test_refresh_governance_dashboard_updates_summary_fields():
     assert page._governance_missing_checks_var.value == "b"
     assert page._governance_promotion_ready_var.value == "Not ready"
     assert page._governance_approval_status_var.value == "pending (research)"
+
+
+def test_extract_lineage_manifest_path_prefers_experiment_skeleton_line(tmp_path):
+    page = object.__new__(ResearchLabPage)
+    skeleton = tmp_path / "research_project.json"
+    skeleton.write_text("{}", encoding="utf-8")
+
+    output = f"Generated experiment skeleton: {skeleton}"
+    extracted = ResearchLabPage._extract_lineage_manifest_path_from_output(page, output)
+
+    assert extracted == skeleton
