@@ -38,11 +38,28 @@ class ResearchWorkflowConfig:
     stress_controls: dict[str, object]
 
 
+@dataclass
+class ResearchTask:
+    task_id: str
+    label: str
+    target: Callable[[dict[str, Any], ResearchWorkflowConfig], str]
+    context: dict[str, Any]
+    config: ResearchWorkflowConfig
+    state: str = "queued"
+    logs: list[str] | None = None
+    cancel_requested: bool = False
+
+    def __post_init__(self) -> None:
+        if self.logs is None:
+            self.logs = []
+
+
 class ResearchLabPage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
         super().__init__(parent)
         self.controller = controller
-        self._is_running = False
+        self._task_queue: list[ResearchTask] = []
+        self._active_task_id: str | None = None
         self._research_lab_dir = BACKTEST_OUTPUT_DIR / "research_lab"
         self._sampler_options = ("tpe", "bayesian", "random")
         self._signal_options = ("ts_momentum", "ma_trend", "breakout")
@@ -128,10 +145,17 @@ class ResearchLabPage(ttk.Frame):
             command=lambda: self.controller.show_frame("MainMenu"),
         ).pack()
 
+        self._build_task_queue_controls()
+
         output_frame = ttk.LabelFrame(self, text="Research Lab Output")
         output_frame.pack(fill="both", expand=True, padx=40, pady=(4, 20))
-        self.output_text = tk.Text(output_frame, height=12, wrap="word")
+        self.output_text = tk.Text(output_frame, height=8, wrap="word")
         self.output_text.pack(fill="both", expand=True, padx=8, pady=8)
+
+        task_logs_frame = ttk.LabelFrame(self, text="Selected Task Logs")
+        task_logs_frame.pack(fill="both", expand=True, padx=40, pady=(0, 20))
+        self.task_logs_text = tk.Text(task_logs_frame, height=8, wrap="word")
+        self.task_logs_text.pack(fill="both", expand=True, padx=8, pady=8)
 
     def _build_tile(
         self,
@@ -158,6 +182,152 @@ class ResearchLabPage(ttk.Frame):
     def _append_output(self, text: str) -> None:
         self.output_text.insert(tk.END, f"{text}\n")
         self.output_text.see(tk.END)
+
+    def _build_task_queue_controls(self) -> None:
+        frame = ttk.LabelFrame(self, text="Task Queue")
+        frame.pack(fill="x", padx=40, pady=(2, 8))
+        frame.columnconfigure(0, weight=1)
+
+        self._task_list_var = tk.StringVar(value=[])
+        self._task_listbox = tk.Listbox(frame, listvariable=self._task_list_var, height=6, exportselection=False)
+        self._task_listbox.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        self._task_listbox.bind("<<ListboxSelect>>", lambda _event: self._refresh_selected_task_logs())
+
+        controls = ttk.Frame(frame)
+        controls.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=8)
+        self._cancel_task_button = ttk.Button(controls, text="Cancel Task", command=self._cancel_selected_task)
+        self._cancel_task_button.pack(fill="x", pady=(0, 6))
+        self._retry_task_button = ttk.Button(controls, text="Retry Task", command=self._retry_selected_task)
+        self._retry_task_button.pack(fill="x")
+
+        self._refresh_task_queue_ui()
+
+    def _get_task_by_id(self, task_id: str | None) -> ResearchTask | None:
+        if task_id is None:
+            return None
+        for task in self._task_queue:
+            if task.task_id == task_id:
+                return task
+        return None
+
+    def _selected_task(self) -> ResearchTask | None:
+        selection = self._task_listbox.curselection()
+        if not selection:
+            return None
+        index = int(selection[0])
+        if index < 0 or index >= len(self._task_queue):
+            return None
+        return self._task_queue[index]
+
+    def _refresh_task_queue_ui(self) -> None:
+        rows = [f"[{task.state}] {task.label}" for task in self._task_queue]
+        self._task_list_var.set(rows)
+        task = self._selected_task()
+        self._cancel_task_button.configure(state="normal" if task and task.state in {"queued", "running"} else "disabled")
+        self._retry_task_button.configure(state="normal" if task and task.state in {"failed", "canceled"} else "disabled")
+        self._refresh_selected_task_logs()
+        if hasattr(self, "_wizard_next_button"):
+            self._wizard_refresh_nav_state()
+
+    def _refresh_selected_task_logs(self) -> None:
+        task = self._selected_task()
+        self.task_logs_text.delete("1.0", tk.END)
+        if not task or task.logs is None:
+            return
+        for line in task.logs:
+            self.task_logs_text.insert(tk.END, f"{line}\n")
+        self.task_logs_text.see(tk.END)
+
+    def _task_log(self, task: ResearchTask, message: str) -> None:
+        task.logs.append(message)
+        self._append_output(f"[{task.label}] {message}")
+        self._refresh_task_queue_ui()
+
+    def _schedule_ui_update(self, callback: Callable[[], None]) -> None:
+        self.after(0, callback)
+
+    def _enqueue_task(
+        self,
+        *,
+        label: str,
+        target: Callable[[dict[str, Any], ResearchWorkflowConfig], str],
+        context: dict[str, Any],
+        config: ResearchWorkflowConfig,
+    ) -> None:
+        task = ResearchTask(
+            task_id=uuid.uuid4().hex,
+            label=label,
+            target=target,
+            context=dict(context),
+            config=config,
+        )
+        self._task_queue.append(task)
+        self._refresh_task_queue_ui()
+        self._run_next_task()
+
+    def _run_next_task(self) -> None:
+        if self._active_task_id is not None:
+            return
+        next_task = next((task for task in self._task_queue if task.state == "queued"), None)
+        if next_task is None:
+            return
+        self._active_task_id = next_task.task_id
+        next_task.state = "running"
+        self._task_log(next_task, "Task started.")
+
+        def worker(task: ResearchTask) -> None:
+            if task.cancel_requested:
+                self._schedule_ui_update(lambda: self._finish_task(task.task_id, "", canceled=True))
+                return
+            try:
+                output = task.target(task.context, task.config)
+                self._schedule_ui_update(lambda: self._finish_task(task.task_id, output))
+            except Exception as exc:
+                self._schedule_ui_update(lambda: self._finish_task(task.task_id, f"Research workflow failed: {exc}", failed=True))
+
+        threading.Thread(target=worker, args=(next_task,), daemon=True).start()
+
+    def _finish_task(self, task_id: str, output: str, *, failed: bool = False, canceled: bool = False) -> None:
+        task = self._get_task_by_id(task_id)
+        if task is None:
+            return
+        if canceled or task.cancel_requested:
+            task.state = "canceled"
+            task.logs.append("Task canceled.")
+            self._append_output(f"[{task.label}] Task canceled.")
+        elif failed:
+            task.state = "failed"
+            task.logs.append(output)
+            self._append_output(f"[{task.label}] Failed: {output}")
+        else:
+            task.state = "succeeded"
+            task.logs.append(output)
+            self._append_output(f"[{task.label}] Succeeded.")
+        self._active_task_id = None
+        self._refresh_task_queue_ui()
+        self._run_next_task()
+
+    def _cancel_selected_task(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            return
+        task.cancel_requested = True
+        if task.state == "queued":
+            task.state = "canceled"
+            task.logs.append("Task canceled before execution.")
+        else:
+            task.logs.append("Cancellation requested. Task will be marked canceled when current run returns.")
+        self._refresh_task_queue_ui()
+
+    def _retry_selected_task(self) -> None:
+        task = self._selected_task()
+        if task is None or task.state not in {"failed", "canceled"}:
+            return
+        task.state = "queued"
+        task.cancel_requested = False
+        task.logs.append("Task re-queued for retry.")
+        self._refresh_task_queue_ui()
+        self._run_next_task()
 
     def _build_workflow_controls(self) -> None:
         controls = ttk.LabelFrame(self, text="Workflow Controls")
@@ -485,6 +655,9 @@ class ResearchLabPage(ttk.Frame):
             return True, ""
         return True, ""
 
+    def _has_running_task(self) -> bool:
+        return any(task.state == "running" for task in self._task_queue)
+
     def _wizard_refresh_nav_state(self) -> None:
         valid, error = self._wizard_validate_step(self._wizard_step_index)
         step_name = self._wizard_steps[self._wizard_step_index].upper()
@@ -495,16 +668,13 @@ class ResearchLabPage(ttk.Frame):
         self._wizard_next_button.configure(text=next_label, state="normal" if valid else "disabled")
         if hasattr(self, "_wizard_run_button"):
             run_valid, _ = self._wizard_validate_step(3)
-            run_enabled = run_valid and not self._is_running
+            run_enabled = run_valid and not self._has_running_task()
             self._wizard_run_button.configure(state="normal" if run_enabled else "disabled")
 
     def _wizard_run_selected_workflows(self) -> None:
         valid, error = self._wizard_validate_step(3)
         if not valid:
             messagebox.showinfo("Invalid run configuration", error)
-            return
-        if self._is_running:
-            messagebox.showinfo("Run in progress", "Wait for the current Research Lab run to finish.")
             return
         context = self._build_common_context()
         if context is None:
@@ -530,21 +700,9 @@ class ResearchLabPage(ttk.Frame):
         if self.wizard_run_stress_var.get():
             selected.append(("Stress/scenario tests", self._run_stress_workflow))
 
-        self._is_running = True
-        self._wizard_refresh_nav_state()
-        self._append_output("Starting wizard workflows...")
-
-        def worker() -> None:
-            outputs: list[str] = []
-            for label, runner in selected:
-                outputs.append(f"Starting: {label}")
-                try:
-                    outputs.append(runner(context, config))
-                except Exception as exc:
-                    outputs.append(f"{label} failed: {exc}")
-            self.after(0, lambda: self._finish_worker("\n".join(outputs)))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._append_output("Queueing wizard workflows...")
+        for label, runner in selected:
+            self._enqueue_task(label=label, target=runner, context=context, config=config)
 
     def _wizard_finalize_review(self) -> None:
         decision = self.wizard_promotion_decision_var.get().strip().lower()
@@ -603,10 +761,6 @@ class ResearchLabPage(ttk.Frame):
         self._wizard_step_index = max(0, min(loaded_step, len(self._wizard_steps) - 1))
 
     def _start_worker(self, target: Callable[[dict[str, Any], ResearchWorkflowConfig], str], label: str) -> None:
-        if self._is_running:
-            messagebox.showinfo("Run in progress", "Wait for the current Research Lab run to finish.")
-            return
-
         context = self._build_common_context()
         if context is None:
             return
@@ -614,23 +768,7 @@ class ResearchLabPage(ttk.Frame):
         if config is None:
             return
 
-        self._is_running = True
-        self._append_output(f"Starting: {label}")
-
-        def worker() -> None:
-            try:
-                output = target(context, config)
-            except Exception as exc:
-                output = f"Research workflow failed: {exc}"
-            self.after(0, lambda: self._finish_worker(output))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _finish_worker(self, output: str) -> None:
-        self._is_running = False
-        self._append_output(output)
-        if hasattr(self, "_wizard_next_button"):
-            self._wizard_refresh_nav_state()
+        self._enqueue_task(label=label, target=target, context=context, config=config)
 
     def _build_common_context(self) -> dict[str, Any] | None:
         tickers = list(self.controller.state.tickers)
