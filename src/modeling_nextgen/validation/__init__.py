@@ -6,6 +6,7 @@ from .purged_cv import (
     generate_purged_kfold_splits,
 )
 from .schemes import PurgedCrossValidator, StressValidator, WalkForwardValidator
+from .stress_scenarios import StressTemplateConfig, build_stress_template_scenarios
 from .walkforward_hpo import (
     WalkForwardHPOSummary,
     WalkForwardWindow,
@@ -28,4 +29,6 @@ __all__ = [
     "build_walkforward_windows",
     "run_walkforward_hpo",
     "export_walkforward_hpo_reports",
+    "StressTemplateConfig",
+    "build_stress_template_scenarios",
 ]

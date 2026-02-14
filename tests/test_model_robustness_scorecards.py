@@ -32,7 +32,15 @@ def test_build_robustness_scorecards_reports_scenarios_groups_and_flags() -> Non
     assert report["production_ready"] is True
     assert len(report["models"]) == 1
     row = report["models"][0]
-    assert set(row["scenario_degradation"].keys()) == {"noise", "delayed_data", "missing_fields", "shifted_distribution"}
+    assert set(row["scenario_degradation"].keys()) == {
+        "noise",
+        "delayed_data",
+        "missing_fields",
+        "shifted_distribution",
+        "jump_diffusion_shocks",
+        "volatility_regime_jumps",
+        "spread_impact_widening",
+    }
     assert "trend" in row["feature_groups"]
     assert "long_horizon" in row["feature_groups"]
     assert all("recommended_action" in f for f in row["feature_breakdown"])
