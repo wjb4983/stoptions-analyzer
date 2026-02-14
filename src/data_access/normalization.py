@@ -51,7 +51,34 @@ def normalize_bars(
     filled = _apply_missing_bar_policy(deduped, config.missing_bar_policy, config.expected_interval)
     validate_corporate_action_contracts(filled)
     adjusted = _apply_adjustment_mode(filled, config.adjustment_mode)
+    _assert_normalization_invariants(adjusted)
     return adjusted
+
+
+def _assert_normalization_invariants(bars: Iterable[Mapping[str, Any]]) -> None:
+    """Assert canonical invariants expected from normalized bar output."""
+
+    previous_key: tuple[str, datetime] | None = None
+    seen: set[tuple[str, datetime]] = set()
+
+    for row in bars:
+        symbol = row.get("symbol")
+        timestamp = row.get("timestamp_utc")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise AssertionError("normalized bar rows must include non-empty string symbol")
+        if not isinstance(timestamp, datetime):
+            raise AssertionError("normalized bar rows must include datetime timestamp_utc")
+        if timestamp.tzinfo is None:
+            raise AssertionError("normalized bar rows must use timezone-aware timestamp_utc")
+
+        key = (symbol, timestamp.astimezone(timezone.utc))
+        if previous_key is not None and key < previous_key:
+            raise AssertionError("normalized bar rows must be globally sorted by (symbol, timestamp_utc)")
+        if key in seen:
+            raise AssertionError("normalized bar rows must be unique on (symbol, timestamp_utc)")
+
+        previous_key = key
+        seen.add(key)
 
 
 def _coerce_bar_timestamp(bar: Mapping[str, Any], vendor_timezone: str | timezone) -> dict[str, Any]:
