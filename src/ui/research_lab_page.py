@@ -864,6 +864,7 @@ class ResearchLabPage(ttk.Frame):
         controls = ttk.LabelFrame(self, text="Workflow Controls")
         controls.pack(fill="x", padx=40, pady=(6, 8))
         controls.columnconfigure(1, weight=1)
+        controls.columnconfigure(2, weight=0)
 
         self.entry_signals_var = tk.StringVar(value="ts_momentum, breakout")
         self.exit_signals_var = tk.StringVar(value="none, momentum_flip")
@@ -904,6 +905,30 @@ class ResearchLabPage(ttk.Frame):
         if default_preset not in preset_options:
             default_preset = preset_options[0] if preset_options else "custom"
         self.workflow_preset_var = tk.StringVar(value=default_preset)
+        self.easy_mode_var = tk.BooleanVar(value=True)
+        self._workflow_validation_var = tk.StringVar(value="")
+        self._advanced_workflow_widgets: list[tk.Widget] = []
+
+        help_text = {
+            "preset": "Preset bundles entry/exit signal sets plus optimization, walk-forward, and stress defaults.",
+            "easy": "Easy Mode applies robust defaults and locks advanced tuning fields.",
+            "entry": "Comma-separated entry signal IDs: ts_momentum, ma_trend, breakout.",
+            "exit": "Comma-separated exit signal IDs: none, momentum_flip, trailing_stop, max_hold.",
+            "opt": "n_trials controls search breadth. sampler controls candidate generation.",
+            "prune": "Enable early stopping for weak trials; set minimum completed trials for pruning.",
+            "staged": "Optional JSON list of optimization stages for coarse-to-fine search.",
+            "wf_fracs": "Train/val/test must be >0 and sum to 1.0; step is walk-forward shift.",
+            "wf_split": "Split policy controls fold construction for walk-forward validation.",
+            "stress_toggle": "Turn historical replay stress on/off.",
+            "stress_hist": "Replay window fraction and bars per replayed segment.",
+            "stress_jump": "Synthetic jump magnitude, jump interval, and volatility clustering multiplier.",
+            "stress_overlay": "Spread and liquidity multipliers for adverse execution overlays.",
+        }
+
+        def add_help(row: int, text: str) -> None:
+            icon = ttk.Label(controls, text="ⓘ", foreground="#2a4f7a")
+            icon.grid(row=row, column=2, sticky="w", padx=(0, 6))
+            self._attach_tooltip(icon, text)
 
         row = 0
         ttk.Label(controls, text="Workflow preset").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -917,17 +942,27 @@ class ResearchLabPage(ttk.Frame):
             state="readonly",
             width=24,
         ).grid(row=0, column=0, sticky="w")
-        ttk.Button(preset_row, text="Apply preset", command=self._apply_selected_workflow_preset).grid(
-            row=0, column=1, sticky="w", padx=(8, 0)
-        )
+        ttk.Button(preset_row, text="Apply preset", command=self._apply_selected_workflow_preset).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        add_help(row, help_text["preset"])
+
+        row += 1
+        ttk.Checkbutton(
+            controls,
+            text="Easy Mode (lock advanced fields + robust defaults)",
+            variable=self.easy_mode_var,
+            command=self._on_easy_mode_toggle,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 5))
+        add_help(row, help_text["easy"])
 
         row += 1
         ttk.Label(controls, text="Entry signals (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
         ttk.Entry(controls, textvariable=self.entry_signals_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        add_help(row, help_text["entry"])
 
         row += 1
         ttk.Label(controls, text="Exit signals (comma-separated)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
         ttk.Entry(controls, textvariable=self.exit_signals_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        add_help(row, help_text["exit"])
 
         row += 1
         ttk.Label(controls, text="Optimization trials / sampler").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -935,13 +970,9 @@ class ResearchLabPage(ttk.Frame):
         optimization_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
         ttk.Entry(optimization_row, textvariable=self.optimization_trials_var, width=8).pack(side="left")
         ttk.Label(optimization_row, text=" / ").pack(side="left")
-        ttk.Combobox(
-            optimization_row,
-            textvariable=self.optimization_sampler_var,
-            values=self._sampler_options,
-            state="readonly",
-            width=12,
-        ).pack(side="left")
+        ttk.Combobox(optimization_row, textvariable=self.optimization_sampler_var, values=self._sampler_options, state="readonly", width=12).pack(side="left")
+        self._advanced_workflow_widgets.extend(optimization_row.winfo_children())
+        add_help(row, help_text["opt"])
 
         row += 1
         ttk.Label(controls, text="Pruning enable/constraint/lcb/min").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -951,10 +982,15 @@ class ResearchLabPage(ttk.Frame):
         ttk.Checkbutton(prune_row, text="Constraint", variable=self.optimization_prune_constraint_var).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(prune_row, text="LCB", variable=self.optimization_prune_lcb_var).pack(side="left", padx=(8, 0))
         ttk.Entry(prune_row, textvariable=self.optimization_min_completed_var, width=5).pack(side="left", padx=(8, 0))
+        self._advanced_workflow_widgets.extend(prune_row.winfo_children())
+        add_help(row, help_text["prune"])
 
         row += 1
         ttk.Label(controls, text="Staged budgets (JSON)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
-        ttk.Entry(controls, textvariable=self.optimization_staged_budgets_var).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        staged_entry = ttk.Entry(controls, textvariable=self.optimization_staged_budgets_var)
+        staged_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        self._advanced_workflow_widgets.append(staged_entry)
+        add_help(row, help_text["staged"])
 
         row += 1
         ttk.Label(controls, text="Walk-forward train/val/test/step").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -967,26 +1003,27 @@ class ResearchLabPage(ttk.Frame):
         ttk.Entry(wf_row, textvariable=self.wf_test_fraction_var, width=6).pack(side="left")
         ttk.Label(wf_row, text=" / ").pack(side="left")
         ttk.Entry(wf_row, textvariable=self.wf_step_fraction_var, width=6).pack(side="left")
+        add_help(row, help_text["wf_fracs"])
 
         row += 1
         ttk.Label(controls, text="Walk-forward split policy").grid(row=row, column=0, sticky="w", padx=8, pady=5)
-        ttk.Combobox(
+        split_combo = ttk.Combobox(
             controls,
             textvariable=self.wf_split_policy_var,
             values=("calendar-based", "volatility-regime-stratified", "event-exclusion windows"),
             state="readonly",
             width=32,
-        ).grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        )
+        split_combo.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        self._advanced_workflow_widgets.append(split_combo)
+        add_help(row, help_text["wf_split"])
 
         row += 1
         ttk.Label(controls, text="Stress: Replay/Jump/Overlay").grid(row=row, column=0, sticky="w", padx=8, pady=5)
         stress_row = ttk.Frame(controls)
         stress_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
-        ttk.Checkbutton(
-            stress_row,
-            text="Historical replay regimes",
-            variable=self.stress_enable_historical_replay_var,
-        ).pack(side="left")
+        ttk.Checkbutton(stress_row, text="Historical replay regimes", variable=self.stress_enable_historical_replay_var).pack(side="left")
+        add_help(row, help_text["stress_toggle"])
 
         row += 1
         ttk.Label(controls, text="Stress window frac / replay bars").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -995,6 +1032,8 @@ class ResearchLabPage(ttk.Frame):
         ttk.Entry(stress_row2, textvariable=self.stress_historical_window_fraction_var, width=8).pack(side="left")
         ttk.Label(stress_row2, text=" / ").pack(side="left")
         ttk.Entry(stress_row2, textvariable=self.stress_historical_replay_window_bars_var, width=8).pack(side="left")
+        self._advanced_workflow_widgets.extend(stress_row2.winfo_children())
+        add_help(row, help_text["stress_hist"])
 
         row += 1
         ttk.Label(controls, text="Stress jump mag / interval / vol cluster").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -1005,6 +1044,8 @@ class ResearchLabPage(ttk.Frame):
         ttk.Entry(stress_row3, textvariable=self.stress_synthetic_jump_interval_var, width=8).pack(side="left")
         ttk.Label(stress_row3, text=" / ").pack(side="left")
         ttk.Entry(stress_row3, textvariable=self.stress_synthetic_vol_cluster_multiplier_var, width=8).pack(side="left")
+        self._advanced_workflow_widgets.extend(stress_row3.winfo_children())
+        add_help(row, help_text["stress_jump"])
 
         row += 1
         ttk.Label(controls, text="Stress overlay spread / liquidity").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -1013,16 +1054,12 @@ class ResearchLabPage(ttk.Frame):
         ttk.Entry(stress_row4, textvariable=self.stress_overlay_spread_multiplier_var, width=8).pack(side="left")
         ttk.Label(stress_row4, text=" / ").pack(side="left")
         ttk.Entry(stress_row4, textvariable=self.stress_overlay_liquidity_multiplier_var, width=8).pack(side="left")
+        self._advanced_workflow_widgets.extend(stress_row4.winfo_children())
+        add_help(row, help_text["stress_overlay"])
 
         row += 1
         ttk.Label(controls, text="Hypothesis rubric profile").grid(row=row, column=0, sticky="w", padx=8, pady=5)
-        ttk.Combobox(
-            controls,
-            textvariable=self.hypothesis_rubric_profile_var,
-            values=profile_options,
-            state="readonly",
-            width=24,
-        ).grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Combobox(controls, textvariable=self.hypothesis_rubric_profile_var, values=profile_options, state="readonly", width=24).grid(row=row, column=1, sticky="w", padx=8, pady=5)
 
         row += 1
         ttk.Label(controls, text="Hypothesis scores N/P/C/CAP/R").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -1038,8 +1075,20 @@ class ResearchLabPage(ttk.Frame):
         ttk.Label(hypothesis_row, text=" / ").pack(side="left")
         ttk.Entry(hypothesis_row, textvariable=self.hypothesis_robustness_var, width=6).pack(side="left")
 
+        row += 1
+        ttk.Label(controls, textvariable=self._workflow_validation_var, foreground="#8a2d2d", justify="left", wraplength=780).grid(
+            row=row,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            padx=8,
+            pady=(0, 6),
+        )
+
         self.workflow_preset_var.trace_add("write", self._on_workflow_preset_change)
+        self._attach_workflow_validation_traces()
         self._apply_selected_workflow_preset()
+        self._on_easy_mode_toggle()
 
     def _build_wizard_mode(self) -> None:
         self._wizard_step_index = 0
@@ -1498,6 +1547,146 @@ class ResearchLabPage(ttk.Frame):
 
         self._enqueue_task(label=label, target=target, context=context, config=config)
 
+    def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
+        tooltip_window: tk.Toplevel | None = None
+
+        def show_tooltip(_event: object) -> None:
+            nonlocal tooltip_window
+            if tooltip_window is not None:
+                return
+            tooltip_window = tk.Toplevel(self)
+            tooltip_window.wm_overrideredirect(True)
+            x = widget.winfo_rootx() + 16
+            y = widget.winfo_rooty() + 16
+            tooltip_window.wm_geometry(f"+{x}+{y}")
+            tk.Label(
+                tooltip_window,
+                text=text,
+                bg="#fffbe8",
+                relief="solid",
+                borderwidth=1,
+                padx=6,
+                pady=4,
+                wraplength=360,
+                justify="left",
+            ).pack()
+
+        def hide_tooltip(_event: object) -> None:
+            nonlocal tooltip_window
+            if tooltip_window is not None:
+                tooltip_window.destroy()
+                tooltip_window = None
+
+        widget.bind("<Enter>", show_tooltip)
+        widget.bind("<Leave>", hide_tooltip)
+
+    def _apply_easy_mode_defaults(self) -> None:
+        self.optimization_sampler_var.set("tpe")
+        self.optimization_enable_pruning_var.set(True)
+        self.optimization_prune_constraint_var.set(True)
+        self.optimization_prune_lcb_var.set(True)
+        self.optimization_min_completed_var.set("5")
+        self.optimization_staged_budgets_var.set(
+            '[{"label":"coarse","n_trials":12,"sampler":"random","partial_period_fractions":[0.33,0.66]},'
+            '{"label":"fine","n_trials":20,"sampler":"tpe","partial_period_fractions":[0.5,1.0]}]'
+        )
+        self.wf_split_policy_var.set("calendar-based")
+        self.stress_enable_historical_replay_var.set(True)
+        self.stress_historical_window_fraction_var.set("0.20")
+        self.stress_historical_replay_window_bars_var.set("20")
+        self.stress_synthetic_jump_magnitude_var.set("0.02")
+        self.stress_synthetic_jump_interval_var.set("7")
+        self.stress_synthetic_vol_cluster_multiplier_var.set("1.6")
+        self.stress_overlay_spread_multiplier_var.set("2.5")
+        self.stress_overlay_liquidity_multiplier_var.set("0.4")
+
+    def _on_easy_mode_toggle(self) -> None:
+        easy_mode = bool(self.easy_mode_var.get())
+        if easy_mode:
+            self._apply_easy_mode_defaults()
+        for widget in self._advanced_workflow_widgets:
+            try:
+                widget.configure(state="disabled" if easy_mode else "normal")
+            except tk.TclError:
+                continue
+        self._refresh_workflow_validation_hints()
+
+    def _attach_workflow_validation_traces(self) -> None:
+        watched_vars = [
+            self.entry_signals_var,
+            self.exit_signals_var,
+            self.optimization_trials_var,
+            self.optimization_sampler_var,
+            self.optimization_min_completed_var,
+            self.optimization_staged_budgets_var,
+            self.wf_train_fraction_var,
+            self.wf_validation_fraction_var,
+            self.wf_test_fraction_var,
+            self.wf_step_fraction_var,
+            self.wf_split_policy_var,
+        ]
+        for variable in watched_vars:
+            variable.trace_add("write", lambda *_: self._refresh_workflow_validation_hints())
+
+    def _refresh_workflow_validation_hints(self) -> None:
+        issues = self._collect_workflow_validation_issues()
+        if not issues:
+            self._workflow_validation_var.set("All workflow parameters look valid.")
+            return
+        self._workflow_validation_var.set("Validation hints before submit:\n- " + "\n- ".join(issues))
+
+    def _collect_workflow_validation_issues(self) -> list[str]:
+        issues: list[str] = []
+        if self._parse_signal_csv(
+            self.entry_signals_var.get().strip(),
+            valid_options=self._signal_options,
+            field_name="Entry signals",
+            show_popup=False,
+        ) is None:
+            issues.append("Entry signals must include at least one supported signal.")
+        if self._parse_signal_csv(
+            self.exit_signals_var.get().strip(),
+            valid_options=self._exit_signal_options,
+            field_name="Exit signals",
+            show_popup=False,
+        ) is None:
+            issues.append("Exit signals must include at least one supported signal.")
+
+        n_trials = int(parse_float(self.optimization_trials_var.get()) or 20)
+        if n_trials <= 0:
+            issues.append("Optimization trials must be greater than zero.")
+
+        sampler = self.optimization_sampler_var.get().strip().lower() or "tpe"
+        if sampler not in self._sampler_options:
+            issues.append("Optimization sampler must be one of: tpe, cma-es, random, grid.")
+
+        min_completed_for_pruning = int(parse_float(self.optimization_min_completed_var.get()) or 5)
+        if min_completed_for_pruning < 1:
+            issues.append("Min completed for pruning must be >= 1.")
+
+        staged_budgets_raw = self.optimization_staged_budgets_var.get().strip()
+        if staged_budgets_raw:
+            try:
+                staged_payload = json.loads(staged_budgets_raw)
+                if not isinstance(staged_payload, list):
+                    issues.append("Staged budgets must be a JSON list.")
+            except json.JSONDecodeError:
+                issues.append("Staged budgets must be valid JSON list.")
+
+        train_fraction = float(parse_float(self.wf_train_fraction_var.get()) or 0.70)
+        validation_fraction = float(parse_float(self.wf_validation_fraction_var.get()) or 0.15)
+        test_fraction = float(parse_float(self.wf_test_fraction_var.get()) or 0.15)
+        step_fraction = float(parse_float(self.wf_step_fraction_var.get()) or 0.15)
+        if any(frac <= 0.0 for frac in (train_fraction, validation_fraction, test_fraction, step_fraction)):
+            issues.append("Walk-forward fractions must all be positive.")
+        if abs((train_fraction + validation_fraction + test_fraction) - 1.0) > 1e-6:
+            issues.append("Walk-forward train + validation + test fractions must sum to 1.0.")
+
+        split_policy = self.wf_split_policy_var.get().strip().lower()
+        if split_policy not in {"calendar-based", "volatility-regime-stratified", "event-exclusion windows"}:
+            issues.append("Walk-forward split policy selection is invalid.")
+        return issues
+
     def _build_common_context(self) -> dict[str, Any] | None:
         tickers = list(self.controller.state.tickers)
         if not tickers:
@@ -1686,14 +1875,23 @@ class ResearchLabPage(ttk.Frame):
     def open_governance_workspace(self) -> None:
         self.controller.show_frame("BacktestingPage")
 
-    def _parse_signal_csv(self, raw_text: str, *, valid_options: tuple[str, ...], field_name: str) -> list[str] | None:
+    def _parse_signal_csv(
+        self,
+        raw_text: str,
+        *,
+        valid_options: tuple[str, ...],
+        field_name: str,
+        show_popup: bool = True,
+    ) -> list[str] | None:
         parsed = [item.strip() for item in raw_text.split(",") if item.strip()]
         if not parsed:
-            messagebox.showinfo("Invalid input", f"{field_name} must include at least one signal.")
+            if show_popup:
+                messagebox.showinfo("Invalid input", f"{field_name} must include at least one signal.")
             return None
         invalid = [item for item in parsed if item not in valid_options]
         if invalid:
-            messagebox.showinfo("Invalid input", f"Unsupported {field_name.lower()}: {', '.join(invalid)}")
+            if show_popup:
+                messagebox.showinfo("Invalid input", f"Unsupported {field_name.lower()}: {', '.join(invalid)}")
             return None
         return parsed
 
