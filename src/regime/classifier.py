@@ -4,6 +4,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from modeling_nextgen.models.markov.regime_switching import (
+    RegimeSwitchingConfig,
+    fit_regime_switching_model,
+)
+
 
 @dataclass(frozen=True)
 class RegimeClassifierConfig:
@@ -22,6 +27,13 @@ class RegimeFeatureInputs:
     breadth: np.ndarray
     liquidity_proxy: np.ndarray
     credit_spread: np.ndarray
+
+
+@dataclass(frozen=True)
+class RegimeMarkovAdapterConfig:
+    enabled: bool = True
+    ensemble_weight_markov: float = 0.5
+    markov_em_iterations: int = 20
 
 
 def _as_1d(values: np.ndarray, n_obs: int) -> np.ndarray:
@@ -223,3 +235,73 @@ def classify_regimes(
         "feature_names": np.asarray(feature_names, dtype=object),
         "feature_matrix": x,
     }
+
+
+def classify_regimes_with_markov_adapter(
+    *,
+    features: np.ndarray,
+    feature_names: tuple[str, ...],
+    raw_feature_map: dict[str, np.ndarray],
+    dates: np.ndarray | None = None,
+    classifier_config: RegimeClassifierConfig | None = None,
+    adapter_config: RegimeMarkovAdapterConfig | None = None,
+) -> dict[str, np.ndarray]:
+    base = classify_regimes(
+        features=features,
+        feature_names=feature_names,
+        raw_feature_map=raw_feature_map,
+        config=classifier_config,
+    )
+    adapter_cfg = adapter_config or RegimeMarkovAdapterConfig()
+    if not adapter_cfg.enabled:
+        return base
+
+    markov_output = fit_regime_switching_model(
+        observations=np.asarray(features, dtype=float),
+        dates=dates,
+        config=RegimeSwitchingConfig(em_iterations=max(1, int(adapter_cfg.markov_em_iterations))),
+    )
+
+    classifier_probs = np.asarray(base["regime_probabilities"], dtype=float)
+    classifier_states = np.asarray(base["regime_states"], dtype=object)
+    macro_labels = np.asarray(base.get("state_macro_labels", []), dtype=object)
+    vol_labels = np.asarray(base.get("state_volatility_labels", []), dtype=object)
+
+    state_stress = np.full(classifier_states.size, 0.5, dtype=float)
+    for i in range(classifier_states.size):
+        macro = str(macro_labels[i]) if i < macro_labels.size else "risk_off"
+        vol = str(vol_labels[i]) if i < vol_labels.size else "mid"
+        stress = 0.15 if macro == "risk_on" else 0.75
+        if vol == "high":
+            stress += 0.20
+        elif vol == "low":
+            stress -= 0.20
+        state_stress[i] = float(np.clip(stress, 0.0, 1.0))
+
+    classifier_stress = classifier_probs @ state_stress if classifier_probs.size else np.zeros(0, dtype=float)
+    markov_stress = markov_output.posterior_probabilities @ np.array([0.0, 0.6, 1.0], dtype=float)
+
+    weight = float(np.clip(adapter_cfg.ensemble_weight_markov, 0.0, 1.0))
+    ensemble_stress = (1.0 - weight) * classifier_stress + weight * markov_stress
+    ensemble_labels = np.where(
+        ensemble_stress < 0.33,
+        "calm",
+        np.where(ensemble_stress < 0.66, "stressed", "dislocated"),
+    ).astype(object)
+
+    markov_labels = np.asarray(markov_output.regime_labels, dtype=object)
+    agreement = (ensemble_labels == markov_labels).astype(float)
+
+    blended = dict(base)
+    blended.update(
+        {
+            "markov_regime_probabilities": markov_output.posterior_probabilities,
+            "markov_transition_matrix": markov_output.transition_matrix,
+            "markov_regime_states": markov_output.regime_names,
+            "markov_regime_labels": markov_labels,
+            "ensemble_regime_stress": ensemble_stress,
+            "ensemble_regime_labels": ensemble_labels,
+            "regime_signal_agreement": agreement,
+        }
+    )
+    return blended
