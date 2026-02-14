@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -176,6 +177,7 @@ class ResearchLabPage(ttk.Frame):
 
         self._build_workflow_controls()
         self._build_wizard_mode()
+        self._build_governance_mini_dashboard()
 
         button_row = ttk.Frame(self)
         button_row.pack(pady=(16, 8))
@@ -196,6 +198,34 @@ class ResearchLabPage(ttk.Frame):
         task_logs_frame.pack(fill="both", expand=True, padx=40, pady=(0, 20))
         self.task_logs_text = tk.Text(task_logs_frame, height=8, wrap="word")
         self.task_logs_text.pack(fill="both", expand=True, padx=8, pady=8)
+
+    def _build_governance_mini_dashboard(self) -> None:
+        frame = ttk.LabelFrame(self, text="Governance Mini-Dashboard")
+        frame.pack(fill="x", padx=40, pady=(4, 8))
+        frame.columnconfigure(1, weight=1)
+
+        self._governance_gate_counts_var = tk.StringVar(value="No run manifest loaded.")
+        self._governance_missing_checks_var = tk.StringVar(value="No run manifest loaded.")
+        self._governance_promotion_ready_var = tk.StringVar(value="No run manifest loaded.")
+        self._governance_approval_status_var = tk.StringVar(value="No run manifest loaded.")
+
+        ttk.Label(frame, text="Gate pass/fail counts").grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(frame, textvariable=self._governance_gate_counts_var).grid(row=0, column=1, sticky="w", padx=8, pady=4)
+
+        ttk.Label(frame, text="Missing required checks").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(frame, textvariable=self._governance_missing_checks_var, wraplength=780, justify="left").grid(
+            row=1,
+            column=1,
+            sticky="w",
+            padx=8,
+            pady=4,
+        )
+
+        ttk.Label(frame, text="Promotion readiness").grid(row=2, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(frame, textvariable=self._governance_promotion_ready_var).grid(row=2, column=1, sticky="w", padx=8, pady=4)
+
+        ttk.Label(frame, text="Approval status").grid(row=3, column=0, sticky="w", padx=8, pady=(4, 8))
+        ttk.Label(frame, textvariable=self._governance_approval_status_var).grid(row=3, column=1, sticky="w", padx=8, pady=(4, 8))
 
     def _build_tile(
         self,
@@ -331,21 +361,91 @@ class ResearchLabPage(ttk.Frame):
         task = self._get_task_by_id(task_id)
         if task is None:
             return
+        output_text = str(output)
         if canceled or task.cancel_requested:
             task.state = "canceled"
             task.logs.append("Task canceled.")
             self._append_output(f"[{task.label}] Task canceled.")
         elif failed:
             task.state = "failed"
-            task.logs.append(output)
-            self._append_output(f"[{task.label}] Failed: {output}")
+            task.logs.append(output_text)
+            self._append_output(f"[{task.label}] Failed: {output_text}")
         else:
             task.state = "succeeded"
-            task.logs.append(output)
+            task.logs.append(output_text)
             self._append_output(f"[{task.label}] Succeeded.")
+            self._refresh_governance_dashboard_from_output(output_text)
         self._active_task_id = None
         self._refresh_task_queue_ui()
         self._run_next_task()
+
+    def _refresh_governance_dashboard_from_output(self, output_text: str) -> None:
+        governance_payload = self._load_governance_payload_from_output(output_text)
+        if not governance_payload:
+            return
+
+        gate_checks = governance_payload.get("gate_checks", {})
+        gate_map = gate_checks if isinstance(gate_checks, dict) else {}
+        total_gates = len(gate_map)
+        pass_count = sum(1 for value in gate_map.values() if bool(value))
+        fail_count = total_gates - pass_count
+
+        missing_required_checks = governance_payload.get("missing_required_checks", [])
+        missing_checks = (
+            [str(item).strip() for item in missing_required_checks if str(item).strip()]
+            if isinstance(missing_required_checks, list)
+            else []
+        )
+        readiness = bool(governance_payload.get("is_promotion_ready", False))
+        approval_status = str(governance_payload.get("approval_status", "pending")).strip() or "pending"
+        promotion_state = str(governance_payload.get("promotion_state", "unknown")).strip() or "unknown"
+
+        self._governance_gate_counts_var.set(f"{pass_count} passed / {fail_count} failed ({total_gates} total)")
+        self._governance_missing_checks_var.set(
+            ", ".join(missing_checks) if missing_checks else "None"
+        )
+        self._governance_promotion_ready_var.set("Ready" if readiness else "Not ready")
+        self._governance_approval_status_var.set(f"{approval_status} ({promotion_state})")
+
+    def _load_governance_payload_from_output(self, output_text: str) -> dict[str, Any]:
+        manifest_path = self._extract_manifest_path_from_output(output_text)
+        if manifest_path is None or not manifest_path.exists():
+            return {}
+        try:
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(manifest_payload, dict):
+            return {}
+        governance_payload = manifest_payload.get("governance", {})
+        if isinstance(governance_payload, dict) and governance_payload:
+            return governance_payload
+        parameters = manifest_payload.get("parameters", {})
+        if isinstance(parameters, dict):
+            governance_metadata = parameters.get("governance_metadata", {})
+            if isinstance(governance_metadata, dict):
+                return governance_metadata
+        return {}
+
+    def _extract_manifest_path_from_output(self, output_text: str) -> Path | None:
+        candidates: list[Path] = []
+        direct_path = Path(output_text.strip())
+        if output_text.strip() and direct_path.exists():
+            candidates.append(direct_path)
+
+        for match in re.findall(r"Saved outputs to:\s*(.+)", output_text):
+            raw = match.strip().splitlines()[0].strip()
+            if raw:
+                candidates.append(Path(raw))
+
+        for candidate in reversed(candidates):
+            if candidate.is_file() and candidate.name == "manifest.json":
+                return candidate
+            if candidate.is_dir():
+                manifest_path = candidate / "manifest.json"
+                if manifest_path.exists():
+                    return manifest_path
+        return None
 
     def _cancel_selected_task(self) -> None:
         task = self._selected_task()
