@@ -52,6 +52,54 @@ def test_snapshot_versioning_uses_requested_version() -> None:
     assert latest[0]["realized_vol__version"] == 2
     assert old[0]["realized_vol"] == 0.20
     assert old[0]["realized_vol__version"] == 1
+    assert latest[0]["realized_vol__feature_set_id"] != old[0]["realized_vol__feature_set_id"]
+
+
+def test_snapshot_version_keys_include_hashes_and_training_window_metadata() -> None:
+    store = FeatureStore()
+    snapshot = store.register_snapshot(
+        feature_name="skew_zscore",
+        metadata=FeatureMetadata(source="vendor_c", lag=timedelta(minutes=15), refresh_cadence=timedelta(minutes=15)),
+        data_source_hash="src-hash-123",
+        transformation_graph_hash="graph-hash-456",
+        training_window_metadata={"start": datetime(2024, 1, 1), "end": datetime(2024, 1, 31), "lookback_days": 30},
+        records=[{"entity": "SPY", "timestamp": datetime(2024, 2, 1, 10, 0), "value": 1.1}],
+    )
+
+    assert snapshot.version_keys.data_source_hash == "src-hash-123"
+    assert snapshot.version_keys.transformation_graph_hash == "graph-hash-456"
+    assert snapshot.version_keys.training_window_metadata["start"] == "2024-01-01T00:00:00"
+    assert len(snapshot.version_keys.feature_set_id) == 64
+
+    joined = store.point_in_time_join(observations=[{"entity": "SPY", "timestamp": datetime(2024, 2, 1, 12, 0)}])
+    assert joined[0]["skew_zscore__data_source_hash"] == "src-hash-123"
+    assert joined[0]["skew_zscore__transformation_graph_hash"] == "graph-hash-456"
+    assert joined[0]["skew_zscore__training_window_metadata"]["end"] == "2024-01-31T00:00:00"
+
+
+def test_nextgen_registry_references_immutable_feature_set_ids() -> None:
+    store = FeatureStore()
+    metadata = FeatureMetadata(source="vendor_a", lag=timedelta(minutes=30), refresh_cadence=timedelta(minutes=30))
+    store.register_snapshot(
+        feature_name="realized_vol",
+        metadata=metadata,
+        records=[{"entity": "SPY", "timestamp": datetime(2024, 1, 2, 10, 0), "value": 0.20}],
+    )
+    store.register_snapshot(
+        feature_name="realized_vol",
+        metadata=metadata,
+        records=[{"entity": "SPY", "timestamp": datetime(2024, 1, 2, 10, 0), "value": 0.25}],
+    )
+
+    registry = store.build_nextgen_feature_set_registry(feature_versions={"realized_vol": 1})
+    latest_registry = store.build_nextgen_feature_set_registry()
+
+    assert registry["feature_version_keys"]["realized_vol"]["version"] == 1
+    assert latest_registry["feature_version_keys"]["realized_vol"]["version"] == 2
+    assert (
+        registry["immutable_feature_set_ids"]["realized_vol"]
+        != latest_registry["immutable_feature_set_ids"]["realized_vol"]
+    )
 
 
 def test_negative_lag_is_rejected_as_leakage_attempt() -> None:
