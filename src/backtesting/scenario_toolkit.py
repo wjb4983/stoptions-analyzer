@@ -19,6 +19,93 @@ from .vectorized import (
 )
 
 
+SCENARIO_PACK_TEMPLATES: dict[str, list[dict[str, Any]]] = {
+    "volatility_shock": [
+        {
+            "name": "pack_volatility_shock",
+            "type": "synthetic_shock",
+            "transforms": {
+                "returns_multiplier": 1.55,
+                "returns_shift": -0.0018,
+                "vol_cluster_multiplier": 2.1,
+            },
+            "stress_characteristics": {"volatility": "high", "pack": "volatility_shock"},
+        }
+    ],
+    "liquidity_crunch": [
+        {
+            "name": "pack_liquidity_crunch",
+            "type": "synthetic_shock",
+            "transforms": {
+                "liquidity_multiplier": 0.3,
+                "spread_multiplier": 3.2,
+                "returns_multiplier": 0.82,
+                "returns_shift": -0.0014,
+            },
+            "stress_characteristics": {"liquidity": "drought", "pack": "liquidity_crunch"},
+        }
+    ],
+    "gap_risk_burst": [
+        {
+            "name": "pack_gap_risk_burst",
+            "type": "synthetic_shock",
+            "transforms": {
+                "jump_magnitude": 0.045,
+                "jump_interval": 5,
+                "returns_shift": -0.001,
+                "vol_cluster_multiplier": 1.7,
+            },
+            "stress_characteristics": {"jumps": "clustered", "pack": "gap_risk_burst"},
+        }
+    ],
+    "correlation_spike": [
+        {
+            "name": "pack_correlation_spike",
+            "type": "synthetic_shock",
+            "transforms": {
+                "correlation_breakdown": 1.5,
+                "returns_multiplier": 0.88,
+                "spread_multiplier": 1.5,
+            },
+            "stress_characteristics": {"correlation": "spike", "pack": "correlation_spike"},
+        }
+    ],
+}
+
+
+def list_scenario_pack_templates() -> list[str]:
+    """Return supported one-click scenario pack names."""
+
+    return sorted(SCENARIO_PACK_TEMPLATES)
+
+
+def resolve_scenario_pack_templates(pack_names: list[str] | None) -> list[dict[str, Any]]:
+    """Expand selected pack names into concrete stress scenario definitions."""
+
+    if not pack_names:
+        return []
+    resolved: list[dict[str, Any]] = []
+    invalid: list[str] = []
+    for pack in pack_names:
+        key = str(pack).strip().lower().replace("-", "_").replace(" ", "_")
+        templates = SCENARIO_PACK_TEMPLATES.get(key)
+        if not templates:
+            invalid.append(str(pack))
+            continue
+        for idx, template in enumerate(templates, start=1):
+            row = {
+                "name": str(template.get("name", f"{key}_{idx}")),
+                "type": str(template.get("type", "synthetic_shock")),
+                "transforms": dict(template.get("transforms", {})),
+                "stress_characteristics": dict(template.get("stress_characteristics", {})),
+            }
+            resolved.append(row)
+    if invalid:
+        supported = ", ".join(list_scenario_pack_templates())
+        raise ValueError(f"Unsupported scenario pack(s): {', '.join(sorted(invalid))}. Supported packs: {supported}")
+    return resolved
+
+
 @dataclass(frozen=True)
 class ScenarioSpec:
     """User-defined scenario specification."""
