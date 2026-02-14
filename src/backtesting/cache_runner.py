@@ -767,6 +767,7 @@ def run_time_series_momentum_backtest(
         drawdown_rows=drawdown_rows,
         turnover_stats=turnover_stats,
         cost_totals=cost_totals,
+        run_details=_build_report_run_details(run_dir),
         robustness_report=robustness_report,
     )
     (run_dir / "trade_log.csv").write_text(_trade_log_csv(trade_log_rows))
@@ -4314,10 +4315,29 @@ def _build_run_manifest(*, run_type: str, parameters: dict[str, Any], data_snaps
     code_commit = _resolve_git_commit()
     dependency_versions = _collect_dependency_versions()
     config_hash = _compute_config_hash(parameters)
+    dataset_fingerprint_details = {
+        "dataset_fingerprint": data_snapshot.get("dataset_fingerprint"),
+        "data_fingerprint": dict(data_snapshot.get("data_fingerprint", {})) if isinstance(data_snapshot.get("data_fingerprint"), dict) else {},
+        "coverage_by_symbol": dict(data_snapshot.get("coverage_by_symbol", {})) if isinstance(data_snapshot.get("coverage_by_symbol"), dict) else {},
+        "missingness_by_symbol": dict(data_snapshot.get("missingness_by_symbol", {})) if isinstance(data_snapshot.get("missingness_by_symbol"), dict) else {},
+        "range_start": data_snapshot.get("range_start"),
+        "range_end": data_snapshot.get("range_end"),
+        "symbols": list(data_snapshot.get("symbols", [])) if isinstance(data_snapshot.get("symbols"), list) else [],
+        "timeframe": data_snapshot.get("timeframe"),
+    }
     random_seeds = {
         "run_seed": random_seed,
         "python_random_seed": random_seed,
         "numpy_random_seed": random_seed,
+        "subroutine_seeds": {
+            "backtest_engine": random_seed,
+            "portfolio_construction": random_seed,
+            "regime_model": random_seed,
+            "walk_forward_cv": random_seed,
+            "optimizer_sampler": random_seed,
+            "sweep_worker_base_seed": random_seed,
+            "sweep_combo_seed_formula": "worker_seed if provided else run_seed + combo_index",
+        },
     }
     reproducibility_metadata = {
         "feature_hashes": _collect_feature_hashes(parameters, data_snapshot),
@@ -4331,6 +4351,7 @@ def _build_run_manifest(*, run_type: str, parameters: dict[str, Any], data_snaps
         "parameters": parameters,
         "random_seeds": random_seeds,
         "data_snapshot_ids": data_snapshot,
+        "dataset_fingerprint_details": dataset_fingerprint_details,
         "governance": _normalize_governance_for_fingerprint(governance),
         "reproducibility_metadata": reproducibility_metadata,
     }
@@ -4348,6 +4369,7 @@ def _build_run_manifest(*, run_type: str, parameters: dict[str, Any], data_snaps
         "config_hash": config_hash,
         "data_snapshot_ids": data_snapshot,
         "data_snapshot_identifiers": data_snapshot,
+        "dataset_fingerprint_details": dataset_fingerprint_details,
         "random_seed": random_seed,
         "random_seeds": random_seeds,
         "dependency_versions": dependency_versions,
@@ -4506,6 +4528,25 @@ def _build_sweep_snapshot_identifiers(parameters: dict[str, Any]) -> dict[str, A
     }
     payload["dataset_fingerprint"] = _stable_fingerprint(payload)
     return payload
+
+
+def _build_report_run_details(run_dir: Path) -> dict[str, Any]:
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(manifest, dict):
+        return {}
+    return {
+        "code_commit_hash": manifest.get("code_commit_hash", manifest.get("code_version")),
+        "code_version": manifest.get("code_version"),
+        "config_hash": manifest.get("config_hash"),
+        "dataset_fingerprint_details": manifest.get("dataset_fingerprint_details", {}),
+        "random_seeds": manifest.get("random_seeds", {}),
+    }
 
 
 
