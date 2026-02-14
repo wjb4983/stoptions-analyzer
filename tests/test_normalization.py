@@ -109,3 +109,33 @@ def test_missing_bar_policy_synthesizes(policy: str, expect_ffill: bool) -> None
     else:
         assert math.isnan(missing["open"])
         assert math.isnan(missing["vwap"])
+
+
+
+def test_normalization_invariants_enforced() -> None:
+    bars = [
+        {
+            "symbol": "AAPL",
+            "timestamp_utc": datetime(2024, 1, 2, 14, 31, tzinfo=timezone.utc),
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "trades": 10,
+        },
+        {
+            "symbol": "AAPL",
+            "timestamp_utc": datetime(2024, 1, 2, 14, 31, tzinfo=timezone.utc),
+            "open": 100.1,
+            "high": 101.1,
+            "low": 99.1,
+            "close": 100.6,
+            "volume": 1100.0,
+            "trades": 11,
+        },
+    ]
+
+    normalized = normalize_bars(bars)
+    assert len(normalized) == 1
+    assert normalized[0]["timestamp_utc"].tzinfo == timezone.utc
