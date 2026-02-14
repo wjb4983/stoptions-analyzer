@@ -5,7 +5,7 @@ from typing import Sequence
 
 import numpy as np
 
-from src.backtesting.validation import (
+from backtesting.validation import (
     PurgedSplit,
     generate_combinatorial_purged_cv_splits as _generate_combinatorial_purged_cv_splits,
     generate_purged_kfold_splits as _generate_purged_kfold_splits,

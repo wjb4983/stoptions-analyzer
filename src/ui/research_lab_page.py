@@ -348,6 +348,8 @@ class ResearchLabPage(ttk.Frame):
             self._wizard_refresh_nav_state()
 
     def _refresh_selected_task_logs(self) -> None:
+        if not hasattr(self, "task_logs_text"):
+            return
         task = self._selected_task()
         self.task_logs_text.delete("1.0", tk.END)
         if not task or task.logs is None:
