@@ -1,6 +1,7 @@
 from .config import NextGenModelingConfig
 from .contracts import FeatureBuilder, Model, PredictionResult, ProbabilisticModel, Validator
 from .interfaces import NextGenModelInterface
+from .registry import NextGenRegistry
 from .schemas import (
     OptionSurfaceTensorPayload,
     PanelFeaturesPayload,
@@ -16,6 +17,7 @@ __all__ = [
     "Validator",
     "NextGenModelingConfig",
     "NextGenModelInterface",
+    "NextGenRegistry",
     "PanelFeaturesPayload",
     "OptionSurfaceTensorPayload",
     "RegimeLabelsPayload",
