@@ -154,5 +154,83 @@ def test_governance_metadata_requires_experiment_id_for_shadow_and_production() 
     shadow = _build_governance_metadata({"promotion_state": "shadow", "dataset_snapshot_lock": "snap"})
     production = _build_governance_metadata({"promotion_state": "production", "dataset_snapshot_lock": "snap", "experiment_id": "EXP-123"})
     assert "experiment_id" in shadow["promotion_required_checks"]
+    assert "deflated_sharpe_reality_check" in shadow["promotion_required_checks"]
+    assert "parameter_stability_penalty" in shadow["promotion_required_checks"]
+    assert "train_validation_test_drift" in shadow["promotion_required_checks"]
     assert shadow["gate_checks"]["experiment_id"] is False
     assert production["gate_checks"]["experiment_id"] is True
+
+
+def test_governance_gate_checks_include_extended_diagnostics() -> None:
+    governance = _build_governance_metadata(
+        {
+            "promotion_state": "paper",
+            "dataset_snapshot_lock": "snap:v4",
+            "checks": {
+                "oos_periods": True,
+                "stability_threshold": True,
+                "turnover_capacity": True,
+                "signal_diagnostics": True,
+                "friction_adjusted_edge": True,
+            },
+        }
+    )
+    fold_rows = [
+        {
+            "validation_score": 1.01,
+            "selected_params": {"lookback": 20},
+            "oos_metrics": {"sharpe": 0.95},
+            "diagnostics": [
+                {
+                    "validation_score": 1.01,
+                    "train_metrics": {"sharpe": 1.05},
+                    "validation_metrics": {"sharpe": 1.01},
+                }
+            ],
+        },
+        {
+            "validation_score": 0.99,
+            "selected_params": {"lookback": 20},
+            "oos_metrics": {"sharpe": 0.97},
+            "diagnostics": [
+                {
+                    "validation_score": 0.99,
+                    "train_metrics": {"sharpe": 1.02},
+                    "validation_metrics": {"sharpe": 0.99},
+                }
+            ],
+        },
+        {
+            "validation_score": 1.00,
+            "selected_params": {"lookback": 20},
+            "oos_metrics": {"sharpe": 0.96},
+            "diagnostics": [
+                {
+                    "validation_score": 1.00,
+                    "train_metrics": {"sharpe": 1.03},
+                    "validation_metrics": {"sharpe": 1.00},
+                }
+            ],
+        },
+    ]
+    checks = _evaluate_governance_gate_checks(
+        metrics={
+            "signal_diagnostics_ready": True,
+            "sharpe": 1.0,
+            "rolling_sharpe_mean": 1.0,
+            "turnover_total": 1.0,
+            "friction_adjusted_edge": 0.3,
+            "deflated_sharpe_ratio": 0.4,
+            "white_reality_check_pvalue": 0.04,
+            "spa_pvalue": 0.03,
+        },
+        fold_rows=fold_rows,
+        governance=governance,
+    )
+    assert checks["deflated_sharpe_reality_check"] is True
+    assert checks["parameter_stability_penalty"] is True
+    assert checks["train_validation_test_drift"] is True
+    diagnostics = governance.get("governance_diagnostics", {})
+    assert "deflated_sharpe_reality_check" in diagnostics
+    assert "parameter_stability" in diagnostics
+    assert "train_validation_test_drift" in diagnostics
