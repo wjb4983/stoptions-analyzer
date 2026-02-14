@@ -32,7 +32,10 @@ class FakeText:
         self.value = ""
 
     def insert(self, *_args):
-        self.value = _args[-1]
+        self.value += _args[-1]
+
+    def see(self, *_args):
+        return None
 
 
 class FakeListbox:
@@ -65,6 +68,19 @@ class FakeWidget:
 
     def config(self, **kwargs):
         self.config_calls.append(kwargs)
+
+
+class FakeFrameWidget(FakeWidget):
+    def __init__(self):
+        super().__init__()
+        self.grid_calls = 0
+        self.grid_remove_calls = 0
+
+    def grid(self):
+        self.grid_calls += 1
+
+    def grid_remove(self):
+        self.grid_remove_calls += 1
 
 
 @dataclass
@@ -242,6 +258,154 @@ def test_research_lab_validation_no_signal_and_invalid_dates():
     research_lab_page.messagebox.showinfo = lambda title, msg: messages.append((title, msg))
     assert lab._parse_signal_csv("", valid_options=("ts_momentum",), field_name="Entry signals") is None
     assert messages[-1][0] == "Invalid input"
+
+
+def test_research_lab_governance_dashboard_renders_counts_missing_and_statuses():
+    lab = research_lab_page.ResearchLabPage.__new__(research_lab_page.ResearchLabPage)
+    lab._governance_gate_counts_var = Var()
+    lab._governance_missing_checks_var = Var()
+    lab._governance_promotion_ready_var = Var()
+    lab._governance_approval_status_var = Var()
+
+    lab._load_governance_payload_from_output = lambda _output: {
+        "gate_checks": {
+            "deflated_sharpe_reality_check": True,
+            "parameter_stability_penalty": False,
+            "train_validation_test_drift": True,
+        },
+        "missing_required_checks": ["capacity", "audit_log"],
+        "is_promotion_ready": False,
+        "approval_status": "in_review",
+        "promotion_state": "paper",
+    }
+
+    lab._refresh_governance_dashboard_from_output("Saved outputs to: /tmp/fake")
+
+    assert lab._governance_gate_counts_var.get() == "2 passed / 1 failed (3 total)"
+    assert lab._governance_missing_checks_var.get() == "capacity, audit_log"
+    assert lab._governance_promotion_ready_var.get() == "Not ready"
+    assert lab._governance_approval_status_var.get() == "in_review (paper)"
+
+    lab._load_governance_payload_from_output = lambda _output: {
+        "gate_checks": {"deflated_sharpe_reality_check": True},
+        "missing_required_checks": [],
+        "is_promotion_ready": True,
+        "approval_status": "approved",
+        "promotion_state": "production",
+    }
+    lab._refresh_governance_dashboard_from_output("Saved outputs to: /tmp/fake")
+    assert lab._governance_gate_counts_var.get() == "1 passed / 0 failed (1 total)"
+    assert lab._governance_missing_checks_var.get() == "None"
+    assert lab._governance_promotion_ready_var.get() == "Ready"
+    assert lab._governance_approval_status_var.get() == "approved (production)"
+
+
+def test_research_wizard_step_validation_transitions_for_universe_dates_and_signals(monkeypatch):
+    lab = research_lab_page.ResearchLabPage.__new__(research_lab_page.ResearchLabPage)
+    lab.wizard_data_universe_var = Var("")
+    lab.wizard_period_start_var = Var("2024-01-10")
+    lab.wizard_period_end_var = Var("2024-02-01")
+
+    ok, msg = lab._wizard_validate_step(1)
+    assert not ok and "at least one ticker" in msg
+
+    lab.wizard_data_universe_var.set("AAPL, MSFT")
+    lab.wizard_period_start_var.set("bad-date")
+    ok, msg = lab._wizard_validate_step(1)
+    assert not ok and "valid start and end dates" in msg
+
+    lab.wizard_period_start_var.set("2024-02-05")
+    lab.wizard_period_end_var.set("2024-02-01")
+    ok, msg = lab._wizard_validate_step(1)
+    assert not ok and "before" in msg
+
+    lab.wizard_period_start_var.set("2024-01-01")
+    lab.wizard_period_end_var.set("2024-02-01")
+    ok, msg = lab._wizard_validate_step(1)
+    assert ok and msg == ""
+
+    popups = []
+    monkeypatch.setattr(research_lab_page.messagebox, "showinfo", lambda title, msg: popups.append((title, msg)))
+    assert lab._parse_signal_csv("", valid_options=("ts_momentum",), field_name="Entry signals") is None
+    assert "must include at least one signal" in popups[-1][1]
+    assert lab._parse_signal_csv("ts_momentum,unknown", valid_options=("ts_momentum",), field_name="Entry signals") is None
+    assert "Unsupported entry signals" in popups[-1][1]
+    assert lab._parse_signal_csv("ts_momentum", valid_options=("ts_momentum",), field_name="Entry signals") == ["ts_momentum"]
+
+
+def test_backtesting_mode_toggle_and_preset_selection_apply_expected_settings():
+    controller = FakeController(AppState())
+    page = backtesting_page.BacktestingPage.__new__(backtesting_page.BacktestingPage)
+    page.controller = controller
+    page.ui_mode_var = Var("basic")
+    page.use_walk_forward_var = Var(True)
+    page.strategy_var = Var("momentum")
+    page._update_validation_hint = lambda: False
+    frame = FakeFrameWidget()
+    adv_widget = FakeWidget()
+    page._advanced_widgets = {"walk_forward_frame": frame, "use_optimizer": adv_widget}
+
+    page._on_mode_changed()
+    assert adv_widget.config_calls[-1]["state"] == "disabled"
+    assert frame.grid_remove_calls == 1
+    assert page.use_walk_forward_var.get() is False
+
+    page.ui_mode_var.set("advanced")
+    page._on_mode_changed()
+    assert adv_widget.config_calls[-1]["state"] == "normal"
+    assert frame.grid_calls == 1
+
+    page.preset_var = Var("Intraday Momentum (intraday_momentum)")
+    page._preset_display_to_key = {
+        "Custom": "custom",
+        "Intraday Momentum (intraday_momentum)": "intraday_momentum",
+    }
+    page._preset_key_to_display = {"custom": "Custom", "intraday_momentum": "Intraday Momentum (intraday_momentum)"}
+    applied = []
+    page._apply_settings = lambda settings: applied.append(settings)
+
+    page._on_preset_selected()
+
+    expected = backtesting_page.BACKTEST_STRATEGY_PRESETS["intraday_momentum"]["settings"]
+    assert applied[-1] == expected
+    assert controller.state.backtest_settings["selected_preset"] == "intraday_momentum"
+    assert controller.persist_count == 1
+
+
+def test_output_and_selected_task_logs_refresh_deterministically(tmp_path):
+    run_dir = tmp_path / "run_a"
+    run_dir.mkdir()
+    (run_dir / "aggregate_metrics.json").write_text('{"Sharpe": 1.23}', encoding="utf-8")
+
+    bt_controller = FakeController(AppState())
+    bt_page = backtesting_page.BacktestingPage.__new__(backtesting_page.BacktestingPage)
+    bt_page.controller = bt_controller
+    bt_page.logs_text = FakeText("stale")
+    bt_page._register_run_dirs = lambda _dirs: None
+    bt_page._refresh_artifacts_view = lambda: None
+    bt_page._render_single_run = lambda _run: None
+    bt_page._set_tree_data = lambda *_args, **_kwargs: None
+    bt_page.leaderboard_tree = object()
+
+    bt_page._consume_run_outputs(f"run started\nSaved outputs to: {run_dir}")
+    assert bt_page.logs_text.get("1.0", "end") == f"run started\nSaved outputs to: {run_dir}"
+
+    bt_page._consume_run_outputs("no artifacts yet")
+    assert bt_page.logs_text.get("1.0", "end") == "no artifacts yet"
+
+    lab = research_lab_page.ResearchLabPage.__new__(research_lab_page.ResearchLabPage)
+    lab.task_logs_text = FakeText()
+    task = research_lab_page.ResearchTask(task_id="t1", label="Task", target=lambda *_a: "", context={}, config={})
+    task.logs = ["first", "second"]
+    lab._task_queue = [task]
+    lab._selected_task = lambda: task
+
+    lab._refresh_selected_task_logs()
+    assert lab.task_logs_text.get("1.0", "end") == "first\nsecond\n"
+
+    task.logs.append("third")
+    lab._refresh_selected_task_logs()
+    assert lab.task_logs_text.get("1.0", "end") == "first\nsecond\nthird\n"
 
 
 def test_navigation_smoke_all_pages_non_interactive(monkeypatch):
