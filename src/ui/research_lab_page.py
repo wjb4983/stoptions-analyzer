@@ -1009,43 +1009,25 @@ class ResearchLabPage(ttk.Frame):
         return record
 
     def _write_experiment_skeleton(self, record: dict[str, Any], context: dict[str, Any]) -> Path:
-        skeleton_dir = self._research_lab_dir / "experiment_skeletons"
+        skeleton_dir = self._research_lab_dir / "experiment_skeletons" / str(record["hypothesis_id"])
         skeleton_dir.mkdir(parents=True, exist_ok=True)
-        output_path = skeleton_dir / f"{record['hypothesis_id']}.json"
-        payload = {
-            "hypothesis_id": record["hypothesis_id"],
-            "lineage": dict(record.get("lineage", {})),
-            "workflow_stages": [
-                "idea_intake",
-                "economic_rationale",
-                "data_requirements",
-                "test_design",
-                "results_review",
-                "promotion_or_rejection",
-            ],
-            "run_plan": [
-                {
-                    "step": "parameter_optimization",
-                    "call": "run_strategy_optimization",
-                    "status": "todo",
-                    "run_id": record["lineage"]["optimization_run_id"],
-                    "parent_id": record["lineage"]["hypothesis_id"],
-                },
-                {
-                    "step": "walk_forward_validation",
-                    "call": "run_walk_forward_backtest",
-                    "status": "todo",
-                    "run_id": record["lineage"]["walk_forward_run_id"],
-                    "parent_id": record["lineage"]["optimization_run_id"],
-                },
-                {
-                    "step": "stress_testing",
-                    "call": "run_multi_signal_backtest",
-                    "status": "todo",
-                    "run_id": record["lineage"]["stress_run_id"],
-                    "parent_id": record["lineage"]["walk_forward_run_id"],
-                },
-            ],
+        output_path = skeleton_dir / "research_project.json"
+        generated_at = date.today().isoformat()
+        lineage = dict(record.get("lineage", {}))
+
+        manifest = {
+            "schema_version": "1.0",
+            "hypothesis": {
+                "hypothesis_id": record["hypothesis_id"],
+                "title": str(record.get("idea", {}).get("title", "")),
+                "description": str(record.get("idea", {}).get("description", "")),
+                "submitter": str(record.get("idea", {}).get("submitter", "research_lab_ui")),
+                "submitted_at": str(record.get("idea", {}).get("submitted_at", generated_at)),
+                "economic_rationale": dict(record.get("economic_rationale", {})),
+                "data_requirements": dict(record.get("data_requirements", {})),
+                "test_design": dict(record.get("test_design", {})),
+            },
+            "lineage": lineage,
             "context": {
                 "tickers": list(context["tickers"]),
                 "start_date": str(context["start_date"]),
@@ -1054,10 +1036,84 @@ class ResearchLabPage(ttk.Frame):
                 "skip": int(context["skip"]),
                 "costs_bps": float(context["costs_bps"]),
             },
-            "rubric": record["rubric"],
-            "generated_at": date.today().isoformat(),
+            "run_references": [
+                {
+                    "step": "parameter_optimization",
+                    "call": "run_strategy_optimization",
+                    "status": "todo",
+                    "run_id": lineage.get("optimization_run_id"),
+                    "parent_id": lineage.get("hypothesis_id"),
+                },
+                {
+                    "step": "walk_forward_validation",
+                    "call": "run_walk_forward_backtest",
+                    "status": "todo",
+                    "run_id": lineage.get("walk_forward_run_id"),
+                    "parent_id": lineage.get("optimization_run_id"),
+                },
+                {
+                    "step": "stress_testing",
+                    "call": "run_multi_signal_backtest",
+                    "status": "todo",
+                    "run_id": lineage.get("stress_run_id"),
+                    "parent_id": lineage.get("walk_forward_run_id"),
+                },
+            ],
+            "gate_outcomes": [
+                {
+                    "gate": "rubric_score",
+                    "status": str(record.get("decision", "pending")),
+                    "reason": str(record.get("decision_reason", "")),
+                    "score": float(record.get("rubric", {}).get("total_score", 0.0)),
+                    "evaluated_at": generated_at,
+                }
+            ],
+            "reviewer_comments": [
+                {
+                    "reviewer": str(record.get("results_review", {}).get("reviewer", "research_lab_ui")),
+                    "status": str(record.get("results_review", {}).get("status", "pending")),
+                    "comment": str(record.get("results_review", {}).get("notes", "")),
+                    "commented_at": generated_at,
+                }
+            ],
+            "promotion_history": [
+                {
+                    "state": str(record.get("promotion_or_rejection", {}).get("state", "pending")),
+                    "approval_status": str(record.get("promotion_or_rejection", {}).get("approval_status", "pending")),
+                    "reason": str(record.get("promotion_or_rejection", {}).get("reason", "")),
+                    "recorded_at": generated_at,
+                }
+            ],
+            "rubric": dict(record.get("rubric", {})),
+            "generated_at": generated_at,
+            "last_updated": generated_at,
         }
-        output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+        if output_path.exists():
+            try:
+                existing = json.loads(output_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+            if isinstance(existing, dict):
+                for key in ("run_references", "gate_outcomes", "reviewer_comments", "promotion_history"):
+                    merged = list(existing.get(key, []))
+                    merged.extend(manifest[key])
+                    deduped: list[dict[str, Any]] = []
+                    seen: set[str] = set()
+                    for row in merged:
+                        fingerprint = json.dumps(row, sort_keys=True)
+                        if fingerprint in seen:
+                            continue
+                        seen.add(fingerprint)
+                        deduped.append(row)
+                    manifest[key] = deduped
+
+                for key in ("hypothesis", "lineage", "context", "rubric", "generated_at"):
+                    if key in existing:
+                        manifest[key] = existing[key]
+                manifest["last_updated"] = generated_at
+
+        output_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         return output_path
 
     def _append_funnel_event(self, record: dict[str, Any]) -> None:
