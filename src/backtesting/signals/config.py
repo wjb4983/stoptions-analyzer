@@ -58,7 +58,17 @@ class SeasonalityEventEntryConfig:
     long_only: bool = False
 
 
-EntrySignalConfig = TimeSeriesMomentumEntryConfig | MovingAverageTrendEntryConfig | BreakoutEntryConfig | MeanReversionEntryConfig | VolatilityCarryEntryConfig | TrendStrengthRegimeEntryConfig | SeasonalityEventEntryConfig
+@dataclass(frozen=True)
+class VRPHarvestEntryConfig:
+    name: str = "vrp_harvest"
+    iv_feature_name: str = "iv_1m"
+    realized_vol_lookback: int = 21
+    vrp_threshold: float = 0.0
+    regime_filter: bool = False
+    long_only: bool = False
+
+
+EntrySignalConfig = TimeSeriesMomentumEntryConfig | MovingAverageTrendEntryConfig | BreakoutEntryConfig | MeanReversionEntryConfig | VolatilityCarryEntryConfig | TrendStrengthRegimeEntryConfig | SeasonalityEventEntryConfig | VRPHarvestEntryConfig
 
 
 @dataclass(frozen=True)
@@ -186,6 +196,19 @@ def parse_entry_signal_config(
             event_window=event_window,
             long_only=bool(payload.get("long_only", False)),
         )
+    if signal_name == "vrp_harvest":
+        iv_feature_name = str(payload.get("iv_feature_name", "iv_1m")).strip()
+        if not iv_feature_name:
+            raise ValueError("iv_feature_name must be a non-empty string")
+        realized_vol_lookback = _int(payload.get("realized_vol_lookback", 21), "realized_vol_lookback")
+        vrp_threshold = _float(payload.get("vrp_threshold", 0.0), "vrp_threshold")
+        return VRPHarvestEntryConfig(
+            iv_feature_name=iv_feature_name,
+            realized_vol_lookback=realized_vol_lookback,
+            vrp_threshold=vrp_threshold,
+            regime_filter=bool(payload.get("regime_filter", False)),
+            long_only=bool(payload.get("long_only", False)),
+        )
     raise ValueError(f"Unsupported entry signal: {signal_name}")
 
 
@@ -240,6 +263,8 @@ def required_lookback_window(entry: EntrySignalConfig, exit_cfg: ExitSignalConfi
             return max(entry.trend_window, entry.strength_window) + 1
         if isinstance(entry, SeasonalityEventEntryConfig):
             return max(entry.seasonal_period + entry.event_offset + entry.event_window, 1)
+        if isinstance(entry, VRPHarvestEntryConfig):
+            return entry.realized_vol_lookback + 1
         return 1
 
     def _exit_window() -> int:
@@ -284,12 +309,19 @@ class SeasonalityEventKnobs:
     event_window: int
 
 
+@dataclass(frozen=True)
+class VRPHarvestKnobs:
+    realized_vol_lookback: int
+    vrp_threshold: float
+
+
 StrategyKnobSchema = (
     TimeSeriesMomentumKnobs
     | MeanReversionKnobs
     | VolatilityCarryKnobs
     | TrendStrengthKnobs
     | SeasonalityEventKnobs
+    | VRPHarvestKnobs
 )
 
 
@@ -343,6 +375,10 @@ def parse_strategy_knobs(strategy_name: str, params: Mapping[str, Any] | None) -
             event_offset=event_offset,
             event_window=event_window,
         )
+    if strategy_name == "vrp_harvest":
+        realized_vol_lookback = _int(payload.get("realized_vol_lookback", 21), "realized_vol_lookback")
+        vrp_threshold = _float(payload.get("vrp_threshold", 0.0), "vrp_threshold")
+        return VRPHarvestKnobs(realized_vol_lookback=realized_vol_lookback, vrp_threshold=vrp_threshold)
     raise ValueError(f"Unsupported strategy knobs for: {strategy_name}")
 
 

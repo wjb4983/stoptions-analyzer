@@ -5713,7 +5713,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--execution-model-params", default="{}", help="JSON object with execution model params.")
     run_parser.add_argument("--carry-model", choices=["short_borrow", "asset_class"], default="short_borrow")
     run_parser.add_argument("--carry-model-params", default="{}", help="JSON object with carry model params.")
-    run_parser.add_argument("--entry-signal", default="ts_momentum", choices=["ts_momentum", "ma_trend", "breakout"])
+    run_parser.add_argument("--entry-signal", default="ts_momentum", choices=["ts_momentum", "ma_trend", "breakout", "mean_reversion", "vol_carry", "trend_strength", "seasonality_event", "vrp_harvest"])
     run_parser.add_argument("--entry-signal-params", default="{}", help="JSON object with entry signal parameters.")
     run_parser.add_argument("--exit-signal", default="none", choices=["none", "momentum_flip", "trailing_stop", "max_hold"])
     run_parser.add_argument("--exit-signal-params", default="{}", help="JSON object with exit signal parameters.")

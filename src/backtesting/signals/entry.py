@@ -13,6 +13,7 @@ from .config import (
     SeasonalityEventEntryConfig,
     TimeSeriesMomentumEntryConfig,
     TrendStrengthRegimeEntryConfig,
+    VRPHarvestEntryConfig,
     VolatilityCarryEntryConfig,
 )
 
@@ -159,6 +160,46 @@ class TrendStrengthRegimeEntry:
         return 1 if trend > 0.0 else (-1 if trend < 0.0 else 0)
 
 
+
+
+@dataclass(frozen=True)
+class VRPHarvestEntry:
+    config: VRPHarvestEntryConfig
+
+    def value_at(self, idx: int, prices: np.ndarray, missing: np.ndarray) -> int:
+        start_idx = idx - self.config.realized_vol_lookback
+        if start_idx < 0:
+            return 0
+        window_missing = missing[start_idx : idx + 1]
+        if bool(np.any(window_missing)):
+            return 0
+        window = prices[start_idx : idx + 1]
+        prev = window[:-1]
+        curr = window[1:]
+        if prev.size == 0 or not bool(np.all(prev > 0.0)):
+            return 0
+        realized_vol = float(np.std(curr / prev - 1.0))
+
+        iv_idx = idx - 1 if self.config.regime_filter else idx
+        if iv_idx < 0 or missing[iv_idx]:
+            return 0
+        implied_vol = float(prices[iv_idx])
+        if not np.isfinite(implied_vol) or implied_vol <= 0.0 or not np.isfinite(realized_vol):
+            return 0
+
+        vrp = implied_vol - realized_vol
+        threshold = self.config.vrp_threshold
+        if vrp > threshold:
+            side = -1
+        elif vrp < -threshold:
+            side = 1
+        else:
+            return 0
+
+        if self.config.long_only and side < 0:
+            return 0
+        return side
+
 @dataclass(frozen=True)
 class SeasonalityEventEntry:
     config: SeasonalityEventEntryConfig
@@ -198,4 +239,6 @@ def build_entry_signal(config: EntrySignalConfig) -> EntrySignal:
         return TrendStrengthRegimeEntry(config)
     if isinstance(config, SeasonalityEventEntryConfig):
         return SeasonalityEventEntry(config)
+    if isinstance(config, VRPHarvestEntryConfig):
+        return VRPHarvestEntry(config)
     raise TypeError(f"Unsupported entry signal config: {type(config).__name__}")
