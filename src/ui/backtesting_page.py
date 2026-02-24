@@ -29,15 +29,20 @@ from ui.backtesting_insights import (
     read_stress_scenarios,
     apply_governance_decision,
 )
+from ui.option_registry import (
+    ENTRY_SIGNALS,
+    EXECUTION_MODELS,
+    EXIT_SIGNALS,
+    OPTIMIZER_SAMPLERS,
+    migration_hint_text,
+    normalize_supported_option,
+    validate_option_values,
+)
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
-ENTRY_SIGNALS = ["ts_momentum", "ma_trend", "breakout"]
-EXIT_SIGNALS = ["none", "momentum_flip", "trailing_stop", "max_hold"]
 STRATEGIES = ["momentum", "xsmom"]
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization", "hrp", "herc"]
-EXECUTION_MODELS = ["bps", "spread", "participation", "square_root", "latency_drift", "modular", "volatility_scaled"]
-OPTIMIZER_SAMPLERS = ["tpe", "cma-es", "random", "grid"]
 
 TIMEFRAME_HISTORY_DAYS = {"1m": 14, "5m": 30, "15m": 60, "30m": 120, "1h": 365, "1d": 3650}
 GOVERNANCE_PROMOTION_STATES = ["research", "paper", "shadow", "production"]
@@ -50,6 +55,7 @@ class BacktestingPage(ttk.Frame):
         self._updating_wf_fractions = False
         self._advanced_widgets: dict[str, tk.Widget] = {}
         self._validation_messages: list[str] = []
+        self._stale_preset_messages: list[str] = []
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -2174,6 +2180,7 @@ class BacktestingPage(ttk.Frame):
             messages.append("Optimizer requires Advanced mode.")
             disable_run = True
 
+        messages.extend(self._stale_preset_messages)
         self._validation_messages = messages
         self.validation_hint_var.set("\n".join(messages))
         self.run_button.config(state="disabled" if disable_run else "normal")
@@ -2249,7 +2256,8 @@ class BacktestingPage(ttk.Frame):
         self.lookback_days_var.set(str(settings.get("lookback_days", "90")))
         self.skip_days_var.set(str(settings.get("skip_days", "5")))
         self.costs_bps_var.set(str(settings.get("costs_bps", "5")))
-        self.execution_model_var.set(str(settings.get("execution_model", "bps")))
+        execution_model_value = normalize_supported_option(str(settings.get("execution_model", "bps")), EXECUTION_MODELS) or "bps"
+        self.execution_model_var.set(execution_model_value)
         self.execution_spread_bps_var.set(str(settings.get("execution_spread_bps", "2")))
         self.execution_max_participation_var.set(str(settings.get("execution_max_participation", "1.0")))
         self.execution_impact_bps_var.set(str(settings.get("execution_impact_bps", "5")))
@@ -2270,7 +2278,12 @@ class BacktestingPage(ttk.Frame):
         self.timeframe_var.set(timeframe if timeframe in TIMEFRAMES else "1m")
         self.use_walk_forward_var.set(bool(settings.get("use_walk_forward", False)))
         self.use_optimizer_var.set(bool(settings.get("use_optimizer", False)))
-        self.optimizer_sampler_var.set(str(settings.get("optimizer_sampler", "tpe")))
+        optimizer_sampler = normalize_supported_option(
+            str(settings.get("optimizer_sampler", "tpe")),
+            OPTIMIZER_SAMPLERS,
+            field_name="optimizer sampler",
+        ) or "tpe"
+        self.optimizer_sampler_var.set(optimizer_sampler)
         self.optimizer_trials_var.set(str(settings.get("optimizer_n_trials", "20")))
         self.optimizer_enable_pruning_var.set(bool(settings.get("optimizer_enable_pruning", True)))
         self.optimizer_prune_constraint_var.set(bool(settings.get("optimizer_prune_constraint", True)))
@@ -2303,12 +2316,50 @@ class BacktestingPage(ttk.Frame):
         self.wf_cv_seed_var.set(str(settings.get("wf_cv_seed", "42")))
         self._refresh_wf_fraction_labels()
 
-        selected_entries = self._split_csv_setting(settings.get("selected_entry_signals", "ts_momentum"))
-        selected_exits = self._split_csv_setting(settings.get("selected_exit_signals", "none"))
+        selected_entries, stale_entries, migrated_entries = self._resolve_supported_csv_setting(
+            settings.get("selected_entry_signals", "ts_momentum"),
+            supported=ENTRY_SIGNALS,
+            fallback=("ts_momentum",),
+            field_name="entry signals",
+        )
+        selected_exits, stale_exits, migrated_exits = self._resolve_supported_csv_setting(
+            settings.get("selected_exit_signals", "none"),
+            supported=EXIT_SIGNALS,
+            fallback=("none",),
+            field_name="exit signals",
+        )
         for name, var in self.entry_signal_vars.items():
             var.set(name in selected_entries)
         for name, var in self.exit_signal_vars.items():
             var.set(name in selected_exits)
+
+        stale_messages = [
+            migration_hint_text(
+                stale=stale_entries,
+                migrations=migrated_entries,
+                supported=ENTRY_SIGNALS,
+                field_name="entry signal preset values",
+            ),
+            migration_hint_text(
+                stale=stale_exits,
+                migrations=migrated_exits,
+                supported=EXIT_SIGNALS,
+                field_name="exit signal preset values",
+            ),
+        ]
+        if normalize_supported_option(str(settings.get("execution_model", "bps")), EXECUTION_MODELS) is None:
+            stale_messages.append(
+                f"Unsupported execution model preset value: {settings.get('execution_model')} | Supported values: {', '.join(EXECUTION_MODELS)}"
+            )
+        if normalize_supported_option(
+            str(settings.get("optimizer_sampler", "tpe")),
+            OPTIMIZER_SAMPLERS,
+            field_name="optimizer sampler",
+        ) is None:
+            stale_messages.append(
+                f"Unsupported optimizer sampler preset value: {settings.get('optimizer_sampler')} | Supported values: {', '.join(OPTIMIZER_SAMPLERS)}"
+            )
+        self._stale_preset_messages = [item for item in stale_messages if item]
 
         self.xsmom_top_quantile_var.set(str(settings.get("xsmom_top_quantile", "0.2")))
         self.xsmom_bottom_quantile_var.set(str(settings.get("xsmom_bottom_quantile", "0.2")))
@@ -2560,7 +2611,7 @@ class BacktestingPage(ttk.Frame):
 
         execution_model = self.execution_model_var.get().strip() or "bps"
         if execution_model not in EXECUTION_MODELS:
-            messagebox.showinfo("Invalid input", "Please select a valid execution model.")
+            messagebox.showinfo("Invalid input", f"Execution model must be one of: {', '.join(EXECUTION_MODELS)}.")
             return
         execution_model_params = {
             "spread_bps": float(parse_float(self.execution_spread_bps_var.get()) or 2.0),
@@ -2650,7 +2701,7 @@ class BacktestingPage(ttk.Frame):
                 return False
             optimizer_sampler = (self.optimizer_sampler_var.get().strip().lower() or "tpe")
             if optimizer_sampler not in set(OPTIMIZER_SAMPLERS):
-                messagebox.showinfo("Invalid input", "Optimizer sampler must be one of: tpe, cma-es, random, grid.")
+                messagebox.showinfo("Invalid input", f"Optimizer sampler must be one of: {', '.join(OPTIMIZER_SAMPLERS)}.")
                 return False
             optimizer_min_completed = int(parse_float(self.optimizer_min_completed_var.get()) or 5)
             if optimizer_min_completed < 1:
@@ -3108,6 +3159,20 @@ class BacktestingPage(ttk.Frame):
     def _finish_backtest_run(self, output_text: str) -> None:
         self._consume_run_outputs(output_text)
         self.run_button.config(state="normal")
+
+    def _resolve_supported_csv_setting(
+        self,
+        raw: object,
+        *,
+        supported: tuple[str, ...],
+        fallback: tuple[str, ...],
+        field_name: str,
+    ) -> tuple[set[str], list[str], dict[str, str]]:
+        values = [part.strip() for part in str(raw).split(",") if part.strip()]
+        valid, stale, migrations = validate_option_values(values, supported=supported, field_name=field_name)
+        if not valid:
+            valid = list(fallback)
+        return set(valid), stale, migrations
 
     def _split_csv_setting(self, raw: object) -> set[str]:
         return {part.strip() for part in str(raw).split(",") if part.strip()}

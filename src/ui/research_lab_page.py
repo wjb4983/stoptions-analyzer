@@ -31,6 +31,15 @@ from config import (
     HYPOTHESIS_RUBRIC_TEMPLATES_PATH,
     RESEARCH_LAB_PRESETS_PATH,
 )
+from ui.option_registry import (
+    BENCHMARK_NAMES,
+    ENTRY_SIGNALS,
+    EXIT_SIGNALS,
+    OPTIMIZER_SAMPLERS,
+    migration_hint_text,
+    normalize_supported_option,
+    validate_option_values,
+)
 from ui.workflow_preset_validator import validate_workflow_preset_payload
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
@@ -125,10 +134,10 @@ class ResearchLabPage(ttk.Frame):
         self._task_enqueue_counter = 0
         self._max_concurrent_jobs = 1
         self._research_lab_dir = BACKTEST_OUTPUT_DIR / "research_lab"
-        self._sampler_options = ("tpe", "cma-es", "random", "grid")
-        self._signal_options = ("ts_momentum", "ma_trend", "breakout")
-        self._exit_signal_options = ("none", "momentum_flip", "trailing_stop", "max_hold")
-        self._benchmark_options = ("buy_hold", "equal_weight_momentum", "volatility_parity")
+        self._sampler_options = OPTIMIZER_SAMPLERS
+        self._signal_options = ENTRY_SIGNALS
+        self._exit_signal_options = EXIT_SIGNALS
+        self._benchmark_options = BENCHMARK_NAMES
         self._wizard_state_path = self._research_lab_dir / "wizard_state.json"
         self._hypothesis_rubric_templates_path = HYPOTHESIS_RUBRIC_TEMPLATES_PATH
         self._rubric_templates = self._load_rubric_templates()
@@ -1238,8 +1247,8 @@ class ResearchLabPage(ttk.Frame):
         help_text = {
             "preset": "Preset bundles entry/exit signal sets plus optimization, walk-forward, and stress defaults.",
             "easy": "Easy Mode applies robust defaults and locks advanced tuning fields.",
-            "entry": "Select one or more entry signal IDs: ts_momentum, ma_trend, breakout.",
-            "exit": "Select one or more exit signal IDs: none, momentum_flip, trailing_stop, max_hold.",
+            "entry": "Select one or more entry signal IDs. Values are sourced from the shared option registry.",
+            "exit": "Select one or more exit signal IDs. Values are sourced from the shared option registry.",
             "opt": "n_trials controls search breadth. sampler controls candidate generation.",
             "prune": "Enable early stopping for weak trials; set minimum completed trials for pruning.",
             "staged": "Optional JSON list of optimization stages for coarse-to-fine search.",
@@ -2241,7 +2250,7 @@ class ResearchLabPage(ttk.Frame):
 
         sampler = self.optimization_sampler_var.get().strip().lower() or "tpe"
         if sampler not in self._sampler_options:
-            issues.append("Optimization sampler must be one of: tpe, cma-es, random, grid.")
+            issues.append(f"Optimization sampler must be one of: {', '.join(self._sampler_options)}.")
 
         min_completed_for_pruning = int(parse_float(self.optimization_min_completed_var.get()) or 5)
         if min_completed_for_pruning < 1:
@@ -2431,28 +2440,100 @@ class ResearchLabPage(ttk.Frame):
         stress_controls = preset.get("stress_controls", {})
         benchmark_selection = preset.get("benchmark_selection", list(self._benchmark_options))
 
-        if isinstance(entry_signals, list) and entry_signals:
+        preset_warnings: list[str] = []
+
+        valid_entries, stale_entries, migrated_entries = validate_option_values(
+            [str(signal) for signal in entry_signals] if isinstance(entry_signals, list) else [],
+            supported=self._signal_options,
+            field_name="entry signals",
+        )
+        if valid_entries:
             self._set_listbox_selection(
                 self.entry_signals_listbox,
-                [str(signal) for signal in entry_signals],
+                valid_entries,
                 valid_options=self._signal_options,
             )
-        if isinstance(exit_signals, list) and exit_signals:
+        else:
+            preset_warnings.append(
+                "Preset entry_signals had no supported values; keeping current UI selection."
+            )
+
+        valid_exits, stale_exits, migrated_exits = validate_option_values(
+            [str(signal) for signal in exit_signals] if isinstance(exit_signals, list) else [],
+            supported=self._exit_signal_options,
+            field_name="exit signals",
+        )
+        if valid_exits:
             self._set_listbox_selection(
                 self.exit_signals_listbox,
-                [str(signal) for signal in exit_signals],
+                valid_exits,
                 valid_options=self._exit_signal_options,
             )
-        if isinstance(benchmark_selection, list) and benchmark_selection:
+        else:
+            preset_warnings.append(
+                "Preset exit_signals had no supported values; keeping current UI selection."
+            )
+
+        valid_benchmarks, stale_benchmarks, migrated_benchmarks = validate_option_values(
+            [str(item) for item in benchmark_selection] if isinstance(benchmark_selection, list) else [],
+            supported=self._benchmark_options,
+            field_name="benchmarks",
+        )
+        if valid_benchmarks:
             self._set_listbox_selection(
                 self.benchmark_selection_listbox,
-                [str(item) for item in benchmark_selection],
+                valid_benchmarks,
                 valid_options=self._benchmark_options,
             )
+        else:
+            preset_warnings.append(
+                "Preset benchmark_selection had no supported values; keeping current UI selection."
+            )
+
         self._sync_signal_selection_vars()
 
         self.optimization_trials_var.set(str(optimization.get("n_trials", self.optimization_trials_var.get())))
-        self.optimization_sampler_var.set(str(optimization.get("sampler", self.optimization_sampler_var.get())))
+        normalized_sampler = normalize_supported_option(
+            str(optimization.get("sampler", self.optimization_sampler_var.get())),
+            self._sampler_options,
+            field_name="optimizer sampler",
+        )
+        if normalized_sampler is None:
+            preset_warnings.append(
+                migration_hint_text(
+                    stale=[str(optimization.get("sampler", ""))],
+                    migrations={},
+                    supported=self._sampler_options,
+                    field_name="optimizer sampler preset values",
+                )
+            )
+        else:
+            self.optimization_sampler_var.set(normalized_sampler)
+
+        preset_warnings.extend(
+            item
+            for item in [
+                migration_hint_text(
+                    stale=stale_entries,
+                    migrations=migrated_entries,
+                    supported=self._signal_options,
+                    field_name="entry signal preset values",
+                ),
+                migration_hint_text(
+                    stale=stale_exits,
+                    migrations=migrated_exits,
+                    supported=self._exit_signal_options,
+                    field_name="exit signal preset values",
+                ),
+                migration_hint_text(
+                    stale=stale_benchmarks,
+                    migrations=migrated_benchmarks,
+                    supported=self._benchmark_options,
+                    field_name="benchmark preset values",
+                ),
+            ]
+            if item
+        )
         self.optimization_enable_pruning_var.set(bool(optimization.get("enable_pruning", self.optimization_enable_pruning_var.get())))
         self.optimization_prune_constraint_var.set(bool(optimization.get("prune_on_constraint", self.optimization_prune_constraint_var.get())))
         self.optimization_prune_lcb_var.set(bool(optimization.get("prune_on_lcb", self.optimization_prune_lcb_var.get())))
@@ -2473,6 +2554,15 @@ class ResearchLabPage(ttk.Frame):
         self.stress_synthetic_vol_cluster_multiplier_var.set(f"{float(stress_controls.get('synthetic_vol_cluster_multiplier', self.stress_synthetic_vol_cluster_multiplier_var.get())):.2f}")
         self.stress_overlay_spread_multiplier_var.set(f"{float(stress_controls.get('overlay_spread_multiplier', self.stress_overlay_spread_multiplier_var.get())):.2f}")
         self.stress_overlay_liquidity_multiplier_var.set(f"{float(stress_controls.get('overlay_liquidity_multiplier', self.stress_overlay_liquidity_multiplier_var.get())):.2f}")
+
+        preset_warnings = [item for item in preset_warnings if item]
+        if preset_warnings:
+            self._workflow_preset_warnings.extend(preset_warnings)
+            self._preset_validation_warnings_var.set(self._format_preset_warning_text())
+            messagebox.showwarning(
+                "Preset contains unsupported values",
+                "Some preset fields were stale and were not applied as-is.\n\n" + "\n".join(f"- {item}" for item in preset_warnings),
+            )
         self._refresh_workflow_validation_hints()
 
     def run_walk_forward(self) -> None:
@@ -2545,7 +2635,7 @@ class ResearchLabPage(ttk.Frame):
 
         sampler = self.optimization_sampler_var.get().strip().lower() or "tpe"
         if sampler not in self._sampler_options:
-            messagebox.showinfo("Invalid input", "Optimization sampler must be one of: tpe, cma-es, random, grid.")
+            messagebox.showinfo("Invalid input", f"Optimization sampler must be one of: {', '.join(self._sampler_options)}.")
             return None
 
         min_completed_for_pruning = int(parse_float(self.optimization_min_completed_var.get()) or 5)
