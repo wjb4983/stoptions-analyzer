@@ -13,6 +13,7 @@ JSON_ARTIFACTS = [
     REPORTS_DIR / "strategy_card.json",
     REPORTS_DIR / "benchmark_scorecard.json",
     REPORTS_DIR / "baseline_metrics_summary.json",
+    REPORTS_DIR / "volatility_strategy_realism_report.json",
 ]
 
 CSV_ARTIFACTS = [

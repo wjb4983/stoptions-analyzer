@@ -1,0 +1,39 @@
+{
+  "strategy": "volatility_targeted",
+  "pass": true,
+  "benchmarks": [
+    "buy_hold",
+    "equal_weight_momentum",
+    "volatility_parity"
+  ],
+  "improved_regimes": [
+    "normal_frictions"
+  ],
+  "benchmark_improvements": {
+    "normal_frictions": [
+      "buy_hold"
+    ]
+  },
+  "matrix": [
+    {
+      "regime": "normal_frictions",
+      "net_pnl": 0.012,
+      "gross_edge": 0.013,
+      "fill_ratio": 0.92,
+      "turnover_total": 61.4,
+      "slippage_share_of_gross_edge": 0.31,
+      "max_drawdown": -0.08,
+      "cvar_95": 0.016
+    },
+    {
+      "regime": "stressed_spread_liquidity",
+      "net_pnl": -0.006,
+      "gross_edge": -0.004,
+      "fill_ratio": 0.76,
+      "turnover_total": 47.9,
+      "slippage_share_of_gross_edge": 0.64,
+      "max_drawdown": -0.19,
+      "cvar_95": 0.025
+    }
+  ]
+}
