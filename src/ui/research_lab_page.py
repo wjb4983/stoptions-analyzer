@@ -63,10 +63,21 @@ class ResearchWorkflowConfig:
     optimization_min_trades: float | None
     optimization_objective_weights: dict[str, float] | None
     optimization_overfitting_penalty: dict[str, float] | None
-    train_fraction: float
-    validation_fraction: float
-    test_fraction: float
-    step_fraction: float
+    train_fraction: float | None
+    validation_fraction: float | None
+    test_fraction: float | None
+    step_fraction: float | None
+    train_bars: int | None
+    validation_bars: int | None
+    test_bars: int | None
+    step_bars: int | None
+    label_horizon_bars: int
+    nested_optimization: bool
+    inner_train_fraction: float
+    walk_forward_objective_weights: dict[str, float] | None
+    walk_forward_overfitting_penalty: dict[str, float] | None
+    strategy_key: str | None
+    prior_strategy_keys: list[str] | None
     walk_forward_split_policy: str
     stress_controls: dict[str, object]
     benchmark_selection: list[str]
@@ -1235,6 +1246,18 @@ class ResearchLabPage(ttk.Frame):
         self.wf_validation_fraction_var = tk.StringVar(value="0.15")
         self.wf_test_fraction_var = tk.StringVar(value="0.15")
         self.wf_step_fraction_var = tk.StringVar(value="0.15")
+        self.wf_train_bars_var = tk.StringVar(value="")
+        self.wf_validation_bars_var = tk.StringVar(value="")
+        self.wf_test_bars_var = tk.StringVar(value="")
+        self.wf_step_bars_var = tk.StringVar(value="")
+        self.wf_label_horizon_bars_var = tk.StringVar(value="1")
+        self.wf_nested_optimization_var = tk.BooleanVar(value=False)
+        self.wf_inner_train_fraction_var = tk.StringVar(value="0.70")
+        self.wf_objective_weights_var = tk.StringVar(value="")
+        self.wf_overfitting_penalty_var = tk.StringVar(value="")
+        self.wf_strategy_key_var = tk.StringVar(value="")
+        self.wf_prior_strategy_keys_var = tk.StringVar(value="")
+        self.wf_mode_hint_var = tk.StringVar(value="Use either fractions OR bars; leave the other mode blank.")
         self.wf_split_policy_var = tk.StringVar(value="calendar-based")
 
         self.stress_enable_historical_replay_var = tk.BooleanVar(value=True)
@@ -1274,7 +1297,8 @@ class ResearchLabPage(ttk.Frame):
             "opt": "n_trials controls search breadth. sampler controls candidate generation.",
             "prune": "Enable early stopping for weak trials; set minimum completed trials for pruning.",
             "staged": "Optional JSON list of optimization stages for coarse-to-fine search.",
-            "wf_fracs": "Train/val/test must be >0 and sum to 1.0; step is walk-forward shift.",
+            "wf_fracs": "Train/val/test must be >0 and sum to 1.0; step is walk-forward shift. Leave bars blank in this mode.",
+            "wf_bars": "Bars mode is an alternative to fractions. Provide train/val/test/step bars together.",
             "wf_split": "Split policy controls fold construction for walk-forward validation.",
             "stress_toggle": "Turn historical replay stress on/off.",
             "stress_hist": "Replay window fraction and bars per replayed segment.",
@@ -1438,6 +1462,22 @@ class ResearchLabPage(ttk.Frame):
         add_help(row, help_text["wf_fracs"])
 
         row += 1
+        ttk.Label(controls, text="Walk-forward train/val/test/step bars").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        wf_bars_row = ttk.Frame(controls)
+        wf_bars_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(wf_bars_row, textvariable=self.wf_train_bars_var, width=6).pack(side="left")
+        ttk.Label(wf_bars_row, text=" / ").pack(side="left")
+        ttk.Entry(wf_bars_row, textvariable=self.wf_validation_bars_var, width=6).pack(side="left")
+        ttk.Label(wf_bars_row, text=" / ").pack(side="left")
+        ttk.Entry(wf_bars_row, textvariable=self.wf_test_bars_var, width=6).pack(side="left")
+        ttk.Label(wf_bars_row, text=" / ").pack(side="left")
+        ttk.Entry(wf_bars_row, textvariable=self.wf_step_bars_var, width=6).pack(side="left")
+        add_help(row, help_text["wf_bars"])
+
+        row += 1
+        ttk.Label(controls, textvariable=self.wf_mode_hint_var, foreground="#995500").grid(row=row, column=1, sticky="w", padx=8, pady=(0, 5))
+
+        row += 1
         ttk.Label(controls, text="Walk-forward split policy").grid(row=row, column=0, sticky="w", padx=8, pady=5)
         split_combo = ttk.Combobox(
             controls,
@@ -1449,6 +1489,32 @@ class ResearchLabPage(ttk.Frame):
         split_combo.grid(row=row, column=1, sticky="w", padx=8, pady=5)
         self._advanced_workflow_widgets.append(split_combo)
         add_help(row, help_text["wf_split"])
+
+        row += 1
+        ttk.Label(controls, text="Label horizon / nested opt / inner train").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        wf_meta_row = ttk.Frame(controls)
+        wf_meta_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(wf_meta_row, textvariable=self.wf_label_horizon_bars_var, width=6).pack(side="left")
+        ttk.Label(wf_meta_row, text=" / ").pack(side="left")
+        ttk.Checkbutton(wf_meta_row, text="Nested", variable=self.wf_nested_optimization_var).pack(side="left")
+        ttk.Label(wf_meta_row, text=" / ").pack(side="left")
+        ttk.Entry(wf_meta_row, textvariable=self.wf_inner_train_fraction_var, width=6).pack(side="left")
+
+        row += 1
+        ttk.Label(controls, text="WF objective weights / overfitting penalty (JSON)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        wf_json_row = ttk.Frame(controls)
+        wf_json_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(wf_json_row, textvariable=self.wf_objective_weights_var, width=24).pack(side="left")
+        ttk.Label(wf_json_row, text=" / ").pack(side="left")
+        ttk.Entry(wf_json_row, textvariable=self.wf_overfitting_penalty_var, width=24).pack(side="left")
+
+        row += 1
+        ttk.Label(controls, text="Strategy key / prior strategy keys (CSV)").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        wf_lineage_row = ttk.Frame(controls)
+        wf_lineage_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(wf_lineage_row, textvariable=self.wf_strategy_key_var, width=18).pack(side="left")
+        ttk.Label(wf_lineage_row, text=" / ").pack(side="left")
+        ttk.Entry(wf_lineage_row, textvariable=self.wf_prior_strategy_keys_var, width=24).pack(side="left")
 
         row += 1
         ttk.Label(controls, text="Stress: Replay/Jump/Overlay").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -2390,14 +2456,26 @@ class ResearchLabPage(ttk.Frame):
             except json.JSONDecodeError:
                 issues.append(f"{field_label} must be valid JSON object.")
 
-        train_fraction = float(parse_float(self.wf_train_fraction_var.get()) or 0.70)
-        validation_fraction = float(parse_float(self.wf_validation_fraction_var.get()) or 0.15)
-        test_fraction = float(parse_float(self.wf_test_fraction_var.get()) or 0.15)
-        step_fraction = float(parse_float(self.wf_step_fraction_var.get()) or 0.15)
-        if any(frac <= 0.0 for frac in (train_fraction, validation_fraction, test_fraction, step_fraction)):
-            issues.append("Walk-forward fractions must all be positive.")
-        if abs((train_fraction + validation_fraction + test_fraction) - 1.0) > 1e-6:
-            issues.append("Walk-forward train + validation + test fractions must sum to 1.0.")
+        train_bars = parse_float(self.wf_train_bars_var.get())
+        validation_bars = parse_float(self.wf_validation_bars_var.get())
+        test_bars = parse_float(self.wf_test_bars_var.get())
+        step_bars = parse_float(self.wf_step_bars_var.get())
+        has_any_bars = any(v is not None for v in (train_bars, validation_bars, test_bars, step_bars))
+        has_all_bars = all(v is not None for v in (train_bars, validation_bars, test_bars, step_bars))
+        self.wf_mode_hint_var.set("Bars mode active: fractions ignored." if has_any_bars else "Fractions mode active: leave bars blank.")
+        if has_any_bars and not has_all_bars:
+            issues.append("Bars mode requires train/validation/test/step bars together.")
+        elif has_all_bars and any(v is None or v <= 0 or int(v) != v for v in (train_bars, validation_bars, test_bars, step_bars)):
+            issues.append("Walk-forward bars must be positive integers.")
+        elif not has_any_bars:
+            train_fraction = float(parse_float(self.wf_train_fraction_var.get()) or 0.70)
+            validation_fraction = float(parse_float(self.wf_validation_fraction_var.get()) or 0.15)
+            test_fraction = float(parse_float(self.wf_test_fraction_var.get()) or 0.15)
+            step_fraction = float(parse_float(self.wf_step_fraction_var.get()) or 0.15)
+            if any(frac <= 0.0 for frac in (train_fraction, validation_fraction, test_fraction, step_fraction)):
+                issues.append("Walk-forward fractions must all be positive.")
+            if abs((train_fraction + validation_fraction + test_fraction) - 1.0) > 1e-6:
+                issues.append("Walk-forward train + validation + test fractions must sum to 1.0.")
 
         split_policy = self.wf_split_policy_var.get().strip().lower()
         if split_policy not in {"calendar-based", "volatility-regime-stratified", "event-exclusion windows"}:
@@ -2676,6 +2754,18 @@ class ResearchLabPage(ttk.Frame):
         self.wf_validation_fraction_var.set(f"{float(walk_forward.get('validation_fraction', self.wf_validation_fraction_var.get())):.2f}")
         self.wf_test_fraction_var.set(f"{float(walk_forward.get('test_fraction', self.wf_test_fraction_var.get())):.2f}")
         self.wf_step_fraction_var.set(f"{float(walk_forward.get('step_fraction', self.wf_step_fraction_var.get())):.2f}")
+        self.wf_train_bars_var.set(str(walk_forward.get("train_bars", self.wf_train_bars_var.get())))
+        self.wf_validation_bars_var.set(str(walk_forward.get("validation_bars", self.wf_validation_bars_var.get())))
+        self.wf_test_bars_var.set(str(walk_forward.get("test_bars", self.wf_test_bars_var.get())))
+        self.wf_step_bars_var.set(str(walk_forward.get("step_bars", self.wf_step_bars_var.get())))
+        self.wf_label_horizon_bars_var.set(str(walk_forward.get("label_horizon_bars", self.wf_label_horizon_bars_var.get())))
+        self.wf_nested_optimization_var.set(bool(walk_forward.get("nested_optimization", self.wf_nested_optimization_var.get())))
+        self.wf_inner_train_fraction_var.set(str(walk_forward.get("inner_train_fraction", self.wf_inner_train_fraction_var.get())))
+        self.wf_objective_weights_var.set(str(walk_forward.get("objective_weights", self.wf_objective_weights_var.get())))
+        self.wf_overfitting_penalty_var.set(str(walk_forward.get("overfitting_penalty", self.wf_overfitting_penalty_var.get())))
+        self.wf_strategy_key_var.set(str(walk_forward.get("strategy_key", self.wf_strategy_key_var.get())))
+        prior_keys = walk_forward.get("prior_strategy_keys", self.wf_prior_strategy_keys_var.get())
+        self.wf_prior_strategy_keys_var.set(",".join(prior_keys) if isinstance(prior_keys, list) else str(prior_keys))
         self.wf_split_policy_var.set(str(walk_forward.get("split_policy", self.wf_split_policy_var.get())))
 
         self.stress_enable_historical_replay_var.set(bool(stress_controls.get("enable_historical_replay_regimes", self.stress_enable_historical_replay_var.get())))
@@ -2845,22 +2935,73 @@ class ResearchLabPage(ttk.Frame):
         optimization_max_drawdown_floor = parse_float(self.optimization_max_drawdown_floor_var.get())
         optimization_min_trades = parse_float(self.optimization_min_trades_var.get())
 
-        train_fraction = float(parse_float(self.wf_train_fraction_var.get()) or 0.70)
-        validation_fraction = float(parse_float(self.wf_validation_fraction_var.get()) or 0.15)
-        test_fraction = float(parse_float(self.wf_test_fraction_var.get()) or 0.15)
-        step_fraction = float(parse_float(self.wf_step_fraction_var.get()) or 0.15)
+        train_bars = parse_float(self.wf_train_bars_var.get())
+        validation_bars = parse_float(self.wf_validation_bars_var.get())
+        test_bars = parse_float(self.wf_test_bars_var.get())
+        step_bars = parse_float(self.wf_step_bars_var.get())
+        has_any_bars = any(v is not None for v in (train_bars, validation_bars, test_bars, step_bars))
+        has_all_bars = all(v is not None for v in (train_bars, validation_bars, test_bars, step_bars))
 
-        if any(frac <= 0.0 for frac in (train_fraction, validation_fraction, test_fraction, step_fraction)):
-            messagebox.showinfo("Invalid input", "Walk-forward fractions must all be positive.")
+        train_fraction: float | None = float(parse_float(self.wf_train_fraction_var.get()) or 0.70)
+        validation_fraction: float | None = float(parse_float(self.wf_validation_fraction_var.get()) or 0.15)
+        test_fraction: float | None = float(parse_float(self.wf_test_fraction_var.get()) or 0.15)
+        step_fraction: float | None = float(parse_float(self.wf_step_fraction_var.get()) or 0.15)
+
+        if has_any_bars and not has_all_bars:
+            messagebox.showinfo("Invalid input", "Bars mode requires train/validation/test/step bars together.")
             return None
-        if abs((train_fraction + validation_fraction + test_fraction) - 1.0) > 1e-6:
-            messagebox.showinfo("Invalid input", "Walk-forward train + validation + test fractions must sum to 1.0.")
-            return None
+        if has_all_bars:
+            if any(v is None or v <= 0 or int(v) != v for v in (train_bars, validation_bars, test_bars, step_bars)):
+                messagebox.showinfo("Invalid input", "Walk-forward bars must be positive integers.")
+                return None
+            train_fraction = validation_fraction = test_fraction = step_fraction = None
+        else:
+            if any(frac <= 0.0 for frac in (train_fraction, validation_fraction, test_fraction, step_fraction)):
+                messagebox.showinfo("Invalid input", "Walk-forward fractions must all be positive.")
+                return None
+            if abs((train_fraction + validation_fraction + test_fraction) - 1.0) > 1e-6:
+                messagebox.showinfo("Invalid input", "Walk-forward train + validation + test fractions must sum to 1.0.")
+                return None
+            train_bars = validation_bars = test_bars = step_bars = None
 
         split_policy = self.wf_split_policy_var.get().strip().lower()
         if split_policy not in {"calendar-based", "volatility-regime-stratified", "event-exclusion windows"}:
             messagebox.showinfo("Invalid input", "Walk-forward split policy selection is invalid.")
             return None
+
+        walk_forward_objective_weights: dict[str, float] | None = None
+        if self.wf_objective_weights_var.get().strip():
+            try:
+                payload = json.loads(self.wf_objective_weights_var.get().strip())
+            except json.JSONDecodeError:
+                messagebox.showinfo("Invalid input", "WF objective weights must be valid JSON object.")
+                return None
+            if not isinstance(payload, dict):
+                messagebox.showinfo("Invalid input", "WF objective weights must be a JSON object.")
+                return None
+            walk_forward_objective_weights = {str(k): float(v) for k, v in payload.items()}
+
+        walk_forward_overfitting_penalty: dict[str, float] | None = None
+        if self.wf_overfitting_penalty_var.get().strip():
+            try:
+                payload = json.loads(self.wf_overfitting_penalty_var.get().strip())
+            except json.JSONDecodeError:
+                messagebox.showinfo("Invalid input", "WF overfitting penalty must be valid JSON object.")
+                return None
+            if not isinstance(payload, dict):
+                messagebox.showinfo("Invalid input", "WF overfitting penalty must be a JSON object.")
+                return None
+            walk_forward_overfitting_penalty = {str(k): float(v) for k, v in payload.items()}
+
+        label_horizon_bars = int(parse_float(self.wf_label_horizon_bars_var.get()) or 1)
+        if label_horizon_bars < 1:
+            messagebox.showinfo("Invalid input", "Label horizon bars must be >= 1.")
+            return None
+        inner_train_fraction = float(parse_float(self.wf_inner_train_fraction_var.get()) or 0.7)
+        if inner_train_fraction <= 0.0 or inner_train_fraction >= 1.0:
+            messagebox.showinfo("Invalid input", "Inner train fraction must be in (0, 1).")
+            return None
+        prior_strategy_keys = [item.strip() for item in self.wf_prior_strategy_keys_var.get().split(",") if item.strip()]
 
         stress_controls = {
             "enable_historical_replay_regimes": bool(self.stress_enable_historical_replay_var.get()),
@@ -2895,6 +3036,17 @@ class ResearchLabPage(ttk.Frame):
             validation_fraction=validation_fraction,
             test_fraction=test_fraction,
             step_fraction=step_fraction,
+            train_bars=None if train_bars is None else int(train_bars),
+            validation_bars=None if validation_bars is None else int(validation_bars),
+            test_bars=None if test_bars is None else int(test_bars),
+            step_bars=None if step_bars is None else int(step_bars),
+            label_horizon_bars=label_horizon_bars,
+            nested_optimization=bool(self.wf_nested_optimization_var.get()),
+            inner_train_fraction=inner_train_fraction,
+            walk_forward_objective_weights=walk_forward_objective_weights,
+            walk_forward_overfitting_penalty=walk_forward_overfitting_penalty,
+            strategy_key=self.wf_strategy_key_var.get().strip() or None,
+            prior_strategy_keys=prior_strategy_keys or None,
             walk_forward_split_policy=split_policy,
             stress_controls=stress_controls,
             benchmark_selection=benchmark_selection,
@@ -2925,11 +3077,22 @@ class ResearchLabPage(ttk.Frame):
             entry_grid=entry_grid,
             exit_grid=exit_grid,
             core_grid=core_grid,
+            train_bars=config.train_bars,
+            validation_bars=config.validation_bars,
+            test_bars=config.test_bars,
+            step_bars=config.step_bars,
             train_fraction=config.train_fraction,
             validation_fraction=config.validation_fraction,
             test_fraction=config.test_fraction,
             step_fraction=config.step_fraction,
+            label_horizon_bars=config.label_horizon_bars,
+            nested_optimization=config.nested_optimization,
+            inner_train_fraction=config.inner_train_fraction,
             split_policy=config.walk_forward_split_policy,
+            objective_weights=None if config.walk_forward_objective_weights is None else dict(config.walk_forward_objective_weights),
+            overfitting_penalty=None if config.walk_forward_overfitting_penalty is None else dict(config.walk_forward_overfitting_penalty),
+            strategy_key=config.strategy_key,
+            prior_strategy_keys=None if config.prior_strategy_keys is None else list(config.prior_strategy_keys),
             governance_metadata={
                 "promotion_state": "research",
                 "approval_status": "pending",

@@ -466,7 +466,7 @@ class BacktestingPage(ttk.Frame):
         self._toggle_advanced_optimization()
 
         row += 1
-        self.walk_forward_frame = ttk.LabelFrame(strategy_frame, text="Walk-Forward Windows (fractions of data)")
+        self.walk_forward_frame = ttk.LabelFrame(strategy_frame, text="Walk-Forward Windows (fractions or bars)")
         self.walk_forward_frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
         self.walk_forward_frame.columnconfigure(1, weight=1)
 
@@ -530,32 +530,79 @@ class BacktestingPage(ttk.Frame):
         self.wf_step_scale.grid(row=3, column=1, sticky="ew", padx=8, pady=6)
         self.wf_step_fraction_label.grid(row=3, column=2, sticky="e", padx=8, pady=6)
 
-        ttk.Label(self.walk_forward_frame, text="CV Scheme").grid(row=4, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(self.walk_forward_frame, text="Train/Validation/Test/Step Bars").grid(row=4, column=0, sticky="w", padx=8, pady=6)
+        bars_row = ttk.Frame(self.walk_forward_frame)
+        bars_row.grid(row=4, column=1, sticky="ew", padx=8, pady=6)
+        self.wf_train_bars_var = tk.StringVar(value="")
+        self.wf_validation_bars_var = tk.StringVar(value="")
+        self.wf_test_bars_var = tk.StringVar(value="")
+        self.wf_step_bars_var = tk.StringVar(value="")
+        ttk.Entry(bars_row, textvariable=self.wf_train_bars_var, width=7).pack(side="left")
+        ttk.Label(bars_row, text=" / ").pack(side="left")
+        ttk.Entry(bars_row, textvariable=self.wf_validation_bars_var, width=7).pack(side="left")
+        ttk.Label(bars_row, text=" / ").pack(side="left")
+        ttk.Entry(bars_row, textvariable=self.wf_test_bars_var, width=7).pack(side="left")
+        ttk.Label(bars_row, text=" / ").pack(side="left")
+        ttk.Entry(bars_row, textvariable=self.wf_step_bars_var, width=7).pack(side="left")
+
+        self.wf_mode_hint_var = tk.StringVar(value="Use either fractions OR bars; leave the other mode blank.")
+        ttk.Label(self.walk_forward_frame, textvariable=self.wf_mode_hint_var, foreground="#995500", justify="left").grid(row=5, column=1, sticky="w", padx=8, pady=(0, 6))
+
+        ttk.Label(self.walk_forward_frame, text="CV Scheme").grid(row=6, column=0, sticky="w", padx=8, pady=6)
         self.wf_cv_scheme_var = tk.StringVar(value="walk_forward")
         self.wf_cv_scheme_combo = ttk.Combobox(self.walk_forward_frame, textvariable=self.wf_cv_scheme_var, state="readonly", values=["walk_forward", "cpcv"])
-        self.wf_cv_scheme_combo.grid(row=4, column=1, sticky="ew", padx=8, pady=6)
+        self.wf_cv_scheme_combo.grid(row=6, column=1, sticky="ew", padx=8, pady=6)
 
-        ttk.Label(self.walk_forward_frame, text="Purge/Embargo Bars").grid(row=5, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(self.walk_forward_frame, text="Purge/Embargo Bars").grid(row=7, column=0, sticky="w", padx=8, pady=6)
         pe_row = ttk.Frame(self.walk_forward_frame)
-        pe_row.grid(row=5, column=1, sticky="ew", padx=8, pady=6)
+        pe_row.grid(row=7, column=1, sticky="ew", padx=8, pady=6)
         self.wf_purge_bars_var = tk.StringVar(value="0")
         self.wf_embargo_bars_var = tk.StringVar(value="0")
         ttk.Entry(pe_row, textvariable=self.wf_purge_bars_var, width=8).pack(side="left")
         ttk.Label(pe_row, text=" / ").pack(side="left")
         ttk.Entry(pe_row, textvariable=self.wf_embargo_bars_var, width=8).pack(side="left")
 
-        ttk.Label(self.walk_forward_frame, text="CPCV Groups/Test Groups").grid(row=6, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(self.walk_forward_frame, text="CPCV Groups/Test Groups").grid(row=8, column=0, sticky="w", padx=8, pady=6)
         cpcv_row = ttk.Frame(self.walk_forward_frame)
-        cpcv_row.grid(row=6, column=1, sticky="ew", padx=8, pady=6)
+        cpcv_row.grid(row=8, column=1, sticky="ew", padx=8, pady=6)
         self.wf_cpcv_groups_var = tk.StringVar(value="6")
         self.wf_cpcv_test_groups_var = tk.StringVar(value="2")
         ttk.Entry(cpcv_row, textvariable=self.wf_cpcv_groups_var, width=8).pack(side="left")
         ttk.Label(cpcv_row, text=" / ").pack(side="left")
         ttk.Entry(cpcv_row, textvariable=self.wf_cpcv_test_groups_var, width=8).pack(side="left")
 
-        ttk.Label(self.walk_forward_frame, text="CV Seed").grid(row=7, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(self.walk_forward_frame, text="CV Seed").grid(row=9, column=0, sticky="w", padx=8, pady=6)
         self.wf_cv_seed_var = tk.StringVar(value="42")
-        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_cv_seed_var).grid(row=7, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_cv_seed_var).grid(row=9, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(self.walk_forward_frame, text="Label Horizon Bars").grid(row=10, column=0, sticky="w", padx=8, pady=6)
+        self.wf_label_horizon_bars_var = tk.StringVar(value="1")
+        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_label_horizon_bars_var).grid(row=10, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(self.walk_forward_frame, text="Nested Optimization / Inner Train Fraction").grid(row=11, column=0, sticky="w", padx=8, pady=6)
+        nested_row = ttk.Frame(self.walk_forward_frame)
+        nested_row.grid(row=11, column=1, sticky="w", padx=8, pady=6)
+        self.wf_nested_optimization_var = tk.BooleanVar(value=False)
+        self.wf_inner_train_fraction_var = tk.StringVar(value="0.70")
+        ttk.Checkbutton(nested_row, text="Enable", variable=self.wf_nested_optimization_var).pack(side="left")
+        ttk.Label(nested_row, text=" / ").pack(side="left")
+        ttk.Entry(nested_row, textvariable=self.wf_inner_train_fraction_var, width=8).pack(side="left")
+
+        self.wf_objective_weights_var = tk.StringVar(value="")
+        self.wf_overfitting_penalty_var = tk.StringVar(value="")
+        ttk.Label(self.walk_forward_frame, text="WF Objective Weights (optional JSON)").grid(row=12, column=0, sticky="w", padx=8, pady=6)
+        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_objective_weights_var).grid(row=12, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Label(self.walk_forward_frame, text="WF Overfitting Penalty (optional JSON)").grid(row=13, column=0, sticky="w", padx=8, pady=6)
+        ttk.Entry(self.walk_forward_frame, textvariable=self.wf_overfitting_penalty_var).grid(row=13, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(self.walk_forward_frame, text="Strategy Key / Prior Strategy Keys (CSV)").grid(row=14, column=0, sticky="w", padx=8, pady=6)
+        lineage_row = ttk.Frame(self.walk_forward_frame)
+        lineage_row.grid(row=14, column=1, sticky="ew", padx=8, pady=6)
+        self.wf_strategy_key_var = tk.StringVar(value="")
+        self.wf_prior_strategy_keys_var = tk.StringVar(value="")
+        ttk.Entry(lineage_row, textvariable=self.wf_strategy_key_var, width=18).pack(side="left")
+        ttk.Label(lineage_row, text=" / ").pack(side="left")
+        ttk.Entry(lineage_row, textvariable=self.wf_prior_strategy_keys_var, width=22).pack(side="left")
 
         row += 1
         self.strategy_specific_container = ttk.Frame(strategy_frame)
@@ -2181,6 +2228,10 @@ class BacktestingPage(ttk.Frame):
             self.strategy_var,
             self.use_walk_forward_var,
             self.use_optimizer_var,
+            self.wf_train_bars_var,
+            self.wf_validation_bars_var,
+            self.wf_test_bars_var,
+            self.wf_step_bars_var,
         ):
             var.trace_add("write", lambda *_args: self._update_validation_hint())
 
@@ -2220,6 +2271,21 @@ class BacktestingPage(ttk.Frame):
         if bool(self.use_walk_forward_var.get()) and self.ui_mode_var.get() != "advanced":
             messages.append("Walk-forward requires Advanced mode.")
             disable_run = True
+
+        has_bar_values = any(
+            (
+                self.wf_train_bars_var.get().strip(),
+                self.wf_validation_bars_var.get().strip(),
+                self.wf_test_bars_var.get().strip(),
+                self.wf_step_bars_var.get().strip(),
+            )
+        )
+        self.wf_mode_hint_var.set(
+            "Bars mode active: provide all train/validation/test/step bars and fractions will be ignored."
+            if has_bar_values
+            else "Fractions mode active: leave all bars fields blank."
+        )
+
         if bool(self.use_optimizer_var.get()) and self.ui_mode_var.get() != "advanced":
             messages.append("Optimizer requires Advanced mode.")
             disable_run = True
@@ -2359,12 +2425,23 @@ class BacktestingPage(ttk.Frame):
         self.wf_validation_fraction_var.set(float(settings.get("wf_validation_fraction", "0.15")))
         self.wf_test_fraction_var.set(float(settings.get("wf_test_fraction", "0.15")))
         self.wf_step_fraction_var.set(float(settings.get("wf_step_fraction", "0.15")))
+        self.wf_train_bars_var.set(str(settings.get("wf_train_bars", "")))
+        self.wf_validation_bars_var.set(str(settings.get("wf_validation_bars", "")))
+        self.wf_test_bars_var.set(str(settings.get("wf_test_bars", "")))
+        self.wf_step_bars_var.set(str(settings.get("wf_step_bars", "")))
         self.wf_cv_scheme_var.set(str(settings.get("wf_cv_scheme", "walk_forward")))
         self.wf_purge_bars_var.set(str(settings.get("wf_purge_window_bars", "0")))
         self.wf_embargo_bars_var.set(str(settings.get("wf_embargo_window_bars", "0")))
         self.wf_cpcv_groups_var.set(str(settings.get("wf_cpcv_n_groups", "6")))
         self.wf_cpcv_test_groups_var.set(str(settings.get("wf_cpcv_n_test_groups", "2")))
         self.wf_cv_seed_var.set(str(settings.get("wf_cv_seed", "42")))
+        self.wf_label_horizon_bars_var.set(str(settings.get("wf_label_horizon_bars", "1")))
+        self.wf_nested_optimization_var.set(bool(settings.get("wf_nested_optimization", False)))
+        self.wf_inner_train_fraction_var.set(str(settings.get("wf_inner_train_fraction", "0.70")))
+        self.wf_objective_weights_var.set(str(settings.get("wf_objective_weights", "")))
+        self.wf_overfitting_penalty_var.set(str(settings.get("wf_overfitting_penalty", "")))
+        self.wf_strategy_key_var.set(str(settings.get("wf_strategy_key", "")))
+        self.wf_prior_strategy_keys_var.set(str(settings.get("wf_prior_strategy_keys", "")))
         self._refresh_wf_fraction_labels()
 
         selected_entries, stale_entries, migrated_entries = self._resolve_supported_csv_setting(
@@ -2543,7 +2620,18 @@ class BacktestingPage(ttk.Frame):
             "wf_validation_fraction": f"{float(self.wf_validation_fraction_var.get()):.2f}",
             "wf_test_fraction": f"{float(self.wf_test_fraction_var.get()):.2f}",
             "wf_step_fraction": f"{float(self.wf_step_fraction_var.get()):.2f}",
+            "wf_train_bars": self.wf_train_bars_var.get().strip(),
+            "wf_validation_bars": self.wf_validation_bars_var.get().strip(),
+            "wf_test_bars": self.wf_test_bars_var.get().strip(),
+            "wf_step_bars": self.wf_step_bars_var.get().strip(),
             "wf_cv_scheme": self.wf_cv_scheme_var.get().strip() or "walk_forward",
+            "wf_label_horizon_bars": self.wf_label_horizon_bars_var.get().strip() or "1",
+            "wf_nested_optimization": bool(self.wf_nested_optimization_var.get()),
+            "wf_inner_train_fraction": self.wf_inner_train_fraction_var.get().strip() or "0.70",
+            "wf_objective_weights": self.wf_objective_weights_var.get().strip(),
+            "wf_overfitting_penalty": self.wf_overfitting_penalty_var.get().strip(),
+            "wf_strategy_key": self.wf_strategy_key_var.get().strip(),
+            "wf_prior_strategy_keys": self.wf_prior_strategy_keys_var.get().strip(),
             "wf_purge_window_bars": self.wf_purge_bars_var.get().strip() or "0",
             "wf_embargo_window_bars": self.wf_embargo_bars_var.get().strip() or "0",
             "wf_cpcv_n_groups": self.wf_cpcv_groups_var.get().strip() or "6",
@@ -2870,7 +2958,7 @@ class BacktestingPage(ttk.Frame):
                 walk_forward_windows = self._validate_walk_forward_inputs()
                 if walk_forward_windows is None:
                     return
-                train_fraction, validation_fraction, test_fraction, step_fraction, cv_scheme, purge_bars, embargo_bars, cpcv_groups, cpcv_test_groups, cv_seed = walk_forward_windows
+                wf_payload, purge_bars, embargo_bars, cpcv_groups, cpcv_test_groups, cv_seed = walk_forward_windows
                 worker_target = self._run_walk_forward_worker
                 worker_args = (
                     tickers,
@@ -2884,11 +2972,7 @@ class BacktestingPage(ttk.Frame):
                     selected_exits,
                     execution_model,
                     execution_model_params,
-                    train_fraction,
-                    validation_fraction,
-                    test_fraction,
-                    step_fraction,
-                    cv_scheme,
+                    wf_payload,
                     purge_bars,
                     embargo_bars,
                     cpcv_groups,
@@ -3018,22 +3102,61 @@ class BacktestingPage(ttk.Frame):
 
         return float(top_quantile), float(bottom_quantile), int(vol_lookback)
 
-    def _validate_walk_forward_inputs(self) -> tuple[float, float, float, float, str, int, int, int, int, int] | None:
-        train_fraction = float(self.wf_train_fraction_var.get())
-        validation_fraction = float(self.wf_validation_fraction_var.get())
-        test_fraction = float(self.wf_test_fraction_var.get())
-        step_fraction = float(self.wf_step_fraction_var.get())
+    def _validate_walk_forward_inputs(self) -> tuple[dict[str, float | int | str | bool | dict[str, float] | list[str] | None], int, int, int, int, int] | None:
+        train_bars = parse_float(self.wf_train_bars_var.get())
+        validation_bars = parse_float(self.wf_validation_bars_var.get())
+        test_bars = parse_float(self.wf_test_bars_var.get())
+        step_bars = parse_float(self.wf_step_bars_var.get())
+        bars_values = (train_bars, validation_bars, test_bars, step_bars)
+        has_any_bars = any(value is not None for value in bars_values)
+        has_all_bars = all(value is not None for value in bars_values)
 
-        values = [train_fraction, validation_fraction, test_fraction]
-        if any(value <= 0.0 or value >= 1.0 for value in values):
-            messagebox.showinfo("Invalid input", "Train/validation/test fractions must be in (0, 1).")
+        fractions = {
+            "train_fraction": float(self.wf_train_fraction_var.get()),
+            "validation_fraction": float(self.wf_validation_fraction_var.get()),
+            "test_fraction": float(self.wf_test_fraction_var.get()),
+            "step_fraction": float(self.wf_step_fraction_var.get()),
+        }
+
+        if has_any_bars and not has_all_bars:
+            messagebox.showinfo("Invalid input", "Bars mode requires train/validation/test/step bars together.")
             return None
-        if abs(sum(values) - 1.0) > 1e-6:
-            messagebox.showinfo("Invalid input", "Train, validation, and test fractions must sum to 1.0.")
-            return None
-        if step_fraction <= 0.0 or step_fraction > 1.0:
-            messagebox.showinfo("Invalid input", "Step fraction must be in (0, 1].")
-            return None
+
+        if has_all_bars:
+            if any(value is None or value <= 0 or int(value) != value for value in bars_values):
+                messagebox.showinfo("Invalid input", "Walk-forward bars must be positive integers.")
+                return None
+            wf_payload: dict[str, float | int | str | bool | dict[str, float] | list[str] | None] = {
+                "train_bars": int(train_bars),
+                "validation_bars": int(validation_bars),
+                "test_bars": int(test_bars),
+                "step_bars": int(step_bars),
+                "train_fraction": None,
+                "validation_fraction": None,
+                "test_fraction": None,
+                "step_fraction": None,
+            }
+        else:
+            values = [fractions["train_fraction"], fractions["validation_fraction"], fractions["test_fraction"]]
+            if any(value <= 0.0 or value >= 1.0 for value in values):
+                messagebox.showinfo("Invalid input", "Train/validation/test fractions must be in (0, 1).")
+                return None
+            if abs(sum(values) - 1.0) > 1e-6:
+                messagebox.showinfo("Invalid input", "Train, validation, and test fractions must sum to 1.0.")
+                return None
+            if fractions["step_fraction"] <= 0.0 or fractions["step_fraction"] > 1.0:
+                messagebox.showinfo("Invalid input", "Step fraction must be in (0, 1].")
+                return None
+            wf_payload = {
+                "train_bars": None,
+                "validation_bars": None,
+                "test_bars": None,
+                "step_bars": None,
+                "train_fraction": fractions["train_fraction"],
+                "validation_fraction": fractions["validation_fraction"],
+                "test_fraction": fractions["test_fraction"],
+                "step_fraction": fractions["step_fraction"],
+            }
 
         cv_scheme = self.wf_cv_scheme_var.get().strip() or "walk_forward"
         purge = parse_float(self.wf_purge_bars_var.get())
@@ -3041,6 +3164,8 @@ class BacktestingPage(ttk.Frame):
         n_groups = parse_float(self.wf_cpcv_groups_var.get())
         n_test_groups = parse_float(self.wf_cpcv_test_groups_var.get())
         cv_seed = parse_float(self.wf_cv_seed_var.get())
+        label_horizon_bars = parse_float(self.wf_label_horizon_bars_var.get())
+        inner_train_fraction = parse_float(self.wf_inner_train_fraction_var.get())
         if purge is None or purge < 0 or int(purge) != purge:
             messagebox.showinfo("Invalid input", "Purge bars must be a non-negative integer.")
             return None
@@ -3056,8 +3181,49 @@ class BacktestingPage(ttk.Frame):
         if cv_seed is None or int(cv_seed) != cv_seed:
             messagebox.showinfo("Invalid input", "CV seed must be an integer.")
             return None
+        if label_horizon_bars is None or label_horizon_bars < 1 or int(label_horizon_bars) != label_horizon_bars:
+            messagebox.showinfo("Invalid input", "Label horizon bars must be an integer >= 1.")
+            return None
+        if inner_train_fraction is None or inner_train_fraction <= 0.0 or inner_train_fraction >= 1.0:
+            messagebox.showinfo("Invalid input", "Inner train fraction must be in (0, 1).")
+            return None
 
-        return train_fraction, validation_fraction, test_fraction, step_fraction, cv_scheme, int(purge), int(embargo), int(n_groups), int(n_test_groups), int(cv_seed)
+        objective_weights: dict[str, float] | None = None
+        overfitting_penalty: dict[str, float] | None = None
+        if self.wf_objective_weights_var.get().strip():
+            try:
+                payload = json.loads(self.wf_objective_weights_var.get().strip())
+            except json.JSONDecodeError:
+                messagebox.showinfo("Invalid input", "WF objective weights must be valid JSON object.")
+                return None
+            if not isinstance(payload, dict):
+                messagebox.showinfo("Invalid input", "WF objective weights must be a JSON object.")
+                return None
+            objective_weights = {str(k): float(v) for k, v in payload.items()}
+        if self.wf_overfitting_penalty_var.get().strip():
+            try:
+                payload = json.loads(self.wf_overfitting_penalty_var.get().strip())
+            except json.JSONDecodeError:
+                messagebox.showinfo("Invalid input", "WF overfitting penalty must be valid JSON object.")
+                return None
+            if not isinstance(payload, dict):
+                messagebox.showinfo("Invalid input", "WF overfitting penalty must be a JSON object.")
+                return None
+            overfitting_penalty = {str(k): float(v) for k, v in payload.items()}
+
+        prior_strategy_keys = [item.strip() for item in self.wf_prior_strategy_keys_var.get().split(",") if item.strip()]
+        wf_payload.update({
+            "cv_scheme": cv_scheme,
+            "label_horizon_bars": int(label_horizon_bars),
+            "nested_optimization": bool(self.wf_nested_optimization_var.get()),
+            "inner_train_fraction": float(inner_train_fraction),
+            "objective_weights": objective_weights,
+            "overfitting_penalty": overfitting_penalty,
+            "strategy_key": self.wf_strategy_key_var.get().strip() or None,
+            "prior_strategy_keys": prior_strategy_keys or None,
+        })
+
+        return wf_payload, int(purge), int(embargo), int(n_groups), int(n_test_groups), int(cv_seed)
 
     def _build_optimizer_json_input(
         self,
@@ -3183,11 +3349,7 @@ class BacktestingPage(ttk.Frame):
         exit_signals: list[str],
         execution_model: str,
         execution_model_params: dict[str, object],
-        train_fraction: float,
-        validation_fraction: float,
-        test_fraction: float,
-        step_fraction: float,
-        cv_scheme: str,
+        wf_payload: dict[str, float | int | str | bool | dict[str, float] | list[str] | None],
         purge_window_bars: int,
         embargo_window_bars: int,
         cpcv_n_groups: int,
@@ -3212,16 +3374,27 @@ class BacktestingPage(ttk.Frame):
                 entry_grid=entry_grid,
                 exit_grid=exit_grid,
                 core_grid=core_grid,
-                train_fraction=train_fraction,
-                validation_fraction=validation_fraction,
-                test_fraction=test_fraction,
-                step_fraction=step_fraction,
-                cv_scheme=cv_scheme,
+                train_bars=None if wf_payload.get("train_bars") is None else int(wf_payload["train_bars"]),
+                validation_bars=None if wf_payload.get("validation_bars") is None else int(wf_payload["validation_bars"]),
+                test_bars=None if wf_payload.get("test_bars") is None else int(wf_payload["test_bars"]),
+                step_bars=None if wf_payload.get("step_bars") is None else int(wf_payload["step_bars"]),
+                train_fraction=None if wf_payload.get("train_fraction") is None else float(wf_payload["train_fraction"]),
+                validation_fraction=None if wf_payload.get("validation_fraction") is None else float(wf_payload["validation_fraction"]),
+                test_fraction=None if wf_payload.get("test_fraction") is None else float(wf_payload["test_fraction"]),
+                step_fraction=None if wf_payload.get("step_fraction") is None else float(wf_payload["step_fraction"]),
+                cv_scheme=str(wf_payload.get("cv_scheme", "walk_forward")),
                 purge_window_bars=int(purge_window_bars),
                 embargo_window_bars=int(embargo_window_bars),
                 cpcv_n_groups=int(cpcv_n_groups),
                 cpcv_n_test_groups=int(cpcv_n_test_groups),
                 cv_seed=int(cv_seed),
+                label_horizon_bars=int(wf_payload.get("label_horizon_bars", 1)),
+                nested_optimization=bool(wf_payload.get("nested_optimization", False)),
+                inner_train_fraction=float(wf_payload.get("inner_train_fraction", 0.7)),
+                objective_weights=None if wf_payload.get("objective_weights") is None else dict(wf_payload["objective_weights"]),
+                overfitting_penalty=None if wf_payload.get("overfitting_penalty") is None else dict(wf_payload["overfitting_penalty"]),
+                strategy_key=None if wf_payload.get("strategy_key") is None else str(wf_payload["strategy_key"]),
+                prior_strategy_keys=None if wf_payload.get("prior_strategy_keys") is None else list(wf_payload["prior_strategy_keys"]),
                 governance_metadata=dict(governance_payload),
                 stress_controls=dict(stress_controls),
             )
