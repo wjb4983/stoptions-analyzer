@@ -88,3 +88,61 @@ def test_regime_risk_overlay_caps_exposure_by_regime() -> None:
 
     multipliers = diagnostics["regime_risk_multiplier"]
     assert np.array_equal(multipliers, np.array([0.5, 1.0, 0.5], dtype=float))
+
+
+def test_regime_leverage_multiplier_scales_monotonic_with_risk_transition() -> None:
+    weights = np.array(
+        [
+            [0.5, -0.5],
+            [0.5, -0.5],
+            [0.5, -0.5],
+            [0.5, -0.5],
+        ],
+        dtype=float,
+    )
+    regime_labels = np.array(
+        [
+            "trend_up|vol_low|liq_normal|macro_risk_on",
+            "trend_up|vol_low|liq_normal|macro_risk_on",
+            "trend_up|vol_high|liq_thin|macro_risk_off",
+            "trend_up|vol_high|liq_thin|macro_risk_off",
+        ],
+        dtype=object,
+    )
+    regime_states = np.array(["state_0", "state_1"], dtype=object)
+    state_to_label = np.array(
+        [
+            "trend_up|vol_low|liq_normal|macro_risk_on",
+            "trend_up|vol_high|liq_thin|macro_risk_off",
+        ],
+        dtype=object,
+    )
+    regime_probabilities = np.array(
+        [
+            [1.0, 0.0],
+            [0.7, 0.3],
+            [0.3, 0.7],
+            [0.0, 1.0],
+        ],
+        dtype=float,
+    )
+
+    adjusted, diagnostics = apply_regime_risk_overlays(
+        weights=weights,
+        regime_labels=regime_labels,
+        risk_map=None,
+        regime_probabilities=regime_probabilities,
+        regime_states=regime_states,
+        state_to_label=state_to_label,
+        leverage_multipliers={
+            "default": 1.0,
+            "trend_up|vol_low|liq_normal|macro_risk_on": 1.0,
+            "trend_up|vol_high|liq_thin|macro_risk_off": 0.4,
+        },
+    )
+
+    gross = np.sum(np.abs(adjusted), axis=1)
+    assert np.all(np.diff(gross) <= 1e-9)
+    assert gross[0] > gross[-1]
+    assert np.all(np.diff(diagnostics["regime_leverage_multiplier"]) <= 1e-9)
+    assert np.allclose(diagnostics["regime_exposure_post_scale"], gross)

@@ -355,6 +355,7 @@ def run_time_series_momentum_backtest(
     portfolio_sector_map: dict[str, str] | None = None,
     regime_parameter_map: dict[str, dict[str, object]] | None = None,
     regime_risk_map: dict[str, dict[str, float]] | None = None,
+    regime_leverage_multipliers: dict[str, float] | None = None,
     regime_cost_multipliers: dict[str, float] | None = None,
     governance_metadata: dict[str, Any] | None = None,
     stress_controls: dict[str, Any] | None = None,
@@ -582,6 +583,10 @@ def run_time_series_momentum_backtest(
         weights=portfolio_result.target_weights,
         regime_labels=regime_labels,
         risk_map=regime_risk_map,
+        regime_probabilities=regime_probabilities,
+        regime_states=regime_states,
+        state_to_label=np.asarray(regime_state.get("regime_state_to_legacy_label", np.array([], dtype=object)), dtype=object),
+        leverage_multipliers=regime_leverage_multipliers,
     )
     if (
         regime_probabilities.ndim == 2
@@ -833,6 +838,7 @@ def run_time_series_momentum_backtest(
         "portfolio_sector_map": dict(portfolio_sector_map or {}),
         "regime_parameter_map": dict(regime_parameter_map or {}),
         "regime_risk_map": dict(regime_risk_map or {}),
+        "regime_leverage_multipliers": dict(regime_leverage_multipliers or {}),
         "regime_cost_multipliers": dict(regime_cost_multipliers or {}),
         "cache_root": str(cache_root),
         "governance": governance_payload,
@@ -5850,6 +5856,35 @@ def _write_regime_ensemble_comparison(*, run_dir: Path, report: dict[str, Any]) 
         for row in comparison:
             writer.writerow({key: row.get(key, 0.0 if key != "policy" else "") for key in fieldnames})
     (run_dir / "regime_ensemble_comparison.json").write_text(json.dumps(report, indent=2))
+
+    volatility_rows: list[dict[str, float | str | int]] = []
+    regime_attribution = report.get("regime_attribution", {}) if isinstance(report.get("regime_attribution"), dict) else {}
+    for policy_name, rows in regime_attribution.items():
+        policy = str(policy_name)
+        policy_key = policy.lower()
+        if "vol" not in policy_key:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            volatility_rows.append(
+                {
+                    "policy": policy,
+                    "regime": str(row.get("regime", "")),
+                    "bars": int(row.get("bars", 0)),
+                    "pnl_total": float(row.get("pnl_total", 0.0)),
+                    "pnl_mean": float(row.get("pnl_mean", 0.0)),
+                }
+            )
+
+    vol_csv = run_dir / "volatility_regime_attribution.csv"
+    with vol_csv.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["policy", "regime", "bars", "pnl_total", "pnl_mean"])
+        writer.writeheader()
+        writer.writerows(volatility_rows)
+    (run_dir / "volatility_regime_attribution.json").write_text(json.dumps(volatility_rows, indent=2))
 
 
 
