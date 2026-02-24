@@ -157,6 +157,8 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
         "attribution_summary.json",
         "regimes.csv",
         "regimes.json",
+        "volatility_regime_attribution.csv",
+        "volatility_regime_attribution.json",
     ]:
         assert (run_dir / name).exists(), name
 
@@ -174,6 +176,13 @@ def test_run_time_series_momentum_backtest_persists_exports(tmp_path: Path) -> N
     assert len(regimes_rows) == len(timestamps)
     assert "regime" in regimes_rows[0]
     assert any(key.startswith("prob_state_") for key in regimes_rows[0].keys())
+
+    vol_attr_rows = json.loads((run_dir / "volatility_regime_attribution.json").read_text())
+    assert isinstance(vol_attr_rows, list)
+    if vol_attr_rows:
+        assert "policy" in vol_attr_rows[0]
+        assert "regime" in vol_attr_rows[0]
+        assert "pnl_mean" in vol_attr_rows[0]
 
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["metric_schema_version"] == cache_runner.CANONICAL_METRIC_SCHEMA_VERSION

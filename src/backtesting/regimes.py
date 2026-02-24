@@ -312,15 +312,61 @@ def apply_regime_risk_overlays(
     weights: np.ndarray,
     regime_labels: np.ndarray,
     risk_map: dict[str, dict[str, float]] | None,
+    regime_probabilities: np.ndarray | None = None,
+    regime_states: np.ndarray | None = None,
+    state_to_label: np.ndarray | None = None,
+    leverage_multipliers: dict[str, float] | None = None,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     arr = np.asarray(weights, dtype=float)
     labels = np.asarray(regime_labels, dtype=object)
     adjusted = np.array(arr, copy=True)
     leverage_caps = np.full(arr.shape[0], np.nan, dtype=float)
     multipliers = np.ones(arr.shape[0], dtype=float)
+    leverage_scale = np.ones(arr.shape[0], dtype=float)
+    base_gross = np.sum(np.abs(arr), axis=1)
+
+    probs = np.asarray(regime_probabilities, dtype=float) if regime_probabilities is not None else np.zeros((arr.shape[0], 0), dtype=float)
+    states = np.asarray(regime_states, dtype=object) if regime_states is not None else np.array([], dtype=object)
+    mapping = np.asarray(state_to_label, dtype=object) if state_to_label is not None else np.array([], dtype=object)
+    leverage_map = dict(leverage_multipliers or {})
+    default_leverage = float(leverage_map.get("default", 1.0))
+
+    valid_probs = (
+        probs.ndim == 2
+        and probs.shape[0] == arr.shape[0]
+        and states.size == probs.shape[1]
+    )
+    valid_mapping = mapping.size == states.size
+
+    if valid_probs and leverage_map:
+        for idx in range(arr.shape[0]):
+            row_probs = probs[idx]
+            weighted = 0.0
+            for col, state in enumerate(states.tolist()):
+                state_key = str(state)
+                label_key = str(mapping[col]) if valid_mapping else ""
+                mult = float(
+                    leverage_map.get(
+                        state_key,
+                        leverage_map.get(label_key, default_leverage),
+                    )
+                )
+                weighted += float(row_probs[col]) * mult
+            leverage_scale[idx] = max(0.0, weighted)
+        adjusted *= leverage_scale[:, None]
+    elif leverage_map:
+        for idx in range(arr.shape[0]):
+            leverage_scale[idx] = max(0.0, float(leverage_map.get(str(labels[idx]), default_leverage)))
+        adjusted *= leverage_scale[:, None]
 
     if not risk_map:
-        return adjusted, {"regime_leverage_cap": leverage_caps, "regime_risk_multiplier": multipliers}
+        return adjusted, {
+            "regime_leverage_cap": leverage_caps,
+            "regime_risk_multiplier": multipliers,
+            "regime_leverage_multiplier": leverage_scale,
+            "regime_exposure_pre_scale": base_gross,
+            "regime_exposure_post_scale": np.sum(np.abs(adjusted), axis=1),
+        }
 
     default_cfg = risk_map.get("default", {})
     for idx in range(arr.shape[0]):
@@ -339,7 +385,13 @@ def apply_regime_risk_overlays(
                 row *= leverage_cap / gross
         adjusted[idx] = row
 
-    return adjusted, {"regime_leverage_cap": leverage_caps, "regime_risk_multiplier": multipliers}
+    return adjusted, {
+        "regime_leverage_cap": leverage_caps,
+        "regime_risk_multiplier": multipliers,
+        "regime_leverage_multiplier": leverage_scale,
+        "regime_exposure_pre_scale": base_gross,
+        "regime_exposure_post_scale": np.sum(np.abs(adjusted), axis=1),
+    }
 
 
 class RegimeScaledSlippageModel:
