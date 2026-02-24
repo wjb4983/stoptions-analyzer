@@ -1,3 +1,13 @@
+from pathlib import Path
+import sys
+
+# Ensure both repository root and src directory are importable when running this file directly.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_SRC_ROOT = _PROJECT_ROOT / "src"
+for _path in (str(_PROJECT_ROOT), str(_SRC_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import tkinter as tk
 from tkinter import ttk
 
