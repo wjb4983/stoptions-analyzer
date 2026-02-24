@@ -390,6 +390,15 @@ BUILTIN_STRATEGY_TEMPLATES: dict[str, dict[str, Any]] = {
         "risk": {"rules": [{"name": "max_turnover", "params": {"daily": 0.4}}]},
         "execution": {"model": "spread", "params": {"half_spread_bps": 1.0}},
     },
+    "vrp_harvest_core": {
+        "name": "VRP Harvest Core",
+        "family": "volatility_risk_premium",
+        "universe": {"symbols": ["VIXY", "SVXY"]},
+        "features": [{"name": "iv_surface", "source": "options", "params": {"iv_feature_name": "iv_1m"}}],
+        "logic": {"entry": {"name": "vrp_harvest", "params": {"iv_feature_name": "iv_1m", "realized_vol_lookback": 21, "vrp_threshold": 0.02}}, "exit": {"name": "max_hold", "params": {"max_hold_bars": 5}}},
+        "risk": {"rules": [{"name": "max_notional", "params": {"value": 0.35}}]},
+        "execution": {"model": "bps", "params": {"bps": 10.0}},
+    },
     "equity_index_rotation": {
         "name": "Equity Index Rotation",
         "family": "rotation",

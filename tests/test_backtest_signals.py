@@ -12,6 +12,7 @@ from src.backtesting.signals.config import (
     TimeSeriesMomentumEntryConfig,
     TrendStrengthRegimeEntryConfig,
     TrailingStopExitConfig,
+    VRPHarvestEntryConfig,
     VolatilityCarryEntryConfig,
     parse_entry_signal_config,
     parse_execution_model_config,
@@ -26,6 +27,7 @@ from src.backtesting.signals.entry import (
     SeasonalityEventEntry,
     TimeSeriesMomentumEntry,
     TrendStrengthRegimeEntry,
+    VRPHarvestEntry,
     VolatilityCarryEntry,
 )
 from src.backtesting.signals.exit import MaxHoldExit, MomentumFlipExit, PositionState, TrailingStopExit
@@ -84,6 +86,33 @@ def test_new_signal_families_generate_expected_sides() -> None:
     assert seasonality.value_at(4, prices_seasonal, missing) == 0
 
 
+
+def test_vrp_harvest_threshold_behavior_and_long_only() -> None:
+    prices = np.array([0.50, 0.50, 0.50, 0.51, 0.52, 0.53])
+    missing = np.zeros_like(prices, dtype=bool)
+
+    signal = VRPHarvestEntry(VRPHarvestEntryConfig(realized_vol_lookback=3, vrp_threshold=0.01))
+    assert signal.value_at(3, prices, missing) == -1
+
+    low_iv = np.array([0.03, 0.02, 0.025, 0.015, 0.02, 0.018])
+    assert signal.value_at(4, low_iv, missing) == 1
+
+    long_only_signal = VRPHarvestEntry(VRPHarvestEntryConfig(realized_vol_lookback=3, vrp_threshold=0.01, long_only=True))
+    assert long_only_signal.value_at(3, prices, missing) == 0
+
+
+def test_vrp_harvest_nan_and_missing_safety() -> None:
+    prices = np.array([0.10, 0.11, np.nan, 0.12, 0.13])
+    missing = np.zeros_like(prices, dtype=bool)
+    signal = VRPHarvestEntry(VRPHarvestEntryConfig(realized_vol_lookback=3, vrp_threshold=0.0))
+
+    assert signal.value_at(3, prices, missing) == 0
+
+    prices2 = np.array([0.10, 0.11, 0.09, 0.12, 0.13])
+    missing2 = np.zeros_like(prices2, dtype=bool)
+    missing2[2] = True
+    assert signal.value_at(4, prices2, missing2) == 0
+
 def test_momentum_flip_exit_signal() -> None:
     exit_signal = MomentumFlipExit(MomentumFlipExitConfig(lookback_days=2, skip_days=0))
     prices = np.array([100.0, 101.0, 99.0, 98.0])
@@ -121,6 +150,16 @@ def test_build_targets_with_selected_signals_and_exit_wiring() -> None:
         default_lookback_days=90,
         default_skip_days=5,
     )
+
+    vrp_entry = parse_entry_signal_config(
+        "vrp_harvest",
+        {"iv_feature_name": "iv_1m", "realized_vol_lookback": 15, "vrp_threshold": 0.02, "regime_filter": True},
+        default_lookback_days=21,
+        default_skip_days=2,
+    )
+    assert isinstance(vrp_entry, VRPHarvestEntryConfig)
+    assert vrp_entry.realized_vol_lookback == 15
+
     exit_cfg = parse_exit_signal_config(
         "momentum_flip",
         {"lookback_days": 1, "skip_days": 0},
