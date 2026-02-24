@@ -14,6 +14,7 @@ BASELINE_SUMMARY_PATH = REPORTS_DIR / "baseline_metrics_summary.json"
 BASELINE_CONFIG_PATH = REPORTS_DIR / "baseline_configs.json"
 CALIBRATION_REPORT_PATH = REPORTS_DIR / "calibration_report.json"
 CALIBRATION_SNAPSHOTS_PATH = REPORTS_DIR / "slippage_calibration_snapshots.json"
+VOLATILITY_STRATEGY_REALISM_PATH = REPORTS_DIR / "volatility_strategy_realism_report.json"
 
 RUNTIME_TOLERANCE_SECONDS = 0.15
 THROUGHPUT_FLOOR_RATIO = 0.80
@@ -99,11 +100,13 @@ def test_quality_gate_score_thresholds_pass_for_current_artifacts() -> None:
     scorecard = benchmark_bundle.build_benchmark_scorecard(expected_ranges=expected_ranges)
     calibration_report = _load_json(CALIBRATION_REPORT_PATH)
     baseline_rows = _load_json(BASELINE_SUMMARY_PATH)
+    volatility_strategy_report = _load_json(VOLATILITY_STRATEGY_REALISM_PATH)
 
     result = quality_gates.evaluate_quality_gates(
         scorecard=scorecard,
         calibration_report=calibration_report,
         baseline_rows=baseline_rows,
+        volatility_strategy_report=volatility_strategy_report,
     )
 
     failures = [

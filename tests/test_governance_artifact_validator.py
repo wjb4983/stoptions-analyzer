@@ -14,6 +14,7 @@ EXPECTED_FILES = {
     "strategy_card.json",
     "benchmark_scorecard.json",
     "baseline_metrics_summary.json",
+    "volatility_strategy_realism_report.json",
     "baseline_metrics_summary.csv",
     "equity_drawdown_plot_data.csv",
     "pass_fail_checklist.md",

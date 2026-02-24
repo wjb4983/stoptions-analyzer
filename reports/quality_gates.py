@@ -26,6 +26,7 @@ DEFAULT_SCORECARD_PATH = REPORTS_DIR / "benchmark_scorecard.json"
 DEFAULT_CALIBRATION_PATH = REPORTS_DIR / "calibration_report.json"
 DEFAULT_BASELINE_PATH = REPORTS_DIR / "baseline_metrics_summary.json"
 DEFAULT_NO_ARB_PATH = REPORTS_DIR / "no_arb_diagnostics_report.json"
+DEFAULT_VOLATILITY_STRATEGY_REALISM_PATH = REPORTS_DIR / "volatility_strategy_realism_report.json"
 DEFAULT_OUTPUT_PATH = REPORTS_DIR / "quality_gates_report.json"
 
 
@@ -46,6 +47,7 @@ def evaluate_quality_gates(
     calibration_report: dict[str, Any],
     baseline_rows: list[dict[str, Any]],
     no_arb_report: dict[str, Any] | None = None,
+    volatility_strategy_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     baseline = list(baseline_rows)
     if not baseline:
@@ -100,7 +102,22 @@ def evaluate_quality_gates(
         },
     )
 
-    gates = [data_quality, leakage_tests, validation_integrity, *nextgen_gates, no_arb_gate]
+    vol_report = volatility_strategy_report if isinstance(volatility_strategy_report, dict) else {}
+    improved_regimes = vol_report.get("improved_regimes", [])
+    if not isinstance(improved_regimes, list):
+        improved_regimes = []
+    vol_gate = _bool_gate(
+        "volatility_strategy_realism",
+        bool(vol_report.get("pass", False)) and bool(improved_regimes),
+        {
+            "strategy": str(vol_report.get("strategy", "unknown")),
+            "improved_regimes": [str(name) for name in improved_regimes],
+            "matrix_rows": int(len(vol_report.get("matrix", []))) if isinstance(vol_report.get("matrix"), list) else 0,
+            "benchmarks": list(vol_report.get("benchmarks", [])) if isinstance(vol_report.get("benchmarks"), list) else [],
+        },
+    )
+
+    gates = [data_quality, leakage_tests, validation_integrity, *nextgen_gates, no_arb_gate, vol_gate]
     all_pass = not promotion_blocked(gates)
 
     return {
@@ -117,6 +134,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calibration", default=str(DEFAULT_CALIBRATION_PATH))
     parser.add_argument("--baseline", default=str(DEFAULT_BASELINE_PATH))
     parser.add_argument("--no-arb", default=str(DEFAULT_NO_ARB_PATH))
+    parser.add_argument("--volatility-strategy-realism", default=str(DEFAULT_VOLATILITY_STRATEGY_REALISM_PATH))
     parser.add_argument("--out", default=str(DEFAULT_OUTPUT_PATH))
     return parser.parse_args()
 
@@ -129,6 +147,7 @@ def main() -> int:
         calibration_report=_load_json(Path(args.calibration)),
         baseline_rows=_load_json(Path(args.baseline)),
         no_arb_report=_load_json(Path(args.no_arb)),
+        volatility_strategy_report=_load_json(Path(args.volatility_strategy_realism)),
     )
     out_path = Path(args.out)
     out_path.write_text(json.dumps(result, indent=2) + "\n")
