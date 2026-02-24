@@ -7,6 +7,7 @@ from src.backtesting.event_driven import EventDrivenBacktester, Order
 from src.backtesting.strategies import __all__ as strategy_public_api
 from src.backtesting.strategies.alpha_model import probability_calibrated_position_size
 from src.backtesting.strategies.dsl import list_template_names
+from src.backtesting.strategies import HedgeRebalanceConfig, VolHedgingPolicy
 from src.backtesting.strategies.greek_targets import (
     GreekNeutralTargetRequest,
     build_greek_neutral_targets,
@@ -132,3 +133,74 @@ def test_strategy_discovery_and_cli_listing_include_expected_entries(strategy_di
     assert "ts_momentum_core" in dsl_templates
     assert "GreekNeutralTargetRequest" in public_strategy_api
     assert "build_greek_neutral_targets" in public_strategy_api
+
+
+def test_vol_hedging_policy_reduces_delta_exposure_and_reports_drag() -> None:
+    prices = np.array([
+        [100.0, 100.0],
+        [101.0, 99.0],
+        [102.0, 98.0],
+        [103.0, 97.0],
+        [104.0, 96.0],
+    ])
+    signals = np.array([
+        [0.0, 0.0],
+        [0.9, 0.0],
+        [0.9, 0.0],
+        [0.9, 0.0],
+        [0.9, 0.0],
+    ])
+    delta = np.array([
+        [1.0, -1.0],
+        [1.0, -1.0],
+        [1.0, -1.0],
+        [1.0, -1.0],
+        [1.0, -1.0],
+    ])
+
+    unhedged = backtest_vectorized(prices=prices, signals=signals, greek_sensitivities={"delta": delta})
+    hedged = backtest_vectorized(
+        prices=prices,
+        signals=signals,
+        greek_sensitivities={"delta": delta},
+        hedging_policy=VolHedgingPolicy(
+            hedge_delta=True,
+            rebalance=HedgeRebalanceConfig(every_n_bars=1),
+            max_hedge_notional=1.0,
+            max_hedge_turnover=2.0,
+        ),
+    )
+
+    unhedged_delta = np.asarray(unhedged.cost_breakdown["greek_diagnostics"]["snapshots"]["delta"], dtype=float)
+    hedged_delta = np.asarray(hedged.cost_breakdown["greek_diagnostics"]["snapshots"]["delta"], dtype=float)
+    assert np.max(np.abs(hedged_delta[1:])) < np.max(np.abs(unhedged_delta[1:]))
+
+    assert "hedge_cost" in hedged.cost_breakdown
+    assert "hedge_pnl" in hedged.cost_breakdown
+    assert "hedge_cost" in hedged.cost_breakdown["totals"]
+    assert np.isfinite(float(hedged.cost_breakdown["totals"]["hedge_pnl"]))
+
+
+def test_vol_hedging_respects_margin_limits() -> None:
+    prices = np.full((5, 2), 100.0, dtype=float)
+    signals = np.array([
+        [0.0, 0.0],
+        [3.0, 0.0],
+        [3.0, 0.0],
+        [3.0, 0.0],
+        [3.0, 0.0],
+    ])
+    delta = np.ones_like(signals)
+
+    result = backtest_vectorized(
+        prices=prices,
+        signals=signals,
+        greek_sensitivities={"delta": delta},
+        hedging_policy=VolHedgingPolicy(hedge_delta=True, rebalance=HedgeRebalanceConfig(every_n_bars=1)),
+        margin_schedule_by_asset=np.array([0.95, 0.95]),
+        stress_addon_by_asset=np.array([0.3, 0.3]),
+        concentration_addon=0.2,
+    )
+
+    margin_util = np.asarray(result.cost_breakdown["account_state"]["margin_utilization"], dtype=float)
+    assert np.all(margin_util <= 1.0 + 1e-9)
