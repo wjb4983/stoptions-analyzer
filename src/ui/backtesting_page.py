@@ -44,6 +44,11 @@ STRATEGIES = ["momentum", "xsmom"]
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization", "hrp", "herc"]
 
+DEFAULT_OPTIMIZER_SEARCH_SPACE = '{"combo_index":{"type":"discrete","values":[0]}}'
+DEFAULT_OPTIMIZER_OBJECTIVES = '[{"name":"sharpe","sense":"maximize"},{"name":"turnover_total","sense":"minimize"},{"name":"max_drawdown","sense":"maximize"}]'
+DEFAULT_OPTIMIZER_OBJECTIVE_WEIGHTS = '{}'
+DEFAULT_OPTIMIZER_OVERFITTING_PENALTY = '{}'
+
 TIMEFRAME_HISTORY_DAYS = {"1m": 14, "5m": 30, "15m": 60, "30m": 120, "1h": 365, "1d": 3650}
 GOVERNANCE_PROMOTION_STATES = ["research", "paper", "shadow", "production"]
 GOVERNANCE_APPROVAL_STATES = ["pending", "in_review", "approved", "rejected", "waived"]
@@ -54,6 +59,7 @@ class BacktestingPage(ttk.Frame):
         self.controller = controller
         self._updating_wf_fractions = False
         self._advanced_widgets: dict[str, tk.Widget] = {}
+        self._optimizer_json_lint_vars: dict[str, tk.StringVar] = {}
         self._validation_messages: list[str] = []
         self._stale_preset_messages: list[str] = []
 
@@ -420,6 +426,44 @@ class BacktestingPage(ttk.Frame):
         self.optimizer_staged_budgets_var = tk.StringVar(value='[{"label":"coarse","n_trials":12,"sampler":"random","partial_period_fractions":[0.33,0.66]},{"label":"fine","n_trials":20,"sampler":"tpe","partial_period_fractions":[0.5,1.0]}]')
         ttk.Label(strategy_frame, text="Staged budgets (JSON)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         ttk.Entry(strategy_frame, textvariable=self.optimizer_staged_budgets_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+
+        row += 1
+        self.show_advanced_optimization_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            strategy_frame,
+            text="Advanced Optimization",
+            variable=self.show_advanced_optimization_var,
+            command=self._toggle_advanced_optimization,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=6)
+
+        row += 1
+        self.advanced_optimization_frame = ttk.LabelFrame(strategy_frame, text="Advanced Optimization")
+        self.advanced_optimization_frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
+        self.advanced_optimization_frame.columnconfigure(1, weight=1)
+
+        self.optimizer_search_space_var = tk.StringVar(value=DEFAULT_OPTIMIZER_SEARCH_SPACE)
+        self.optimizer_objectives_var = tk.StringVar(value=DEFAULT_OPTIMIZER_OBJECTIVES)
+        self.optimizer_max_turnover_var = tk.StringVar(value="")
+        self.optimizer_max_drawdown_floor_var = tk.StringVar(value="")
+        self.optimizer_min_trades_var = tk.StringVar(value="")
+        self.optimizer_objective_weights_var = tk.StringVar(value=DEFAULT_OPTIMIZER_OBJECTIVE_WEIGHTS)
+        self.optimizer_overfitting_penalty_var = tk.StringVar(value=DEFAULT_OPTIMIZER_OVERFITTING_PENALTY)
+
+        self._build_optimizer_json_input(self.advanced_optimization_frame, 0, "Search space (JSON)", self.optimizer_search_space_var, DEFAULT_OPTIMIZER_SEARCH_SPACE, "search_space")
+        self._build_optimizer_json_input(self.advanced_optimization_frame, 2, "Objectives (JSON)", self.optimizer_objectives_var, DEFAULT_OPTIMIZER_OBJECTIVES, "objectives")
+
+        ttk.Label(self.advanced_optimization_frame, text="Max turnover / drawdown floor / min trades").grid(row=4, column=0, sticky="w", padx=8, pady=6)
+        optimizer_constraints_row = ttk.Frame(self.advanced_optimization_frame)
+        optimizer_constraints_row.grid(row=4, column=1, sticky="w", padx=8, pady=6)
+        ttk.Entry(optimizer_constraints_row, textvariable=self.optimizer_max_turnover_var, width=8).pack(side="left")
+        ttk.Label(optimizer_constraints_row, text=" / ").pack(side="left")
+        ttk.Entry(optimizer_constraints_row, textvariable=self.optimizer_max_drawdown_floor_var, width=8).pack(side="left")
+        ttk.Label(optimizer_constraints_row, text=" / ").pack(side="left")
+        ttk.Entry(optimizer_constraints_row, textvariable=self.optimizer_min_trades_var, width=8).pack(side="left")
+
+        self._build_optimizer_json_input(self.advanced_optimization_frame, 5, "Objective weights (JSON)", self.optimizer_objective_weights_var, DEFAULT_OPTIMIZER_OBJECTIVE_WEIGHTS, "objective_weights")
+        self._build_optimizer_json_input(self.advanced_optimization_frame, 7, "Overfitting penalty (JSON)", self.optimizer_overfitting_penalty_var, DEFAULT_OPTIMIZER_OVERFITTING_PENALTY, "overfitting_penalty")
+        self._toggle_advanced_optimization()
 
         row += 1
         self.walk_forward_frame = ttk.LabelFrame(strategy_frame, text="Walk-Forward Windows (fractions of data)")
@@ -2290,6 +2334,13 @@ class BacktestingPage(ttk.Frame):
         self.optimizer_prune_lcb_var.set(bool(settings.get("optimizer_prune_lcb", True)))
         self.optimizer_min_completed_var.set(str(settings.get("optimizer_min_completed_for_pruning", "5")))
         self.optimizer_staged_budgets_var.set(str(settings.get("optimizer_staged_budgets", self.optimizer_staged_budgets_var.get())))
+        self.optimizer_search_space_var.set(str(settings.get("optimizer_search_space", DEFAULT_OPTIMIZER_SEARCH_SPACE)))
+        self.optimizer_objectives_var.set(str(settings.get("optimizer_objectives", DEFAULT_OPTIMIZER_OBJECTIVES)))
+        self.optimizer_max_turnover_var.set(str(settings.get("optimizer_max_turnover", "")))
+        self.optimizer_max_drawdown_floor_var.set(str(settings.get("optimizer_max_drawdown_floor", "")))
+        self.optimizer_min_trades_var.set(str(settings.get("optimizer_min_trades", "")))
+        self.optimizer_objective_weights_var.set(str(settings.get("optimizer_objective_weights", DEFAULT_OPTIMIZER_OBJECTIVE_WEIGHTS)))
+        self.optimizer_overfitting_penalty_var.set(str(settings.get("optimizer_overfitting_penalty", DEFAULT_OPTIMIZER_OVERFITTING_PENALTY)))
         self.portfolio_method_var.set(str(settings.get("portfolio_method", "equal_weight")))
         self.portfolio_vol_lookback_var.set(str(settings.get("portfolio_vol_lookback_bars", "20")))
         self.portfolio_target_vol_var.set(str(settings.get("portfolio_target_volatility", "0.10")))
@@ -2481,6 +2532,13 @@ class BacktestingPage(ttk.Frame):
             "optimizer_prune_lcb": bool(self.optimizer_prune_lcb_var.get()),
             "optimizer_min_completed_for_pruning": self.optimizer_min_completed_var.get().strip() or "5",
             "optimizer_staged_budgets": self.optimizer_staged_budgets_var.get().strip(),
+            "optimizer_search_space": self.optimizer_search_space_var.get().strip(),
+            "optimizer_objectives": self.optimizer_objectives_var.get().strip(),
+            "optimizer_max_turnover": self.optimizer_max_turnover_var.get().strip(),
+            "optimizer_max_drawdown_floor": self.optimizer_max_drawdown_floor_var.get().strip(),
+            "optimizer_min_trades": self.optimizer_min_trades_var.get().strip(),
+            "optimizer_objective_weights": self.optimizer_objective_weights_var.get().strip(),
+            "optimizer_overfitting_penalty": self.optimizer_overfitting_penalty_var.get().strip(),
             "wf_train_fraction": f"{float(self.wf_train_fraction_var.get()):.2f}",
             "wf_validation_fraction": f"{float(self.wf_validation_fraction_var.get()):.2f}",
             "wf_test_fraction": f"{float(self.wf_test_fraction_var.get()):.2f}",
@@ -2721,6 +2779,62 @@ class BacktestingPage(ttk.Frame):
                 staged_budgets = [dict(item) for item in parsed_stage if isinstance(item, dict)]
 
             if bool(self.use_optimizer_var.get()):
+                search_space: dict[str, object] | None = None
+                objectives: list[dict[str, str]] | None = None
+                objective_weights: dict[str, float] | None = None
+                overfitting_penalty: dict[str, float] | None = None
+                max_turnover = parse_float(self.optimizer_max_turnover_var.get())
+                max_drawdown_floor = parse_float(self.optimizer_max_drawdown_floor_var.get())
+                min_trades = parse_float(self.optimizer_min_trades_var.get())
+
+                search_space_raw = self.optimizer_search_space_var.get().strip()
+                if search_space_raw:
+                    try:
+                        search_space_payload = json.loads(search_space_raw)
+                    except json.JSONDecodeError:
+                        messagebox.showinfo("Invalid input", "Search space must be valid JSON object.")
+                        return False
+                    if not isinstance(search_space_payload, dict):
+                        messagebox.showinfo("Invalid input", "Search space must be a JSON object.")
+                        return False
+                    search_space = {str(k): v for k, v in search_space_payload.items()}
+
+                objectives_raw = self.optimizer_objectives_var.get().strip()
+                if objectives_raw:
+                    try:
+                        objectives_payload = json.loads(objectives_raw)
+                    except json.JSONDecodeError:
+                        messagebox.showinfo("Invalid input", "Objectives must be valid JSON list.")
+                        return False
+                    if not isinstance(objectives_payload, list):
+                        messagebox.showinfo("Invalid input", "Objectives must be a JSON list.")
+                        return False
+                    objectives = [dict(item) for item in objectives_payload if isinstance(item, dict)]
+
+                objective_weights_raw = self.optimizer_objective_weights_var.get().strip()
+                if objective_weights_raw:
+                    try:
+                        objective_weights_payload = json.loads(objective_weights_raw)
+                    except json.JSONDecodeError:
+                        messagebox.showinfo("Invalid input", "Objective weights must be valid JSON object.")
+                        return False
+                    if not isinstance(objective_weights_payload, dict):
+                        messagebox.showinfo("Invalid input", "Objective weights must be a JSON object.")
+                        return False
+                    objective_weights = {str(k): float(v) for k, v in objective_weights_payload.items()}
+
+                overfitting_penalty_raw = self.optimizer_overfitting_penalty_var.get().strip()
+                if overfitting_penalty_raw:
+                    try:
+                        overfitting_penalty_payload = json.loads(overfitting_penalty_raw)
+                    except json.JSONDecodeError:
+                        messagebox.showinfo("Invalid input", "Overfitting penalty must be valid JSON object.")
+                        return False
+                    if not isinstance(overfitting_penalty_payload, dict):
+                        messagebox.showinfo("Invalid input", "Overfitting penalty must be a JSON object.")
+                        return False
+                    overfitting_penalty = {str(k): float(v) for k, v in overfitting_penalty_payload.items()}
+
                 worker_target = self._run_optimizer_worker
                 worker_args = (
                     tickers,
@@ -2743,6 +2857,13 @@ class BacktestingPage(ttk.Frame):
                     bool(self.optimizer_prune_lcb_var.get()),
                     optimizer_min_completed,
                     staged_budgets,
+                    search_space,
+                    objectives,
+                    max_turnover,
+                    max_drawdown_floor,
+                    min_trades,
+                    objective_weights,
+                    overfitting_penalty,
                 )
                 status_line = f"Running optimizer across {len(selected_entries) * len(selected_exits)} candidates...\n"
             elif bool(self.use_walk_forward_var.get()):
@@ -2938,6 +3059,48 @@ class BacktestingPage(ttk.Frame):
 
         return train_fraction, validation_fraction, test_fraction, step_fraction, cv_scheme, int(purge), int(embargo), int(n_groups), int(n_test_groups), int(cv_seed)
 
+    def _build_optimizer_json_input(
+        self,
+        parent: ttk.Frame,
+        row: int,
+        label_text: str,
+        variable: tk.StringVar,
+        default_value: str,
+        field_key: str,
+    ) -> None:
+        ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        field_row = ttk.Frame(parent)
+        field_row.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        field_row.columnconfigure(0, weight=1)
+        ttk.Entry(field_row, textvariable=variable).grid(row=0, column=0, sticky="ew")
+        ttk.Button(field_row, text="Reset to defaults", command=lambda: variable.set(default_value)).grid(row=0, column=1, sticky="e", padx=(8, 0))
+        lint_var = tk.StringVar(value="JSON looks valid.")
+        self._optimizer_json_lint_vars[field_key] = lint_var
+        ttk.Label(parent, textvariable=lint_var, foreground="#2f6f44", justify="left").grid(row=row + 1, column=1, sticky="w", padx=8, pady=(0, 4))
+        variable.trace_add("write", lambda *_: self._update_optimizer_json_lint(field_key, variable))
+        self._update_optimizer_json_lint(field_key, variable)
+
+    def _update_optimizer_json_lint(self, field_key: str, variable: tk.StringVar) -> None:
+        lint_var = self._optimizer_json_lint_vars.get(field_key)
+        if lint_var is None:
+            return
+        raw_value = variable.get().strip()
+        if not raw_value:
+            lint_var.set("Using optimizer defaults (empty field).")
+            return
+        try:
+            json.loads(raw_value)
+        except json.JSONDecodeError as exc:
+            lint_var.set(f"Invalid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})")
+            return
+        lint_var.set("JSON looks valid.")
+
+    def _toggle_advanced_optimization(self) -> None:
+        if self.show_advanced_optimization_var.get():
+            self.advanced_optimization_frame.grid()
+        else:
+            self.advanced_optimization_frame.grid_remove()
+
     def _run_optimizer_worker(
         self,
         tickers: list[str],
@@ -2960,6 +3123,13 @@ class BacktestingPage(ttk.Frame):
         prune_on_lcb: bool,
         min_completed_for_pruning: int,
         staged_budgets: list[dict[str, object]] | None,
+        search_space: dict[str, object] | None,
+        objectives: list[dict[str, str]] | None,
+        max_turnover: float | None,
+        max_drawdown_floor: float | None,
+        min_trades: float | None,
+        objective_weights: dict[str, float] | None,
+        overfitting_penalty: dict[str, float] | None,
     ) -> None:
         try:
             entry_grid = {signal: [{}] for signal in entry_signals}
@@ -2980,12 +3150,19 @@ class BacktestingPage(ttk.Frame):
                 seed=42,
                 n_trials=max(1, int(optimizer_n_trials)),
                 sampler_name=str(optimizer_sampler),
+                search_space=None if search_space is None else dict(search_space),
+                objectives=None if objectives is None else [dict(item) for item in objectives],
+                max_turnover=None if max_turnover is None else float(max_turnover),
+                max_drawdown_floor=None if max_drawdown_floor is None else float(max_drawdown_floor),
+                min_trades=None if min_trades is None else float(min_trades),
                 partial_period_fractions=[0.33, 0.66, 1.0],
                 enable_pruning=bool(enable_pruning),
                 prune_on_constraint_violation=bool(prune_on_constraint_violation),
                 prune_on_lcb=bool(prune_on_lcb),
                 min_completed_for_pruning=int(min_completed_for_pruning),
                 staged_budgets=None if staged_budgets is None else [dict(stage) for stage in staged_budgets],
+                objective_weights=None if objective_weights is None else dict(objective_weights),
+                overfitting_penalty=None if overfitting_penalty is None else dict(overfitting_penalty),
                 governance_metadata=dict(governance_payload),
                 stress_controls=dict(stress_controls),
             )
@@ -3127,6 +3304,13 @@ class BacktestingPage(ttk.Frame):
         prune_on_lcb: bool,
         min_completed_for_pruning: int,
         staged_budgets: list[dict[str, object]] | None,
+        search_space: dict[str, object] | None,
+        objectives: list[dict[str, str]] | None,
+        max_turnover: float | None,
+        max_drawdown_floor: float | None,
+        min_trades: float | None,
+        objective_weights: dict[str, float] | None,
+        overfitting_penalty: dict[str, float] | None,
     ) -> None:
         try:
             output_text = run_time_series_momentum_backtest(

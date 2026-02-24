@@ -56,6 +56,13 @@ class ResearchWorkflowConfig:
     optimization_prune_on_lcb: bool
     optimization_min_completed_for_pruning: int
     optimization_staged_budgets: list[dict[str, object]]
+    optimization_search_space: dict[str, object] | None
+    optimization_objectives: list[dict[str, str]] | None
+    optimization_max_turnover: float | None
+    optimization_max_drawdown_floor: float | None
+    optimization_min_trades: float | None
+    optimization_objective_weights: dict[str, float] | None
+    optimization_overfitting_penalty: dict[str, float] | None
     train_fraction: float
     validation_fraction: float
     test_fraction: float
@@ -63,6 +70,12 @@ class ResearchWorkflowConfig:
     walk_forward_split_policy: str
     stress_controls: dict[str, object]
     benchmark_selection: list[str]
+
+
+DEFAULT_OPTIMIZATION_SEARCH_SPACE = '{"combo_index":{"type":"discrete","values":[0]}}'
+DEFAULT_OPTIMIZATION_OBJECTIVES = '[{"name":"sharpe","sense":"maximize"},{"name":"turnover_total","sense":"minimize"},{"name":"max_drawdown","sense":"maximize"}]'
+DEFAULT_OPTIMIZATION_OBJECTIVE_WEIGHTS = '{}'
+DEFAULT_OPTIMIZATION_OVERFITTING_PENALTY = '{}'
 
 
 DEFAULT_RESEARCH_WORKFLOW_PRESETS: dict[str, Any] = {
@@ -1209,6 +1222,15 @@ class ResearchLabPage(ttk.Frame):
         self.optimization_prune_lcb_var = tk.BooleanVar(value=True)
         self.optimization_min_completed_var = tk.StringVar(value="5")
         self.optimization_staged_budgets_var = tk.StringVar(value='[{"label":"coarse","n_trials":12,"sampler":"random","partial_period_fractions":[0.33,0.66]},{"label":"fine","n_trials":20,"sampler":"tpe","partial_period_fractions":[0.5,1.0]}]')
+        self.show_advanced_optimization_var = tk.BooleanVar(value=False)
+        self.optimization_search_space_var = tk.StringVar(value=DEFAULT_OPTIMIZATION_SEARCH_SPACE)
+        self.optimization_objectives_var = tk.StringVar(value=DEFAULT_OPTIMIZATION_OBJECTIVES)
+        self.optimization_max_turnover_var = tk.StringVar(value="")
+        self.optimization_max_drawdown_floor_var = tk.StringVar(value="")
+        self.optimization_min_trades_var = tk.StringVar(value="")
+        self.optimization_objective_weights_var = tk.StringVar(value=DEFAULT_OPTIMIZATION_OBJECTIVE_WEIGHTS)
+        self.optimization_overfitting_penalty_var = tk.StringVar(value=DEFAULT_OPTIMIZATION_OVERFITTING_PENALTY)
+        self._optimization_json_lint_vars: dict[str, tk.StringVar] = {}
         self.wf_train_fraction_var = tk.StringVar(value="0.70")
         self.wf_validation_fraction_var = tk.StringVar(value="0.15")
         self.wf_test_fraction_var = tk.StringVar(value="0.15")
@@ -1375,6 +1397,32 @@ class ResearchLabPage(ttk.Frame):
         staged_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=5)
         self._advanced_workflow_widgets.append(staged_entry)
         add_help(row, help_text["staged"])
+
+        row += 1
+        ttk.Checkbutton(
+            controls,
+            text="Advanced Optimization",
+            variable=self.show_advanced_optimization_var,
+            command=self._toggle_research_advanced_optimization,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=5)
+
+        row += 1
+        self.research_advanced_optimization_frame = ttk.LabelFrame(controls, text="Advanced Optimization")
+        self.research_advanced_optimization_frame.grid(row=row, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 5))
+        self.research_advanced_optimization_frame.columnconfigure(1, weight=1)
+        self._build_research_json_input(self.research_advanced_optimization_frame, 0, "Search space (JSON)", self.optimization_search_space_var, DEFAULT_OPTIMIZATION_SEARCH_SPACE, "search_space")
+        self._build_research_json_input(self.research_advanced_optimization_frame, 2, "Objectives (JSON)", self.optimization_objectives_var, DEFAULT_OPTIMIZATION_OBJECTIVES, "objectives")
+        ttk.Label(self.research_advanced_optimization_frame, text="Max turnover / drawdown floor / min trades").grid(row=4, column=0, sticky="w", padx=8, pady=5)
+        constraints_row = ttk.Frame(self.research_advanced_optimization_frame)
+        constraints_row.grid(row=4, column=1, sticky="w", padx=8, pady=5)
+        ttk.Entry(constraints_row, textvariable=self.optimization_max_turnover_var, width=8).pack(side="left")
+        ttk.Label(constraints_row, text=" / ").pack(side="left")
+        ttk.Entry(constraints_row, textvariable=self.optimization_max_drawdown_floor_var, width=8).pack(side="left")
+        ttk.Label(constraints_row, text=" / ").pack(side="left")
+        ttk.Entry(constraints_row, textvariable=self.optimization_min_trades_var, width=8).pack(side="left")
+        self._build_research_json_input(self.research_advanced_optimization_frame, 5, "Objective weights (JSON)", self.optimization_objective_weights_var, DEFAULT_OPTIMIZATION_OBJECTIVE_WEIGHTS, "objective_weights")
+        self._build_research_json_input(self.research_advanced_optimization_frame, 7, "Overfitting penalty (JSON)", self.optimization_overfitting_penalty_var, DEFAULT_OPTIMIZATION_OVERFITTING_PENALTY, "overfitting_penalty")
+        self._toggle_research_advanced_optimization()
 
         row += 1
         ttk.Label(controls, text="Walk-forward train/val/test/step").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -2200,6 +2248,13 @@ class ResearchLabPage(ttk.Frame):
             self.optimization_sampler_var,
             self.optimization_min_completed_var,
             self.optimization_staged_budgets_var,
+            self.optimization_search_space_var,
+            self.optimization_objectives_var,
+            self.optimization_max_turnover_var,
+            self.optimization_max_drawdown_floor_var,
+            self.optimization_min_trades_var,
+            self.optimization_objective_weights_var,
+            self.optimization_overfitting_penalty_var,
             self.wf_train_fraction_var,
             self.wf_validation_fraction_var,
             self.wf_test_fraction_var,
@@ -2208,6 +2263,48 @@ class ResearchLabPage(ttk.Frame):
         ]
         for variable in watched_vars:
             variable.trace_add("write", lambda *_: self._refresh_workflow_validation_hints())
+
+    def _build_research_json_input(
+        self,
+        parent: ttk.Frame,
+        row: int,
+        label_text: str,
+        variable: tk.StringVar,
+        default_value: str,
+        field_key: str,
+    ) -> None:
+        ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        field_row = ttk.Frame(parent)
+        field_row.grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        field_row.columnconfigure(0, weight=1)
+        ttk.Entry(field_row, textvariable=variable).grid(row=0, column=0, sticky="ew")
+        ttk.Button(field_row, text="Reset to defaults", command=lambda: variable.set(default_value)).grid(row=0, column=1, sticky="e", padx=(8, 0))
+        lint_var = tk.StringVar(value="JSON looks valid.")
+        self._optimization_json_lint_vars[field_key] = lint_var
+        ttk.Label(parent, textvariable=lint_var, foreground="#2f6f44", justify="left").grid(row=row + 1, column=1, sticky="w", padx=8, pady=(0, 4))
+        variable.trace_add("write", lambda *_: self._update_research_json_lint(field_key, variable))
+        self._update_research_json_lint(field_key, variable)
+
+    def _update_research_json_lint(self, field_key: str, variable: tk.StringVar) -> None:
+        lint_var = self._optimization_json_lint_vars.get(field_key)
+        if lint_var is None:
+            return
+        raw_value = variable.get().strip()
+        if not raw_value:
+            lint_var.set("Using optimizer defaults (empty field).")
+            return
+        try:
+            json.loads(raw_value)
+        except json.JSONDecodeError as exc:
+            lint_var.set(f"Invalid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})")
+            return
+        lint_var.set("JSON looks valid.")
+
+    def _toggle_research_advanced_optimization(self) -> None:
+        if self.show_advanced_optimization_var.get():
+            self.research_advanced_optimization_frame.grid()
+        else:
+            self.research_advanced_optimization_frame.grid_remove()
 
     def _refresh_workflow_validation_hints(self) -> None:
         issues = self._collect_workflow_validation_issues()
@@ -2264,6 +2361,34 @@ class ResearchLabPage(ttk.Frame):
                     issues.append("Staged budgets must be a JSON list.")
             except json.JSONDecodeError:
                 issues.append("Staged budgets must be valid JSON list.")
+
+        search_space_raw = self.optimization_search_space_var.get().strip()
+        if search_space_raw:
+            try:
+                payload = json.loads(search_space_raw)
+                if not isinstance(payload, dict):
+                    issues.append("Search space must be a JSON object.")
+            except json.JSONDecodeError:
+                issues.append("Search space must be valid JSON object.")
+
+        objectives_raw = self.optimization_objectives_var.get().strip()
+        if objectives_raw:
+            try:
+                payload = json.loads(objectives_raw)
+                if not isinstance(payload, list):
+                    issues.append("Objectives must be a JSON list.")
+            except json.JSONDecodeError:
+                issues.append("Objectives must be valid JSON list.")
+
+        for field_label, field_raw in (("Objective weights", self.optimization_objective_weights_var.get().strip()), ("Overfitting penalty", self.optimization_overfitting_penalty_var.get().strip())):
+            if not field_raw:
+                continue
+            try:
+                payload = json.loads(field_raw)
+                if not isinstance(payload, dict):
+                    issues.append(f"{field_label} must be a JSON object.")
+            except json.JSONDecodeError:
+                issues.append(f"{field_label} must be valid JSON object.")
 
         train_fraction = float(parse_float(self.wf_train_fraction_var.get()) or 0.70)
         validation_fraction = float(parse_float(self.wf_validation_fraction_var.get()) or 0.15)
@@ -2539,6 +2664,13 @@ class ResearchLabPage(ttk.Frame):
         self.optimization_prune_lcb_var.set(bool(optimization.get("prune_on_lcb", self.optimization_prune_lcb_var.get())))
         self.optimization_min_completed_var.set(str(optimization.get("min_completed_for_pruning", self.optimization_min_completed_var.get())))
         self.optimization_staged_budgets_var.set(json.dumps(optimization.get("staged_budgets", json.loads(self.optimization_staged_budgets_var.get())), separators=(",", ":")))
+        self.optimization_search_space_var.set(json.dumps(optimization.get("search_space", json.loads(DEFAULT_OPTIMIZATION_SEARCH_SPACE)), separators=(",", ":")))
+        self.optimization_objectives_var.set(json.dumps(optimization.get("objectives", json.loads(DEFAULT_OPTIMIZATION_OBJECTIVES)), separators=(",", ":")))
+        self.optimization_max_turnover_var.set(str(optimization.get("max_turnover", self.optimization_max_turnover_var.get())))
+        self.optimization_max_drawdown_floor_var.set(str(optimization.get("max_drawdown_floor", self.optimization_max_drawdown_floor_var.get())))
+        self.optimization_min_trades_var.set(str(optimization.get("min_trades", self.optimization_min_trades_var.get())))
+        self.optimization_objective_weights_var.set(json.dumps(optimization.get("objective_weights", json.loads(DEFAULT_OPTIMIZATION_OBJECTIVE_WEIGHTS)), separators=(",", ":")))
+        self.optimization_overfitting_penalty_var.set(json.dumps(optimization.get("overfitting_penalty", json.loads(DEFAULT_OPTIMIZATION_OVERFITTING_PENALTY)), separators=(",", ":")))
 
         self.wf_train_fraction_var.set(f"{float(walk_forward.get('train_fraction', self.wf_train_fraction_var.get())):.2f}")
         self.wf_validation_fraction_var.set(f"{float(walk_forward.get('validation_fraction', self.wf_validation_fraction_var.get())):.2f}")
@@ -2656,6 +2788,63 @@ class ResearchLabPage(ttk.Frame):
                 return None
             staged_budgets = [dict(item) for item in staged_payload if isinstance(item, dict)]
 
+        optimization_search_space: dict[str, object] | None = None
+        optimization_objectives: list[dict[str, str]] | None = None
+        optimization_objective_weights: dict[str, float] | None = None
+        optimization_overfitting_penalty: dict[str, float] | None = None
+
+        search_space_raw = self.optimization_search_space_var.get().strip()
+        if search_space_raw:
+            try:
+                payload = json.loads(search_space_raw)
+            except json.JSONDecodeError:
+                messagebox.showinfo("Invalid input", "Search space must be valid JSON object.")
+                return None
+            if not isinstance(payload, dict):
+                messagebox.showinfo("Invalid input", "Search space must be a JSON object.")
+                return None
+            optimization_search_space = {str(k): v for k, v in payload.items()}
+
+        objectives_raw = self.optimization_objectives_var.get().strip()
+        if objectives_raw:
+            try:
+                payload = json.loads(objectives_raw)
+            except json.JSONDecodeError:
+                messagebox.showinfo("Invalid input", "Objectives must be valid JSON list.")
+                return None
+            if not isinstance(payload, list):
+                messagebox.showinfo("Invalid input", "Objectives must be a JSON list.")
+                return None
+            optimization_objectives = [dict(item) for item in payload if isinstance(item, dict)]
+
+        objective_weights_raw = self.optimization_objective_weights_var.get().strip()
+        if objective_weights_raw:
+            try:
+                payload = json.loads(objective_weights_raw)
+            except json.JSONDecodeError:
+                messagebox.showinfo("Invalid input", "Objective weights must be valid JSON object.")
+                return None
+            if not isinstance(payload, dict):
+                messagebox.showinfo("Invalid input", "Objective weights must be a JSON object.")
+                return None
+            optimization_objective_weights = {str(k): float(v) for k, v in payload.items()}
+
+        overfitting_penalty_raw = self.optimization_overfitting_penalty_var.get().strip()
+        if overfitting_penalty_raw:
+            try:
+                payload = json.loads(overfitting_penalty_raw)
+            except json.JSONDecodeError:
+                messagebox.showinfo("Invalid input", "Overfitting penalty must be valid JSON object.")
+                return None
+            if not isinstance(payload, dict):
+                messagebox.showinfo("Invalid input", "Overfitting penalty must be a JSON object.")
+                return None
+            optimization_overfitting_penalty = {str(k): float(v) for k, v in payload.items()}
+
+        optimization_max_turnover = parse_float(self.optimization_max_turnover_var.get())
+        optimization_max_drawdown_floor = parse_float(self.optimization_max_drawdown_floor_var.get())
+        optimization_min_trades = parse_float(self.optimization_min_trades_var.get())
+
         train_fraction = float(parse_float(self.wf_train_fraction_var.get()) or 0.70)
         validation_fraction = float(parse_float(self.wf_validation_fraction_var.get()) or 0.15)
         test_fraction = float(parse_float(self.wf_test_fraction_var.get()) or 0.15)
@@ -2695,6 +2884,13 @@ class ResearchLabPage(ttk.Frame):
             optimization_prune_on_lcb=bool(self.optimization_prune_lcb_var.get()),
             optimization_min_completed_for_pruning=min_completed_for_pruning,
             optimization_staged_budgets=staged_budgets,
+            optimization_search_space=optimization_search_space,
+            optimization_objectives=optimization_objectives,
+            optimization_max_turnover=optimization_max_turnover,
+            optimization_max_drawdown_floor=optimization_max_drawdown_floor,
+            optimization_min_trades=optimization_min_trades,
+            optimization_objective_weights=optimization_objective_weights,
+            optimization_overfitting_penalty=optimization_overfitting_penalty,
             train_fraction=train_fraction,
             validation_fraction=validation_fraction,
             test_fraction=test_fraction,
@@ -2759,12 +2955,19 @@ class ResearchLabPage(ttk.Frame):
             seed=42,
             n_trials=config.optimization_n_trials,
             sampler_name=config.optimization_sampler,
+            search_space=None if config.optimization_search_space is None else dict(config.optimization_search_space),
+            objectives=None if config.optimization_objectives is None else [dict(item) for item in config.optimization_objectives],
+            max_turnover=None if config.optimization_max_turnover is None else float(config.optimization_max_turnover),
+            max_drawdown_floor=None if config.optimization_max_drawdown_floor is None else float(config.optimization_max_drawdown_floor),
+            min_trades=None if config.optimization_min_trades is None else float(config.optimization_min_trades),
             partial_period_fractions=[0.5, 1.0],
             enable_pruning=config.optimization_enable_pruning,
             prune_on_constraint_violation=config.optimization_prune_on_constraint,
             prune_on_lcb=config.optimization_prune_on_lcb,
             min_completed_for_pruning=config.optimization_min_completed_for_pruning,
             staged_budgets=[dict(stage) for stage in config.optimization_staged_budgets],
+            objective_weights=None if config.optimization_objective_weights is None else dict(config.optimization_objective_weights),
+            overfitting_penalty=None if config.optimization_overfitting_penalty is None else dict(config.optimization_overfitting_penalty),
             governance_metadata={
                 "promotion_state": "research",
                 "approval_status": "pending",
