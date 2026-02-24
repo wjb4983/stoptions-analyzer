@@ -399,6 +399,15 @@ BUILTIN_STRATEGY_TEMPLATES: dict[str, dict[str, Any]] = {
         "risk": {"rules": [{"name": "max_notional", "params": {"value": 0.35}}]},
         "execution": {"model": "bps", "params": {"bps": 10.0}},
     },
+    "cheap_vol_long_core": {
+        "name": "Cheap Vol Long Core",
+        "family": "volatility_relative_value",
+        "universe": {"symbols": ["VIXY", "UVXY", "VXX"]},
+        "features": [{"name": "iv_surface", "source": "options", "params": {"iv_feature_name": "iv_1m"}}],
+        "logic": {"entry": {"name": "cheap_vol_long", "params": {"iv_feature_name": "iv_1m", "iv_z_window": 60, "cheap_z_cutoff": -1.0, "cross_section_rank_max": 0.25, "max_holding_bars": 10}}, "exit": {"name": "max_hold", "params": {"max_hold_bars": 10}}},
+        "risk": {"rules": [{"name": "max_notional", "params": {"value": 0.30}}]},
+        "execution": {"model": "bps", "params": {"bps": 10.0}},
+    },
     "equity_index_rotation": {
         "name": "Equity Index Rotation",
         "family": "rotation",

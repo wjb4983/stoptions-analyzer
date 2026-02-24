@@ -15,6 +15,7 @@ from .config import (
     TrendStrengthRegimeEntryConfig,
     VRPHarvestEntryConfig,
     VolatilityCarryEntryConfig,
+    CheapVolEntryConfig,
 )
 
 
@@ -200,6 +201,60 @@ class VRPHarvestEntry:
             return 0
         return side
 
+
+
+@dataclass(frozen=True)
+class CheapVolLongEntry:
+    config: CheapVolEntryConfig
+
+    def value_at(self, idx: int, prices: np.ndarray, missing: np.ndarray) -> int:
+        iv_idx = idx - 1
+        if iv_idx < 0:
+            return 0
+
+        start_idx = iv_idx - self.config.iv_z_window + 1
+        if start_idx < 0:
+            return 0
+        window_missing = missing[start_idx : iv_idx + 1]
+        if bool(np.any(window_missing)):
+            return 0
+
+        window = prices[start_idx : iv_idx + 1]
+        if window.size < self.config.iv_z_window or not bool(np.all(np.isfinite(window))):
+            return 0
+        mean = float(np.mean(window))
+        std = float(np.std(window))
+        if std <= 1e-12:
+            return 0
+
+        iv_now = float(prices[iv_idx])
+        zscore = (iv_now - mean) / std
+        if zscore >= self.config.cheap_z_cutoff:
+            return 0
+
+        rank_cutoff = self.config.cross_section_rank_max
+        if rank_cutoff is not None:
+            valid = window[np.isfinite(window)]
+            if valid.size == 0:
+                return 0
+            rank = float(np.mean(valid <= iv_now))
+            if rank > rank_cutoff:
+                return 0
+
+        mode = self.config.term_structure_mode
+        if mode != "any":
+            if iv_idx <= 0 or missing[iv_idx - 1]:
+                return 0
+            prev_iv = float(prices[iv_idx - 1])
+            slope_proxy = iv_now - prev_iv
+            if mode == "contango" and slope_proxy <= 0.0:
+                return 0
+            if mode == "backwardation" and slope_proxy >= 0.0:
+                return 0
+
+        return 1
+
+
 @dataclass(frozen=True)
 class SeasonalityEventEntry:
     config: SeasonalityEventEntryConfig
@@ -241,4 +296,6 @@ def build_entry_signal(config: EntrySignalConfig) -> EntrySignal:
         return SeasonalityEventEntry(config)
     if isinstance(config, VRPHarvestEntryConfig):
         return VRPHarvestEntry(config)
+    if isinstance(config, CheapVolEntryConfig):
+        return CheapVolLongEntry(config)
     raise TypeError(f"Unsupported entry signal config: {type(config).__name__}")

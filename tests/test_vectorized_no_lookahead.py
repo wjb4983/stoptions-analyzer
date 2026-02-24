@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.backtesting.execution import BpsSlippage, FixedCommission, ShortBorrowCost
-from src.backtesting.signals.config import NoExitConfig, parse_entry_signal_config
+from src.backtesting.signals.config import CheapVolEntryConfig, NoExitConfig, parse_entry_signal_config
 from src.backtesting.signals.engine import build_standardized_targets
 from src.backtesting.strategies.ensemble import weighted_voting
 from src.backtesting.vectorized import backtest_vectorized
@@ -164,3 +164,19 @@ def test_vectorized_holding_return_basis_and_execution_diagnostics() -> None:
     assert np.allclose(np.asarray(diag["execution_prices"]), open_prices)
     assert np.allclose(np.asarray(diag["signal_anchor_close_prices"]), close_prices)
     assert np.allclose(np.asarray(diag["holding_return_prices"]), open_prices)
+
+
+def test_cheap_vol_long_signal_is_no_lookahead() -> None:
+    base_prices = np.array([[0.35], [0.34], [0.36], [0.35], [0.34], [0.20], [0.42]])
+    shocked = base_prices.copy()
+    shocked[-1, 0] = 0.05
+    missing = np.zeros_like(base_prices, dtype=bool)
+
+    entry_cfg = CheapVolEntryConfig(iv_z_window=5, cheap_z_cutoff=-1.2)
+
+    base = build_standardized_targets(close_prices=base_prices, missing_mask=missing, entry_config=entry_cfg, exit_config=NoExitConfig())
+    changed = build_standardized_targets(close_prices=shocked, missing_mask=missing, entry_config=entry_cfg, exit_config=NoExitConfig())
+
+    assert np.allclose(base.values[:-1], changed.values[:-1])
+    assert np.allclose(base.confidence[:-1], changed.confidence[:-1])
+    assert np.array_equal(base.horizon_bars[:-1], changed.horizon_bars[:-1])
