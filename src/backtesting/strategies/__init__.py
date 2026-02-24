@@ -8,6 +8,7 @@ from .alpha_model import (
     probability_calibrated_position_size,
 )
 from .greek_targets import GreekNeutralTargetRequest, build_greek_neutral_targets, compute_aggregate_greek_exposures
+from .vol_hedging import HedgeRebalanceConfig, VolHedgingPolicy, HedgedTargetResult, apply_vol_hedging_policy
 from .dsl import (
     BUILTIN_STRATEGY_TEMPLATES,
     ExecutableStrategy,
@@ -53,6 +54,10 @@ __all__ = [
     "GreekNeutralTargetRequest",
     "build_greek_neutral_targets",
     "compute_aggregate_greek_exposures",
+    "apply_vol_hedging_policy",
+    "HedgedTargetResult",
+    "VolHedgingPolicy",
+    "HedgeRebalanceConfig",
     "StrategyDSLValidationError",
     "StrategyDefinition",
     "ExecutableStrategy",

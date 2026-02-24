@@ -16,6 +16,7 @@ import numpy as np
 
 from analysis.options import aggregate_option_exposures, summarize_lifecycle_events
 from .event_driven import VectorizedExecutionAdapter, replay_lifecycle
+from .strategies.vol_hedging import VolHedgingPolicy, apply_vol_hedging_policy
 from .execution import (
     BpsSlippage,
     CarryContext,
@@ -266,6 +267,7 @@ def backtest_vectorized(
     hard_to_borrow_flags: Any | None = None,
     hard_to_borrow_addon: float = 0.0,
     hard_to_borrow_short_block: bool = False,
+    hedging_policy: VolHedgingPolicy | None = None,
 ) -> BacktestResult:
     """Run a pure vectorized backtest with next-open execution.
 
@@ -314,6 +316,15 @@ def backtest_vectorized(
 
     n_periods, n_assets = close_values.shape
     portfolio_weights = _normalize_weights(weights, n_assets)
+
+    base_signal_values = signal_values.copy()
+    hedging_result = apply_vol_hedging_policy(
+        base_targets=base_signal_values,
+        delta=None if greek_sensitivities is None else greek_sensitivities.get("delta"),
+        vega=None if greek_sensitivities is None else greek_sensitivities.get("vega"),
+        policy=hedging_policy,
+    )
+    signal_values = hedging_result.hedged_targets
 
     positions = _shift(signal_values, 1)
     positions = _apply_split_transforms(positions, corporate_action_splits)
@@ -430,6 +441,18 @@ def backtest_vectorized(
     )
     positions = lifecycle["positions"]
 
+    base_positions = _shift(base_signal_values, 1)
+    base_positions = _apply_split_transforms(base_positions, corporate_action_splits)
+    base_lifecycle = _apply_derivatives_lifecycle(
+        positions=base_positions,
+        prices=close_values,
+        returns=gross_asset_returns,
+        portfolio_weights=portfolio_weights,
+        dates=np.asarray(dates) if dates is not None else None,
+        config=lifecycle_config,
+    )
+    base_positions = base_lifecycle["positions"]
+
     margin_result = _apply_margin_constraints(
         positions=positions,
         portfolio_weights=portfolio_weights,
@@ -441,8 +464,57 @@ def backtest_vectorized(
         hard_to_borrow_short_block=hard_to_borrow_short_block,
     )
     positions = margin_result["positions"]
+    base_margin_result = _apply_margin_constraints(
+        positions=base_positions,
+        portfolio_weights=portfolio_weights,
+        margin_schedule_by_asset=margin_schedule_by_asset,
+        stress_addon_by_asset=stress_addon_by_asset,
+        concentration_addon=concentration_addon,
+        hard_to_borrow_flags=hard_to_borrow_flags,
+        hard_to_borrow_addon=hard_to_borrow_addon,
+        hard_to_borrow_short_block=hard_to_borrow_short_block,
+    )
+    base_positions = base_margin_result["positions"]
+    hedge_positions = positions - base_positions
+
     gross_returns = np.sum(positions * gross_asset_returns * portfolio_weights, axis=1)
     trades = positions - _shift(positions, 1)
+    base_trades = base_positions - _shift(base_positions, 1)
+    hedge_trades = trades - base_trades
+
+    hedge_slippage_cost = _estimate_slippage(
+        open_values,
+        hedge_trades,
+        execution_model,
+        portfolio_weights,
+        mode=execution_mode,
+        liquidity=liquidity,
+    )
+    hedge_fee_cost = _estimate_fees(
+        open_values,
+        hedge_trades,
+        fees,
+        portfolio_weights,
+        mode=execution_mode,
+        liquidity=liquidity,
+    )
+    base_carry_result = _estimate_borrow_cost(
+        base_positions,
+        borrow_costs,
+        portfolio_weights,
+        dates=np.asarray(dates) if dates is not None else None,
+        symbols=tuple(symbols) if symbols is not None else None,
+        metadata={
+            "asset_classes": list(carry_asset_classes or ["equity"] * n_assets),
+            "expiry": list(carry_expiry_by_asset or [None] * n_assets),
+            "multipliers": list(carry_multipliers or [1.0] * n_assets),
+            "borrow_availability_tiers": list(carry_borrow_availability_tiers or ["normal"] * n_assets),
+            "financing_benchmarks": list(carry_financing_benchmarks or ["overnight"] * n_assets),
+        },
+    )
+    hedge_borrow_cost = carry_result["portfolio"] - base_carry_result["portfolio"]
+    hedge_cost = hedge_slippage_cost + hedge_fee_cost + hedge_borrow_cost
+    hedge_pnl = np.sum(hedge_positions * gross_asset_returns * portfolio_weights, axis=1) - hedge_cost
 
     greek_diagnostics = _build_greek_diagnostics(
         positions=positions,
@@ -484,9 +556,16 @@ def backtest_vectorized(
         "dividend_return": _to_series(dividend_returns, index),
         "lifecycle": _to_series(lifecycle["portfolio_return"], index),
         "total": _to_series(slippage_cost + fee_cost + borrow_cost - lifecycle["portfolio_return"], index),
+        "hedge_cost": _to_series(hedge_cost, index),
+        "hedge_pnl": _to_series(hedge_pnl, index),
         "derivatives_events": lifecycle["events"],
         "lifecycle_event_counts": summarize_lifecycle_events(lifecycle["events"]),
         "greek_diagnostics": greek_diagnostics,
+        "hedge_diagnostics": {
+            "rebalance_bars": np.where(hedging_result.rebalance_mask)[0].astype(int).tolist(),
+            "hedge_turnover": _to_series(np.sum(np.abs(hedge_trades) * portfolio_weights, axis=1), index),
+            "hedge_notional": _to_series(np.sum(np.abs(hedge_positions), axis=1), index),
+        },
         "account_state": {
             "cash": _to_series(account_state["cash"], index),
             "margin_requirement": _to_series(account_state["margin_requirement"], index),
@@ -502,6 +581,8 @@ def backtest_vectorized(
             "borrow": float(np.sum(borrow_cost)),
             "lifecycle": float(np.sum(lifecycle["portfolio_return"])),
             "total": float(np.sum(slippage_cost + fee_cost + borrow_cost - lifecycle["portfolio_return"])),
+            "hedge_cost": float(np.sum(hedge_cost)),
+            "hedge_pnl": float(np.sum(hedge_pnl)),
         },
         "execution_price_diagnostics": {
             "holding_return_basis": holding_return_basis,
