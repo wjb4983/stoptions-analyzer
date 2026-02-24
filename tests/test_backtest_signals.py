@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from src.backtesting.signals.config import (
+    CheapVolEntryConfig,
     MaxHoldExitConfig,
     MeanReversionEntryConfig,
     MomentumFlipExitConfig,
@@ -28,6 +29,7 @@ from src.backtesting.signals.entry import (
     TimeSeriesMomentumEntry,
     TrendStrengthRegimeEntry,
     VRPHarvestEntry,
+    CheapVolLongEntry,
     VolatilityCarryEntry,
 )
 from src.backtesting.signals.exit import MaxHoldExit, MomentumFlipExit, PositionState, TrailingStopExit
@@ -237,6 +239,18 @@ def test_config_parsing_and_validation() -> None:
     with pytest.raises(ValueError):
         parse_entry_signal_config("breakout", {"breakout_window": 0}, default_lookback_days=21, default_skip_days=2)
 
+    cheap = parse_entry_signal_config(
+        "cheap_vol_long",
+        {"iv_z_window": 30, "cheap_z_cutoff": -1.1, "cross_section_rank_max": 0.2, "max_holding_bars": 7},
+        default_lookback_days=21,
+        default_skip_days=2,
+    )
+    assert isinstance(cheap, CheapVolEntryConfig)
+    assert cheap.iv_z_window == 30
+
+    cheap_knobs = parse_strategy_knobs("cheap_vol_long", {"iv_z_window": 30, "cheap_z_cutoff": -1.1, "max_holding_bars": 7})
+    assert cheap_knobs.iv_z_window == 30
+
     with pytest.raises(ValueError):
         parse_exit_signal_config("trailing_stop", {"trailing_stop_pct": 1.5}, default_lookback_days=21, default_skip_days=2)
 
@@ -253,3 +267,37 @@ def test_parse_execution_model_config_supports_modular_components() -> None:
 def test_parse_execution_model_config_rejects_unknown_model() -> None:
     with pytest.raises(ValueError):
         parse_execution_model_config("bogus", {})
+
+
+def test_cheap_vol_long_entry_triggers_only_when_zscore_is_cheap() -> None:
+    prices = np.array([0.35, 0.34, 0.36, 0.35, 0.34, 0.20, 0.42])
+    missing = np.zeros_like(prices, dtype=bool)
+    signal = CheapVolLongEntry(CheapVolEntryConfig(iv_z_window=5, cheap_z_cutoff=-1.2))
+
+    assert signal.value_at(5, prices, missing) == 0
+    assert signal.value_at(6, prices, missing) == 1
+
+
+def test_cheap_vol_long_works_with_max_hold_and_trailing_stop_exits() -> None:
+    prices = np.array([[0.35], [0.34], [0.36], [0.35], [0.34], [0.20], [0.42], [0.41], [0.40]])
+    missing = np.zeros_like(prices, dtype=bool)
+
+    entry_cfg = CheapVolEntryConfig(iv_z_window=5, cheap_z_cutoff=-1.2)
+
+    with_max_hold = build_targets(
+        close_prices=prices,
+        missing_mask=missing,
+        entry_config=entry_cfg,
+        exit_config=MaxHoldExitConfig(max_hold_bars=1),
+    )
+    assert with_max_hold[6, 0] == 1.0
+    assert with_max_hold[7, 0] == 0.0
+
+    with_trailing = build_targets(
+        close_prices=prices,
+        missing_mask=missing,
+        entry_config=entry_cfg,
+        exit_config=TrailingStopExitConfig(trailing_stop_pct=0.03),
+    )
+    assert with_trailing[6, 0] == 1.0
+    assert with_trailing[7, 0] == 0.0

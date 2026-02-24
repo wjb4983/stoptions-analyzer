@@ -68,7 +68,19 @@ class VRPHarvestEntryConfig:
     long_only: bool = False
 
 
-EntrySignalConfig = TimeSeriesMomentumEntryConfig | MovingAverageTrendEntryConfig | BreakoutEntryConfig | MeanReversionEntryConfig | VolatilityCarryEntryConfig | TrendStrengthRegimeEntryConfig | SeasonalityEventEntryConfig | VRPHarvestEntryConfig
+@dataclass(frozen=True)
+class CheapVolEntryConfig:
+    name: str = "cheap_vol_long"
+    iv_feature_name: str = "iv_1m"
+    iv_z_window: int = 60
+    cheap_z_cutoff: float = -1.0
+    cross_section_rank_max: float | None = None
+    term_structure_feature_name: str | None = None
+    term_structure_mode: str = "any"
+    max_holding_bars: int = 10
+
+
+EntrySignalConfig = TimeSeriesMomentumEntryConfig | MovingAverageTrendEntryConfig | BreakoutEntryConfig | MeanReversionEntryConfig | VolatilityCarryEntryConfig | TrendStrengthRegimeEntryConfig | SeasonalityEventEntryConfig | VRPHarvestEntryConfig | CheapVolEntryConfig
 
 
 @dataclass(frozen=True)
@@ -209,6 +221,35 @@ def parse_entry_signal_config(
             regime_filter=bool(payload.get("regime_filter", False)),
             long_only=bool(payload.get("long_only", False)),
         )
+    if signal_name == "cheap_vol_long":
+        iv_feature_name = str(payload.get("iv_feature_name", "iv_1m")).strip()
+        if not iv_feature_name:
+            raise ValueError("iv_feature_name must be a non-empty string")
+        iv_z_window = _int(payload.get("iv_z_window", 60), "iv_z_window")
+        cheap_z_cutoff = _float(payload.get("cheap_z_cutoff", -1.0), "cheap_z_cutoff")
+        cross_section_rank_raw = payload.get("cross_section_rank_max", None)
+        cross_section_rank_max: float | None
+        if cross_section_rank_raw is None:
+            cross_section_rank_max = None
+        else:
+            cross_section_rank_max = _float(cross_section_rank_raw, "cross_section_rank_max")
+            if cross_section_rank_max < 0.0 or cross_section_rank_max > 1.0:
+                raise ValueError("cross_section_rank_max must be between 0 and 1")
+        term_structure_feature_raw = payload.get("term_structure_feature_name", None)
+        term_structure_feature_name = None if term_structure_feature_raw is None else str(term_structure_feature_raw).strip() or None
+        term_structure_mode = str(payload.get("term_structure_mode", "any")).strip().lower()
+        if term_structure_mode not in {"any", "contango", "backwardation"}:
+            raise ValueError("term_structure_mode must be one of: any, contango, backwardation")
+        max_holding_bars = _int(payload.get("max_holding_bars", 10), "max_holding_bars")
+        return CheapVolEntryConfig(
+            iv_feature_name=iv_feature_name,
+            iv_z_window=iv_z_window,
+            cheap_z_cutoff=cheap_z_cutoff,
+            cross_section_rank_max=cross_section_rank_max,
+            term_structure_feature_name=term_structure_feature_name,
+            term_structure_mode=term_structure_mode,
+            max_holding_bars=max_holding_bars,
+        )
     raise ValueError(f"Unsupported entry signal: {signal_name}")
 
 
@@ -265,6 +306,8 @@ def required_lookback_window(entry: EntrySignalConfig, exit_cfg: ExitSignalConfi
             return max(entry.seasonal_period + entry.event_offset + entry.event_window, 1)
         if isinstance(entry, VRPHarvestEntryConfig):
             return entry.realized_vol_lookback + 1
+        if isinstance(entry, CheapVolEntryConfig):
+            return entry.iv_z_window + 1
         return 1
 
     def _exit_window() -> int:
@@ -315,6 +358,13 @@ class VRPHarvestKnobs:
     vrp_threshold: float
 
 
+@dataclass(frozen=True)
+class CheapVolKnobs:
+    iv_z_window: int
+    cheap_z_cutoff: float
+    max_holding_bars: int
+
+
 StrategyKnobSchema = (
     TimeSeriesMomentumKnobs
     | MeanReversionKnobs
@@ -322,6 +372,7 @@ StrategyKnobSchema = (
     | TrendStrengthKnobs
     | SeasonalityEventKnobs
     | VRPHarvestKnobs
+    | CheapVolKnobs
 )
 
 
@@ -379,6 +430,15 @@ def parse_strategy_knobs(strategy_name: str, params: Mapping[str, Any] | None) -
         realized_vol_lookback = _int(payload.get("realized_vol_lookback", 21), "realized_vol_lookback")
         vrp_threshold = _float(payload.get("vrp_threshold", 0.0), "vrp_threshold")
         return VRPHarvestKnobs(realized_vol_lookback=realized_vol_lookback, vrp_threshold=vrp_threshold)
+    if strategy_name == "cheap_vol_long":
+        iv_z_window = _int(payload.get("iv_z_window", 60), "iv_z_window")
+        cheap_z_cutoff = _float(payload.get("cheap_z_cutoff", -1.0), "cheap_z_cutoff")
+        max_holding_bars = _int(payload.get("max_holding_bars", 10), "max_holding_bars")
+        return CheapVolKnobs(
+            iv_z_window=iv_z_window,
+            cheap_z_cutoff=cheap_z_cutoff,
+            max_holding_bars=max_holding_bars,
+        )
     raise ValueError(f"Unsupported strategy knobs for: {strategy_name}")
 
 
