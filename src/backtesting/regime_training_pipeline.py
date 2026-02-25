@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -16,8 +17,19 @@ from models.regime_catalog import list_models_for_leg, validate_model_leg_pairin
 from models.registry import create_model
 from models.robustness import build_robustness_scorecards
 from backtesting.walk_forward import build_walk_forward_folds, run_walk_forward_optimization
+from config import API_KEY_PATH, DATA_DIR
+from data_access.api_client import MassiveApiClient
 
 DEFAULT_REGIME_TRAINING_OUTPUT_DIR = Path("data/regime_training_runs")
+DEFAULT_REGIME_UNIVERSE_CACHE_DIR = DATA_DIR / "regime_universe_cache"
+DEFAULT_REGIME_CACHE_POLICY = {"min_years": 5, "bar_size": "1d"}
+DEFAULT_REGIME_SCENARIO_SETTINGS = {
+    "panic_crash": {"enabled": True, "returns_multiplier": 1.8, "returns_shift": -0.015},
+    "bull_low_vol": {"enabled": True, "returns_multiplier": 0.55, "returns_shift": 0.0025},
+    "broad_market": {"enabled": True, "returns_multiplier": 1.0, "returns_shift": 0.0},
+    "intraday_whipsaw": {"enabled": True, "returns_multiplier": 1.45, "returns_shift": -0.0006},
+    "few_minute_shock": {"enabled": True, "returns_multiplier": 2.2, "returns_shift": -0.002},
+}
 
 
 @dataclass(frozen=True)
@@ -49,6 +61,9 @@ class RegimeTrainingRequest:
     model_choice: str
     training_window: dict[str, int]
     risk_limits: dict[str, float]
+    universe_tickers: tuple[str, ...] = ()
+    cache_policy: dict[str, Any] = field(default_factory=dict)
+    scenario_settings: dict[str, Any] = field(default_factory=dict)
     output_dir: str | None = None
 
     @property
@@ -121,6 +136,8 @@ class RegimeTrainingAdapterOutput:
     candidate_leaderboards: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     champion_by_leg: dict[str, str] = field(default_factory=dict)
     governance_by_leg: dict[str, dict[str, Any]] = field(default_factory=dict)
+    scenario_diagnostics: dict[str, Any] = field(default_factory=dict)
+    data_readiness: dict[str, Any] = field(default_factory=dict)
 
     def warnings(self) -> tuple[str, ...]:
         return tuple(
@@ -165,6 +182,7 @@ class RegistryBackedRegimeTrainingAdapter:
         candidate_leaderboards: dict[str, list[dict[str, Any]]] = {}
         champion_by_leg: dict[str, str] = {}
         governance_by_leg: dict[str, dict[str, Any]] = {}
+        market_context = _build_market_context(request)
 
         for idx, leg in enumerate(request.legs):
             leg_key = f"{idx:02d}_{leg.name.lower().replace(' ', '_')}"
@@ -180,6 +198,7 @@ class RegistryBackedRegimeTrainingAdapter:
                         candidate_model.required_feature_names(),
                         leg.controls,
                         seed=idx,
+                        market_returns=market_context["returns"],
                     )
 
                 folds = build_walk_forward_folds(
@@ -346,6 +365,7 @@ class RegistryBackedRegimeTrainingAdapter:
                     "pass_fail": {gate["name"]: bool(gate.get("pass", False)) for gate in gate_results},
                     "promotion_eligible": not blocked,
                     "deployment_slot_eligibility": deployment_slots,
+                    "scenario_diagnostics": market_context["scenario_diagnostics"],
                 }
 
                 leaderboard_path = leg_dir / "candidate_leaderboard.json"
@@ -405,6 +425,8 @@ class RegistryBackedRegimeTrainingAdapter:
             candidate_leaderboards=candidate_leaderboards,
             champion_by_leg=champion_by_leg,
             governance_by_leg=governance_by_leg,
+            scenario_diagnostics=market_context["scenario_diagnostics"],
+            data_readiness=market_context["data_readiness"],
         )
 
     @staticmethod
@@ -482,8 +504,13 @@ class RegistryBackedRegimeTrainingAdapter:
         controls: dict[str, float],
         *,
         seed: int,
+        market_returns: np.ndarray | None = None,
         sample_size: int = 160,
     ) -> tuple[dict[str, np.ndarray], np.ndarray]:
+        if market_returns is not None and market_returns.size:
+            aligned = np.asarray(market_returns, dtype=float)
+            if aligned.ndim == 2 and aligned.shape[0] >= 24:
+                return _build_market_conditioned_dataset(required_features, aligned, seed=seed)
         rng_seed = int(sum(abs(float(v)) for v in controls.values()) * 10_000) + seed
         rng = np.random.default_rng(rng_seed)
         features: dict[str, np.ndarray] = {}
@@ -564,6 +591,170 @@ class RegistryBackedRegimeTrainingAdapter:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _load_api_key() -> str:
+    env_key = os.getenv("MASSIVE_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    if API_KEY_PATH.exists():
+        return API_KEY_PATH.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _safe_ticker_name(ticker: str) -> str:
+    return "".join(char if char.isalnum() else "_" for char in ticker.upper())
+
+
+def _build_market_context(request: RegimeTrainingRequest) -> dict[str, Any]:
+    returns, readiness = _load_or_fetch_universe_returns(request)
+    scenario_settings = {**DEFAULT_REGIME_SCENARIO_SETTINGS, **request.scenario_settings}
+    scenario_diag = _evaluate_market_scenarios(returns, settings=scenario_settings)
+    return {"returns": returns, "data_readiness": readiness, "scenario_diagnostics": scenario_diag}
+
+
+def _load_or_fetch_universe_returns(request: RegimeTrainingRequest) -> tuple[np.ndarray, dict[str, Any]]:
+    tickers = [str(t).strip().upper() for t in request.universe_tickers if str(t).strip()]
+    if not tickers:
+        tickers = [request.regime_id.upper()]
+    min_years = int((request.cache_policy or {}).get("min_years", DEFAULT_REGIME_CACHE_POLICY["min_years"]))
+    target_days = max(252, min_years * 252)
+    cache_dir = DEFAULT_REGIME_UNIVERSE_CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    api_key = _load_api_key()
+    api_client = MassiveApiClient(api_key) if api_key else None
+    now = date.today()
+    start_cutoff = now - timedelta(days=max(365, min_years * 365))
+    closes_by_ticker: dict[str, np.ndarray] = {}
+    fetches: dict[str, str] = {}
+
+    for ticker in tickers:
+        cache_path = cache_dir / f"{_safe_ticker_name(ticker)}.json"
+        existing = _load_cached_closes(cache_path)
+        should_fetch = existing.size == 0 or _coverage_years(existing) < float(min_years)
+        if should_fetch and api_client is not None:
+            try:
+                bars = api_client.fetch_daily_aggregates(ticker, days_back=min_years * 365 + 10)
+                fetched = _coerce_daily_closes(bars, start_cutoff)
+                if fetched.size:
+                    existing = fetched
+                    _save_cached_closes(cache_path, ticker=ticker, closes=fetched)
+                    fetches[ticker] = "refreshed"
+                else:
+                    fetches[ticker] = "fetch_empty"
+            except Exception:
+                fetches[ticker] = "fetch_failed"
+        elif should_fetch:
+            fetches[ticker] = "missing_api_key"
+        else:
+            fetches[ticker] = "cache_ok"
+
+        if existing.size == 0:
+            existing = _synthetic_closes(target_days, seed=len(closes_by_ticker) + 11)
+            fetches[ticker] = f"{fetches.get(ticker, 'synthetic')}_synthetic"
+        closes_by_ticker[ticker] = existing
+
+    min_len = min((series.size for series in closes_by_ticker.values()), default=0)
+    if min_len <= 2:
+        return np.zeros((0, 0), dtype=float), {"tickers": tickers, "fetches": fetches, "years_target": min_years}
+    matrix = np.column_stack([series[-min_len:] for series in closes_by_ticker.values()])
+    returns = np.zeros_like(matrix, dtype=float)
+    returns[1:] = matrix[1:] / np.where(matrix[:-1] == 0.0, 1.0, matrix[:-1]) - 1.0
+    return returns[1:], {
+        "tickers": tickers,
+        "fetches": fetches,
+        "years_target": min_years,
+        "bars": int(max(0, returns.shape[0])),
+    }
+
+
+def _load_cached_closes(path: Path) -> np.ndarray:
+    if not path.exists():
+        return np.zeros(0, dtype=float)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return np.zeros(0, dtype=float)
+    bars = payload.get("bars", []) if isinstance(payload, dict) else []
+    values = [float(row.get("c", 0.0)) for row in bars if isinstance(row, dict) and row.get("c") is not None]
+    return np.asarray(values, dtype=float)
+
+
+def _save_cached_closes(path: Path, *, ticker: str, closes: np.ndarray) -> None:
+    bars = [{"idx": int(i), "c": float(value)} for i, value in enumerate(np.asarray(closes, dtype=float))]
+    payload = {"ticker": ticker, "cached_at": _utc_now_iso(), "bars": bars}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _coerce_daily_closes(rows: list[dict[str, Any]], start_cutoff: date) -> np.ndarray:
+    closes: list[float] = []
+    for row in rows:
+        ts = row.get("t")
+        close = row.get("c")
+        if ts is None or close is None:
+            continue
+        dt = datetime.fromtimestamp(float(ts) / 1000.0, tz=timezone.utc).date()
+        if dt < start_cutoff:
+            continue
+        closes.append(float(close))
+    return np.asarray(closes, dtype=float)
+
+
+def _coverage_years(series: np.ndarray) -> float:
+    return float(np.asarray(series).size) / 252.0
+
+
+def _synthetic_closes(length: int, *, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    rets = rng.normal(loc=0.0002, scale=0.012, size=max(3, int(length)))
+    return 100.0 * np.cumprod(1.0 + rets)
+
+
+def _build_market_conditioned_dataset(
+    required_features: tuple[str, ...],
+    market_returns: np.ndarray,
+    *,
+    seed: int,
+) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    arr = np.asarray(market_returns, dtype=float)
+    market_mean = np.mean(arr, axis=1)
+    market_dispersion = np.std(arr, axis=1)
+    sample_size = market_mean.shape[0]
+    rng = np.random.default_rng(seed + 1000)
+    features: dict[str, np.ndarray] = {}
+    for idx, feature_name in enumerate(required_features):
+        scale = 0.5 + (idx % 5) * 0.2
+        base = market_mean * scale + market_dispersion * (1.0 - min(scale, 0.9))
+        noise = rng.normal(loc=0.0, scale=0.03, size=sample_size)
+        features[feature_name] = (base + noise).astype(float)
+    target = np.roll(market_mean, -1)
+    target[-1] = target[-2] if sample_size > 1 else 0.0
+    labels = np.where(target >= np.median(target), 1.0, -1.0)
+    return features, labels
+
+
+def _evaluate_market_scenarios(returns: np.ndarray, *, settings: dict[str, Any]) -> dict[str, dict[str, float]]:
+    base = np.asarray(returns, dtype=float)
+    if base.ndim != 2 or base.size == 0:
+        return {}
+    baseline = np.mean(base, axis=1)
+    out: dict[str, dict[str, float]] = {}
+    for name, cfg_raw in settings.items():
+        cfg = cfg_raw if isinstance(cfg_raw, dict) else {}
+        if not bool(cfg.get("enabled", True)):
+            continue
+        mult = float(cfg.get("returns_multiplier", 1.0))
+        shift = float(cfg.get("returns_shift", 0.0))
+        stressed = baseline * mult + shift
+        equity = np.cumprod(1.0 + stressed)
+        peak = np.maximum.accumulate(equity)
+        drawdown = np.where(peak > 0.0, equity / peak - 1.0, 0.0)
+        out[name] = {
+            "mean_return": float(np.mean(stressed)),
+            "volatility": float(np.std(stressed)),
+            "max_drawdown": float(np.min(drawdown)),
+        }
+    return out
 
 
 def _deterministic_run_id(request: RegimeTrainingRequest) -> str:
@@ -830,6 +1021,8 @@ def run_regime_training(
                 "candidate_leaderboard": adapter_output.candidate_leaderboards,
                 "champion_by_leg": adapter_output.champion_by_leg,
                 "governance_by_leg": adapter_output.governance_by_leg,
+                "scenario_diagnostics": adapter_output.scenario_diagnostics,
+                "data_readiness": adapter_output.data_readiness,
             },
             logs=logs,
         )

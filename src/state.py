@@ -21,6 +21,14 @@ def _baseline_regime_definitions() -> dict[str, dict[str, object]]:
             "global_risk_limits": dict(DEFAULT_REGIME_GLOBAL_RISK_LIMITS),
             "training_window": dict(DEFAULT_REGIME_TRAINING_WINDOW),
             "confidence_thresholds": dict(DEFAULT_REGIME_CONFIDENCE_THRESHOLDS),
+            "cache_policy": {"min_years": 5, "bar_size": "1d"},
+            "scenario_settings": {
+                "panic_crash": {"enabled": True, "returns_multiplier": 1.8, "returns_shift": -0.015},
+                "bull_low_vol": {"enabled": True, "returns_multiplier": 0.55, "returns_shift": 0.0025},
+                "broad_market": {"enabled": True, "returns_multiplier": 1.0, "returns_shift": 0.0},
+                "intraday_whipsaw": {"enabled": True, "returns_multiplier": 1.45, "returns_shift": -0.0006},
+                "few_minute_shock": {"enabled": True, "returns_multiplier": 2.2, "returns_shift": -0.002},
+            },
             "legs": [],
         }
     }
@@ -63,6 +71,16 @@ def _migrate_regime_definitions(payload: object) -> dict[str, dict[str, object]]
                 if migrated_leg is not None:
                     migrated_legs.append(migrated_leg)
         definition["legs"] = migrated_legs
+        cache_policy = definition.get("cache_policy")
+        definition["cache_policy"] = cache_policy if isinstance(cache_policy, dict) else {"min_years": 5, "bar_size": "1d"}
+        scenario_settings = definition.get("scenario_settings")
+        definition["scenario_settings"] = scenario_settings if isinstance(scenario_settings, dict) else {
+            "panic_crash": {"enabled": True, "returns_multiplier": 1.8, "returns_shift": -0.015},
+            "bull_low_vol": {"enabled": True, "returns_multiplier": 0.55, "returns_shift": 0.0025},
+            "broad_market": {"enabled": True, "returns_multiplier": 1.0, "returns_shift": 0.0},
+            "intraday_whipsaw": {"enabled": True, "returns_multiplier": 1.45, "returns_shift": -0.0006},
+            "few_minute_shock": {"enabled": True, "returns_multiplier": 2.2, "returns_shift": -0.002},
+        }
 
         migrated_defs[regime_id] = definition
 

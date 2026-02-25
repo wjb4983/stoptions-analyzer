@@ -1050,6 +1050,12 @@ class CreateRegimePage(ttk.Frame):
             **{f"confidence_{key}": float(value) for key, value in confidence_thresholds.items()},
         }
 
+        universe_tickers = tuple(str(t).strip().upper() for t in self.controller.state.tickers if str(t).strip())
+        cache_policy = definition.get("cache_policy") if isinstance(definition.get("cache_policy"), dict) else {}
+        scenario_settings = (
+            definition.get("scenario_settings") if isinstance(definition.get("scenario_settings"), dict) else {}
+        )
+
         return RegimeTrainingRequest(
             schema_version=2,
             regime_id=regime_id,
@@ -1057,6 +1063,9 @@ class CreateRegimePage(ttk.Frame):
             model_choice=str(getattr(self, "training_mode", "auto_model_search")),
             training_window={key: int(value) for key, value in training_window.items()},
             risk_limits=risk_limits,
+            universe_tickers=universe_tickers,
+            cache_policy=dict(cache_policy),
+            scenario_settings=dict(scenario_settings),
             legs=tuple(legs),
         )
 

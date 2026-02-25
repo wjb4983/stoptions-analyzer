@@ -9,6 +9,8 @@ from backtesting.regime_training_pipeline import (
     RegimeTrainingAdapterOutput,
     RegimeTrainingRequest,
     TrainedArtifactLocations,
+    _evaluate_market_scenarios,
+    _load_or_fetch_universe_returns,
     execute_regime_training_pipeline,
 )
 
@@ -209,3 +211,67 @@ def test_pipeline_validation_accepts_complete_model_specific_specs(tmp_path):
     result = execute_regime_training_pipeline(req)
 
     assert result.status == "success"
+
+
+def test_pipeline_default_adapter_emits_data_readiness_and_scenario_diagnostics(tmp_path):
+    req = RegimeTrainingRequest(
+        schema_version=2,
+        regime_id="risk_off",
+        regime_name="Risk Off",
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Regime Detection",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.62, "turnover_limit": 0.25},
+            ),
+        ),
+        model_choice="auto",
+        training_window={"retrain_frequency_days": 14, "lookback_days": 252},
+        risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
+        universe_tickers=("SPY", "QQQ"),
+        cache_policy={"min_years": 5},
+        output_dir=str(tmp_path),
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    assert result.status == "success"
+    assert "scenario_diagnostics" in result.metadata
+    assert "data_readiness" in result.metadata
+    assert result.metadata["data_readiness"]["years_target"] == 5
+
+
+def test_universe_loader_falls_back_to_synthetic_when_cache_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr("backtesting.regime_training_pipeline.DEFAULT_REGIME_UNIVERSE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr("backtesting.regime_training_pipeline._load_api_key", lambda: "")
+    request = RegimeTrainingRequest(
+        schema_version=2,
+        regime_id="baseline",
+        regime_name="Baseline",
+        legs=(RegimeLegTrainingConfig(name="L1", model_type="regime_change_detection", controls={}),),
+        model_choice="auto",
+        training_window={"lookback_days": 252, "retrain_frequency_days": 21},
+        risk_limits={"max_drawdown_stop": 0.2},
+        universe_tickers=("SPY",),
+        cache_policy={"min_years": 5},
+    )
+
+    returns, readiness = _load_or_fetch_universe_returns(request)
+
+    assert returns.shape[0] >= 250
+    assert returns.shape[1] == 1
+    assert readiness["fetches"]["SPY"].endswith("synthetic")
+
+
+def test_market_scenario_evaluator_supports_overrides_and_disable_flags() -> None:
+    returns = [[0.01, 0.012], [-0.01, -0.012], [0.005, 0.006], [-0.003, -0.004]]
+    diag = _evaluate_market_scenarios(
+        returns,
+        settings={
+            "panic_crash": {"enabled": True, "returns_multiplier": 2.0, "returns_shift": -0.002},
+            "bull_low_vol": {"enabled": False},
+        },
+    )
+    assert "panic_crash" in diag
+    assert "bull_low_vol" not in diag
+    assert diag["panic_crash"]["max_drawdown"] <= 0.0
