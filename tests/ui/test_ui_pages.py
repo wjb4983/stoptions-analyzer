@@ -8,6 +8,7 @@ import pytest
 
 from state import AppState
 from ui import analysis_page, backtesting_page, call_put_analysis_page, create_regime_page, general_analysis_page, main_menu, research_lab_page, spread_analysis_page, ticker_entry_page, ticker_select_page
+from backtesting.regime_training_pipeline import RegimeTrainingResult
 
 
 class Var:
@@ -618,6 +619,30 @@ def _build_create_regime_logic_page() -> create_regime_page.CreateRegimePage:
     return page
 
 
+def _build_create_regime_training_page() -> tuple[create_regime_page.CreateRegimePage, FakeController]:
+    controller = FakeController(
+        AppState(
+            regime_definitions={
+                "baseline": {
+                    "label": "Baseline",
+                    "global_risk_limits": {"max_drawdown_stop": 0.14, "max_position_pct": 0.09},
+                    "training_window": {"lookback_days": 190, "retrain_frequency_days": 14},
+                    "confidence_thresholds": {"model_confidence_min": 0.71},
+                }
+            },
+            active_regime_id="baseline",
+        )
+    )
+    page = _build_create_regime_logic_page()
+    page.controller = controller
+    page.train_button = FakeWidget()
+    page.export_button = FakeWidget()
+    page._can_train_export = lambda: (True, "")
+    page._update_validation_and_actions = lambda: None
+    page.after = lambda _delay, callback: callback()
+    return page, controller
+
+
 def test_create_regime_leg_type_switching_updates_controls():
     page = _build_create_regime_logic_page()
 
@@ -637,6 +662,30 @@ def test_create_regime_leg_type_switching_updates_controls():
     assert float(leg["controls"]["lookback_days"]) == 60
     assert float(leg["controls"]["detection_threshold"]) == 1.6
 
+
+
+
+def test_create_regime_change_selection_initializes_expected_controls_defaults():
+    page = _build_create_regime_logic_page()
+
+    page._apply_leg_type("Regime Change")
+    leg = page._selected_leg()
+
+    assert leg["model_type"] == "Regime Change"
+    assert set(leg["controls"]) == {
+        "lookback_days",
+        "detection_threshold",
+        "max_position_pct",
+        "max_drawdown_stop",
+        "turnover_limit",
+        "slippage_bps",
+        "model_confidence_min",
+        "regime_stability_min",
+    }
+    assert float(leg["controls"]["lookback_days"]) == 60
+    assert float(leg["controls"]["detection_threshold"]) == 1.6
+    assert float(leg["controls"]["max_position_pct"]) == 0.05
+    assert float(leg["controls"]["max_drawdown_stop"]) == 0.08
 
 def test_create_regime_unknown_leg_mapping_blocks_training() -> None:
     page = _build_create_regime_logic_page()
@@ -704,3 +753,122 @@ def test_create_regime_train_export_buttons_follow_validation(overrides, expecte
     expected_state = "normal" if expected else "disabled"
     assert page.train_button.config_calls[-1]["state"] == expected_state
     assert page.export_button.config_calls[-1]["state"] == expected_state
+
+
+def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch):
+    infos = []
+    monkeypatch.setattr(create_regime_page.messagebox, "showinfo", lambda title, msg: infos.append((title, msg)))
+
+    page, _controller = _build_create_regime_training_page()
+    page._append_structured_log = lambda **_kwargs: None
+
+    page.regime_legs = [
+        {
+            "name": "Trend Following leg",
+            "model_type": "Trend Following",
+            "controls": {
+                "lookback_days": 120,
+                "entry_zscore": 1.3,
+                "model_confidence_min": 0.68,
+                "max_position_pct": 0.07,
+                "max_drawdown_stop": 0.11,
+            },
+        },
+        {
+            "name": "Regime Change leg",
+            "model_type": "Regime Change",
+            "controls": {
+                "lookback_days": 70,
+                "detection_threshold": 1.9,
+                "max_position_pct": 0.03,
+                "max_drawdown_stop": 0.06,
+            },
+        },
+    ]
+
+    calls = []
+
+    def _fake_run(request):
+        calls.append(request)
+        return RegimeTrainingResult(
+            run_id="run-1",
+            status="success",
+            metrics={"sharpe": 1.0},
+            artifact_paths={"manifest": "manifest.json"},
+            timestamps={"started_at": "2024-01-01T00:00:00+00:00", "completed_at": "2024-01-01T00:01:00+00:00"},
+            summary="ok",
+        )
+
+    class _ImmediateThread:
+        def __init__(self, *, target, daemon):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(create_regime_page, "execute_regime_training_pipeline", _fake_run)
+    monkeypatch.setattr(create_regime_page.threading, "Thread", _ImmediateThread)
+
+    page._run_train()
+
+    assert len(calls) == 1
+    request = calls[0]
+    assert [leg.model_type for leg in request.legs] == ["timeseries_momentum", "regime_change_detection"]
+    assert request.legs[0].controls["sizing_cap"] == pytest.approx(0.07)
+    assert request.legs[0].controls["stop_loss_pct"] == pytest.approx(0.11)
+    assert request.legs[1].controls["detection_threshold"] == pytest.approx(1.9)
+
+
+def test_create_regime_successful_training_appends_run_and_persists(monkeypatch):
+    infos = []
+    monkeypatch.setattr(create_regime_page.messagebox, "showinfo", lambda title, msg: infos.append((title, msg)))
+
+    page, controller = _build_create_regime_training_page()
+    logs = []
+    page._append_structured_log = lambda **kwargs: logs.append(kwargs)
+
+    result = RegimeTrainingResult(
+        run_id="run-ok",
+        status="success",
+        metrics={"sharpe": 1.2},
+        artifact_paths={"manifest": "data/manifest.json"},
+        timestamps={"started_at": "2024-01-01T00:00:00+00:00", "completed_at": "2024-01-01T00:01:00+00:00"},
+        summary="all good",
+        metadata={"regime": "baseline"},
+        logs=("line-1",),
+    )
+
+    page._on_training_succeeded(result)
+
+    assert len(controller.state.regime_training_runs) == 1
+    assert controller.state.regime_training_runs[0]["run_id"] == "run-ok"
+    assert controller.persist_count == 1
+    assert infos[-1] == ("Training completed", "all good")
+    assert any(row["event"] == "training_completed" for row in logs)
+
+
+def test_create_regime_run_train_failure_shows_error_and_no_success_log(monkeypatch):
+    errors = []
+    monkeypatch.setattr(create_regime_page.messagebox, "showerror", lambda title, msg: errors.append((title, msg)))
+
+    page, controller = _build_create_regime_training_page()
+    structured_logs = []
+    page._append_structured_log = lambda **kwargs: structured_logs.append(kwargs)
+
+    class _ImmediateThread:
+        def __init__(self, *, target, daemon):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(create_regime_page, "execute_regime_training_pipeline", lambda _request: (_ for _ in ()).throw(RuntimeError("runner exploded")))
+    monkeypatch.setattr(create_regime_page.threading, "Thread", _ImmediateThread)
+
+    page._run_train()
+
+    assert errors and errors[-1][0] == "Training failed"
+    assert "runner exploded" in errors[-1][1]
+    assert controller.state.regime_training_runs == []
+    assert not any(entry["event"] == "training_completed" for entry in structured_logs)
+    assert any(entry["event"] == "training_failed" for entry in structured_logs)

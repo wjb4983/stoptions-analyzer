@@ -67,3 +67,38 @@ def test_to_regime_leg_spec_translates_mean_reversion_knobs() -> None:
 def test_to_regime_leg_spec_rejects_unknown_ui_leg() -> None:
     with pytest.raises(ValueError, match="Unsupported UI leg"):
         to_regime_leg_spec({"name": "x", "model_type": "Unknown", "controls": {}})
+
+
+def test_to_regime_leg_spec_translates_regime_change_knobs() -> None:
+    mapped = to_regime_leg_spec(
+        {
+            "name": "Regime Change leg",
+            "model_type": "Regime Change",
+            "controls": {
+                "lookback_days": 80,
+                "detection_threshold": 2.1,
+                "max_position_pct": 0.02,
+                "max_drawdown_stop": 0.05,
+            },
+        }
+    )
+
+    assert mapped.leg_spec.leg_family == "regime_change_detection"
+    assert mapped.leg_spec.knobs["lookback_days"] == 80.0
+    assert mapped.leg_spec.knobs["detection_threshold"] == 2.1
+    assert mapped.leg_spec.knobs["sizing_cap"] == 0.02
+    assert mapped.leg_spec.knobs["stop_loss_pct"] == 0.05
+
+
+def test_to_regime_leg_spec_regime_change_accepts_entry_zscore_alias() -> None:
+    mapped = to_regime_leg_spec(
+        {
+            "name": "Regime Change leg",
+            "model_type": "Regime Change",
+            "controls": {
+                "entry_zscore": 1.4,
+            },
+        }
+    )
+
+    assert mapped.leg_spec.knobs["detection_threshold"] == 1.4
