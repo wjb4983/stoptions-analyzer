@@ -62,6 +62,7 @@ def _request(tmp_path, *, legs: tuple[RegimeLegTrainingConfig, ...]) -> RegimeTr
         training_window={"retrain_frequency_days": 21, "lookback_days": 252},
         risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
         output_dir=str(tmp_path),
+        training_data_settings={"allow_synthetic_fallback": True},
     )
 
 
@@ -143,6 +144,7 @@ def test_pipeline_default_adapter_runs_registry_backed_training(tmp_path):
         training_window={"retrain_frequency_days": 14, "lookback_days": 252},
         risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
         output_dir=str(tmp_path),
+        training_data_settings={"allow_synthetic_fallback": True},
     )
 
     result = execute_regime_training_pipeline(req)
@@ -310,6 +312,66 @@ def test_load_returns_from_cache_mixed_coverage_universe_enforces_pass_ratio(tmp
     assert bundle.metadata["universe_pass_ratio"] == 1 / 3
     assert bundle.metadata["pass"] is False
 
+
+
+
+def test_pipeline_fails_when_synthetic_fallback_disabled_and_real_history_insufficient(tmp_path):
+    req = RegimeTrainingRequest(
+        schema_version=2,
+        regime_id="risk_off",
+        regime_name="Risk Off",
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Regime Detection",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.62, "turnover_limit": 0.25},
+            ),
+        ),
+        model_choice="auto",
+        training_window={"retrain_frequency_days": 14, "lookback_days": 252},
+        risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
+        output_dir=str(tmp_path),
+        training_data_settings={
+            "universe_symbols": [],
+            "allow_synthetic_fallback": False,
+        },
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    assert result.status == "failed"
+    assert any("INSUFFICIENT_REAL_HISTORY" in err for err in result.errors)
+    assert any("coverage_diagnostics=" in err for err in result.errors)
+
+
+def test_pipeline_uses_synthetic_fallback_when_explicitly_enabled(tmp_path):
+    req = RegimeTrainingRequest(
+        schema_version=2,
+        regime_id="risk_off",
+        regime_name="Risk Off",
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Regime Detection",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.62, "turnover_limit": 0.25},
+            ),
+        ),
+        model_choice="auto",
+        training_window={"retrain_frequency_days": 14, "lookback_days": 252},
+        risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
+        output_dir=str(tmp_path),
+        training_data_settings={
+            "universe_symbols": [],
+            "allow_synthetic_fallback": True,
+        },
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    assert result.status == "success"
+    assert result.metadata["synthetic_fallback_used"] is True
+    assert any("synthetic fallback" in warning for warning in result.warnings)
+    assert "synthetic_fallback_used=true" in result.logs
 
 def test_pipeline_manifest_contains_training_data_audit(tmp_path):
     now = datetime.now(timezone.utc)

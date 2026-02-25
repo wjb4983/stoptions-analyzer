@@ -150,6 +150,7 @@ DEFAULT_REGIME_CONFIDENCE_THRESHOLDS = {
 
 DEFAULT_REGIME_TRAINING_DATA_SETTINGS = {
     "required_history_years": 5,
+    "allow_synthetic_fallback": False,
     "enable_cache_backfill": True,
     "cache_audit_strict": True,
     "min_symbol_coverage_ratio": 1.0,
