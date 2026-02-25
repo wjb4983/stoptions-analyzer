@@ -418,6 +418,42 @@ def test_pipeline_manifest_contains_training_data_audit(tmp_path):
 
 
 
+def test_pipeline_continues_with_degraded_universe_coverage(tmp_path):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    cache_root = tmp_path / "cache"
+    _write_symbol_cache(cache_root, "AAPL", now - timedelta(days=365 * 6), days=365 * 6 + 3)
+
+    req = RegimeTrainingRequest(
+        schema_version=2,
+        regime_id="risk_off",
+        regime_name="Risk Off",
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Regime Detection",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.62, "turnover_limit": 0.25},
+            ),
+        ),
+        model_choice="auto",
+        training_window={"retrain_frequency_days": 14, "lookback_days": 252},
+        risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
+        output_dir=str(tmp_path),
+        training_data_settings={
+            "universe_symbols": ["AAPL", "MSFT"],
+            "required_history_years": 5,
+            "cache_root": str(cache_root),
+            "required_universe_pass_ratio": 1.0,
+        },
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    assert result.status == "success"
+    assert result.metadata["training_data_audit"]["pass"] is False
+    assert result.metadata["training_data_audit"]["degraded_universe_coverage"] is True
+    assert any("continuing with available symbols" in warning for warning in result.warnings)
+
+
 def test_pipeline_phase2_families_compatibility_with_default_adapter(tmp_path):
     req = RegimeTrainingRequest(
         schema_version=2,
