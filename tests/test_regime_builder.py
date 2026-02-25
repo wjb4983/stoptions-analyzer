@@ -32,7 +32,7 @@ def _base_spec(*, legs: tuple[RegimeLegSpec, ...]) -> RegimeSpec:
             default_stop_loss_pct=0.08,
         ),
         model_choice=ModelChoiceSpec(
-            model_name="hmm",
+            model_name="meta_label_classifier",
             objective="sharpe",
             hyperparameters={"states": 4},
         ),
@@ -127,3 +127,26 @@ def test_save_load_roundtrip_keeps_schema_compatible(tmp_path: Path) -> None:
     assert saved.name == "my_core_regime.json"
     assert loaded_by_name == spec
     assert loaded_by_path == spec
+
+
+def test_validate_regime_spec_rejects_invalid_model_leg_pairing() -> None:
+    spec = _base_spec(
+        legs=(
+            RegimeLegSpec(
+                name="tsmom",
+                leg_family="timeseries_momentum",
+                knobs={"lookback_days": 120, "vol_filter_max": 0.3, "sizing_cap": 0.15, "stop_loss_pct": 0.06},
+            ),
+        )
+    )
+    spec = RegimeSpec(
+        regime_name=spec.regime_name,
+        training=spec.training,
+        risk=spec.risk,
+        model_choice=ModelChoiceSpec(model_name="hmm_regime_change", objective="sharpe", hyperparameters={}),
+        legs=spec.legs,
+        schema_version=spec.schema_version,
+    )
+
+    with pytest.raises(ValueError, match="not allowed for leg"):
+        validate_regime_spec(spec)

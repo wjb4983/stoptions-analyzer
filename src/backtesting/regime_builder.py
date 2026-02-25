@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from models.regime_catalog import validate_model_leg_pairing
+
 DEFAULT_REGIME_OUTPUT_DIR = Path("data/regimes")
 SUPPORTED_LEG_FAMILIES = (
     "timeseries_momentum",
@@ -151,6 +153,7 @@ def validate_regime_spec(spec: RegimeSpec) -> None:
 
     for leg in spec.legs:
         validate_leg_spec(leg)
+        validate_model_leg_pairing(leg.leg_family, spec.model_choice.model_name)
 
     if spec.risk.max_gross_exposure <= 0:
         raise ValueError("max_gross_exposure must be > 0")
