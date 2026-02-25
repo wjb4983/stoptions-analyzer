@@ -10,7 +10,7 @@ from backtesting.regime_training_pipeline import (
     RegimeLegTrainingConfig,
     RegimeTrainingRequest,
     RegimeTrainingResult,
-    run_regime_training,
+    execute_regime_training_pipeline,
 )
 from ui.regime_mapping import to_regime_leg_spec
 from config import (
@@ -794,13 +794,17 @@ class CreateRegimePage(ttk.Frame):
                 )
             )
 
+        risk_limits = {
+            **{key: float(value) for key, value in global_risk_limits.items()},
+            **{f"confidence_{key}": float(value) for key, value in confidence_thresholds.items()},
+        }
+
         return RegimeTrainingRequest(
             regime_id=regime_id,
-            regime_label=regime_label,
-            requested_at=datetime.now(timezone.utc).isoformat(),
+            regime_name=regime_label,
+            model_choice="auto",
             training_window={key: int(value) for key, value in training_window.items()},
-            global_risk_limits={key: float(value) for key, value in global_risk_limits.items()},
-            confidence_thresholds={key: float(value) for key, value in confidence_thresholds.items()},
+            risk_limits=risk_limits,
             legs=tuple(legs),
         )
 
@@ -839,13 +843,27 @@ class CreateRegimePage(ttk.Frame):
 
         def _worker() -> None:
             try:
-                result = run_regime_training(request)
+                result = execute_regime_training_pipeline(request)
             except Exception as exc:
                 self.after(0, lambda error=exc: self._on_training_failed(error))
                 return
-            self.after(0, lambda training_result=result: self._on_training_succeeded(training_result))
+            if result.status == "success":
+                self.after(0, lambda training_result=result: self._on_training_succeeded(training_result))
+            else:
+                self.after(0, lambda training_result=result: self._on_training_result_failed(training_result))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+
+    def _on_training_result_failed(self, result: RegimeTrainingResult) -> None:
+        self._is_training = False
+        self._update_validation_and_actions()
+        detail = "; ".join(result.errors) if result.errors else "unknown error"
+        self._append_structured_log(level="error", event="training_failed", details=detail)
+        messagebox.showerror(
+            "Training failed",
+            f"Regime training failed with status={result.status}.\n{detail}",
+        )
 
     def _on_training_failed(self, exc: Exception) -> None:
         self._is_training = False
