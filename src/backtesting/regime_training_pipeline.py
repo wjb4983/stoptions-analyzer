@@ -21,6 +21,8 @@ class RegimeLegTrainingConfig:
     name: str
     model_type: str
     controls: dict[str, float]
+    selected_model_id: str = ""
+    hyperparameters: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -272,11 +274,28 @@ class RegistryBackedRegimeTrainingAdapter:
 
     @staticmethod
     def _select_model_id(request: RegimeTrainingRequest, leg: RegimeLegTrainingConfig) -> str:
-        if request.model_choice.strip().lower() not in {"", "auto"}:
-            return request.model_choice.strip().lower()
         descriptors = list_models_for_leg(leg.model_type)
         if not descriptors:
             raise ValueError(f"No catalog entries configured for leg type '{leg.model_type}'")
+
+        mode = request.model_choice.strip().lower()
+        selected_model_id = leg.selected_model_id.strip().lower()
+        allowed = {item.model_name for item in descriptors}
+
+        if mode in {"single_model", "auto_model_search", "", "auto"}:
+            if selected_model_id and selected_model_id in allowed:
+                return selected_model_id
+            return descriptors[0].model_name
+
+        if mode == "ensemble":
+            for descriptor in descriptors:
+                if descriptor.model_name == "meta_label_classifier":
+                    return descriptor.model_name
+            return descriptors[0].model_name
+
+        if mode in allowed:
+            return mode
+
         return descriptors[0].model_name
 
     @staticmethod
