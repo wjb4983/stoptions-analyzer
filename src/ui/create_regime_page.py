@@ -593,6 +593,7 @@ class CreateRegimePage(ttk.Frame):
         self._nn_designer_window: NeuralNetworkDesignerPage | None = None
         self._calibration_designer_window: CalibrationSpecDesignerPage | None = None
         self._event_process_designer_window: EventProcessDesignerPage | None = None
+        self._training_preview_warnings: list[str] = []
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -877,6 +878,11 @@ class CreateRegimePage(ttk.Frame):
         self.validation_message_var = tk.StringVar()
         ttk.Label(self.bottom_panel, textvariable=self.validation_message_var, wraplength=760).pack(anchor="w", pady=(6, 4))
 
+        ttk.Label(self.bottom_panel, text="Training execution preview", font=("Arial", 10, "bold")).pack(anchor="w", pady=(4, 2))
+        self.training_preview_text = tk.Text(self.bottom_panel, height=9, wrap="word")
+        self.training_preview_text.pack(fill="x", expand=False, pady=(0, 6))
+        self.training_preview_text.configure(state="disabled")
+
         ttk.Label(self.bottom_panel, text="Run logs", font=("Arial", 10, "bold")).pack(anchor="w")
         self.run_logs = tk.Text(self.bottom_panel, height=7, wrap="word")
         self.run_logs.pack(fill="both", expand=True, pady=(2, 0))
@@ -1094,6 +1100,185 @@ class CreateRegimePage(ttk.Frame):
         self._persist_editor_state()
         self._update_validation_and_actions()
 
+    @staticmethod
+    def _preview_selected_model_id(leg: dict[str, object]) -> str:
+        model_id = str(leg.get("model_id", "")).strip().lower()
+        if model_id:
+            return model_id
+        return str(leg.get("selected_model_id", "")).strip().lower()
+
+    @staticmethod
+    def _preview_select_model_id(mode: str, selected_model_id: str, allowed_model_ids: list[str]) -> str:
+        if not allowed_model_ids:
+            return ""
+
+        if mode in {"single_model", "auto_model_search", "", "auto"}:
+            if selected_model_id and selected_model_id in allowed_model_ids:
+                return selected_model_id
+            return allowed_model_ids[0]
+
+        if mode == "ensemble":
+            if "meta_label_classifier" in allowed_model_ids:
+                return "meta_label_classifier"
+            return allowed_model_ids[0]
+
+        if mode in allowed_model_ids:
+            return mode
+
+        return allowed_model_ids[0]
+
+    @staticmethod
+    def _preview_candidate_model_ids(mode: str, selected_model_id: str, allowed_model_ids: list[str]) -> list[str]:
+        if not allowed_model_ids:
+            return []
+        if mode in {"auto_model_search", "auto"}:
+            return list(allowed_model_ids)
+        if mode in {"single_model", "", "placeholder", "dev", "test"}:
+            if selected_model_id and selected_model_id in allowed_model_ids:
+                return [selected_model_id]
+            return [allowed_model_ids[0]]
+        if mode == "ensemble":
+            return ["meta_label_classifier"] if "meta_label_classifier" in allowed_model_ids else [allowed_model_ids[0]]
+        if mode in allowed_model_ids:
+            return [mode]
+        return [allowed_model_ids[0]]
+
+    @staticmethod
+    def _preview_spec_payload_status(payload: object) -> str:
+        if not isinstance(payload, dict):
+            return "none"
+        keys = sorted(str(key) for key in payload.keys())
+        if not keys:
+            return "empty object"
+        return f"configured ({', '.join(keys[:6])}{'…' if len(keys) > 6 else ''})"
+
+    def _training_profile_payload(self) -> dict[str, object]:
+        definition = self._active_regime_definition()
+        payload = definition.get("training_profile")
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _profile_value_for_leg(mapping: object, *, leg_name: str, leg_family: str, leg_index: int) -> object:
+        if not isinstance(mapping, dict):
+            return None
+        for key in (leg_name, leg_family, str(leg_index), "default"):
+            if key in mapping:
+                return mapping.get(key)
+        return None
+
+    def _profile_effects_for_leg(self, profile: dict[str, object], *, leg_name: str, leg_family: str, leg_index: int) -> dict[str, Any]:
+        fixed_model = self._profile_value_for_leg(
+            profile.get("fixed_model_by_leg", profile.get("fixed_models")),
+            leg_name=leg_name,
+            leg_family=leg_family,
+            leg_index=leg_index,
+        )
+        if not isinstance(fixed_model, str):
+            fixed_model = profile.get("fixed_model_id") if isinstance(profile.get("fixed_model_id"), str) else None
+
+        auto_seed = self._profile_value_for_leg(
+            profile.get("auto_search_seed_model_ids_by_leg", profile.get("auto_search_seed_models")),
+            leg_name=leg_name,
+            leg_family=leg_family,
+            leg_index=leg_index,
+        )
+        if auto_seed is None:
+            auto_seed = profile.get("auto_search_seed_model_ids")
+
+        ensemble_members = self._profile_value_for_leg(
+            profile.get("ensemble_member_model_ids_by_leg", profile.get("ensemble_members")),
+            leg_name=leg_name,
+            leg_family=leg_family,
+            leg_index=leg_index,
+        )
+        if ensemble_members is None:
+            ensemble_members = profile.get("ensemble_member_model_ids")
+
+        return {
+            "fixed_model": fixed_model.strip().lower() if isinstance(fixed_model, str) and fixed_model.strip() else None,
+            "auto_seed_models": [str(item).strip().lower() for item in auto_seed] if isinstance(auto_seed, list) else [],
+            "ensemble_members": [str(item).strip().lower() for item in ensemble_members] if isinstance(ensemble_members, list) else [],
+        }
+
+    def _build_training_execution_preview(self) -> str:
+        mode = str(getattr(self, "training_mode", "auto_model_search")).strip().lower()
+        profile = self._training_profile_payload()
+        profile_label = str(self._active_regime_definition().get("label", "Active profile"))
+        warnings: list[str] = []
+        lines = [
+            f"Profile: {profile_label}",
+            f"Training mode: {mode or 'auto_model_search'}",
+        ]
+
+        if not self.regime_legs:
+            lines.append("No legs configured.")
+            self._training_preview_warnings = warnings
+            return "\n".join(lines)
+
+        for idx, leg in enumerate(self.regime_legs, start=1):
+            try:
+                mapped = to_regime_leg_spec(leg)
+            except ValueError as exc:
+                lines.append("")
+                lines.append(f"Leg {idx}: mapping error ({exc})")
+                continue
+            leg_family = mapped.leg_spec.leg_family
+            leg_name = str(leg.get("name", f"Leg {idx}"))
+            allowed_model_ids = [descriptor.model_name for descriptor in list_models_for_leg(leg_family)]
+            selected_model_id = self._preview_selected_model_id(leg)
+            profile_effects = self._profile_effects_for_leg(profile, leg_name=leg_name, leg_family=leg_family, leg_index=idx - 1)
+
+            effective_selected = profile_effects["fixed_model"] or selected_model_id
+            candidate_ids = self._preview_candidate_model_ids(mode, effective_selected, allowed_model_ids)
+            selected_for_execution = self._preview_select_model_id(mode, effective_selected, allowed_model_ids)
+
+            lines.append("")
+            lines.append(f"Leg {idx}: {leg_name} [{leg_family}]")
+            lines.append(f"  • Candidate model ids: {', '.join(candidate_ids) if candidate_ids else 'none'}")
+            lines.append(f"  • Locked/effective model selection: {selected_for_execution or 'none'}")
+            lines.append(
+                "  • Profile contributions: "
+                + (
+                    f"fixed model={profile_effects['fixed_model']}"
+                    if profile_effects["fixed_model"]
+                    else "fixed model=none"
+                )
+                + f"; auto-search seeds={', '.join(profile_effects['auto_seed_models']) if profile_effects['auto_seed_models'] else 'none'}"
+                + f"; ensemble members={', '.join(profile_effects['ensemble_members']) if profile_effects['ensemble_members'] else 'none'}"
+            )
+            lines.append(
+                "  • Spec payloads: "
+                + f"architecture={self._preview_spec_payload_status(leg.get('architecture_spec'))}, "
+                + f"calibration={self._preview_spec_payload_status(leg.get('calibration_spec'))}, "
+                + f"event={self._preview_spec_payload_status(leg.get('event_process_spec'))}"
+            )
+
+            if mode in {"auto_model_search", "auto"} and selected_model_id and not profile_effects["fixed_model"]:
+                warnings.append(
+                    f"{leg_name}: selected model '{selected_model_id}' is not locked in auto-model-search; all candidates are evaluated."
+                )
+            if mode == "ensemble" and profile_effects["ensemble_members"] and "meta_label_classifier" not in candidate_ids:
+                warnings.append(
+                    f"{leg_name}: profile ensemble members are listed, but pipeline may fallback to first catalog model when meta_label_classifier is unavailable."
+                )
+
+        if warnings:
+            lines.append("")
+            lines.append("Warnings:")
+            for warning in warnings:
+                lines.append(f"  - {warning}")
+        self._training_preview_warnings = warnings
+        return "\n".join(lines)
+
+    def _update_training_execution_preview(self) -> None:
+        if not hasattr(self, "training_preview_text"):
+            return
+        preview_text = self._build_training_execution_preview()
+        self.training_preview_text.configure(state="normal")
+        self.training_preview_text.delete("1.0", tk.END)
+        self.training_preview_text.insert("1.0", preview_text)
+        self.training_preview_text.configure(state="disabled")
+
     def _on_leg_model_selected(self, _event=None) -> None:
         leg = self._selected_leg()
         selected_descriptor = self._model_selection_by_label.get(self.selected_model_var.get())
@@ -1254,12 +1439,12 @@ class CreateRegimePage(ttk.Frame):
         if invalid:
             return False, invalid
 
-        blockers = self._required_spec_blockers(leg)
-        if blockers:
-            missing = ", ".join(blockers)
-            return False, f"Selected model requires missing specs: {missing}."
-
         try:
+            blockers = self._required_spec_blockers(leg)
+            if blockers:
+                missing = ", ".join(blockers)
+                return False, f"Selected model requires missing specs: {missing}."
+
             for ui_leg in self.regime_legs:
                 to_regime_leg_spec(ui_leg)
         except ValueError as exc:
@@ -1275,6 +1460,7 @@ class CreateRegimePage(ttk.Frame):
     def _update_validation_and_actions(self) -> None:
         leg = self._selected_leg()
         statuses = self._validation_snapshot(leg)
+        self._update_training_execution_preview()
 
         if hasattr(self, "risk_summary_var"):
             controls = leg["controls"]
@@ -1312,7 +1498,14 @@ class CreateRegimePage(ttk.Frame):
         if hasattr(self, "export_button"):
             self.export_button.configure(state=("normal" if can_run else "disabled"))
         if hasattr(self, "validation_message_var"):
-            self.validation_message_var.set(message)
+            preview_warnings = getattr(self, "_training_preview_warnings", [])
+            if preview_warnings:
+                warning_summary = preview_warnings[0]
+                if len(preview_warnings) > 1:
+                    warning_summary += f" (+{len(preview_warnings) - 1} more preview warning(s))"
+                self.validation_message_var.set(f"{message} Preview warning: {warning_summary}")
+            else:
+                self.validation_message_var.set(message)
 
     def _append_log(self, message: str) -> None:
         if not hasattr(self, "run_logs"):
