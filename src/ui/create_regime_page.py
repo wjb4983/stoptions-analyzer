@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
@@ -12,6 +12,7 @@ from backtesting.regime_training_pipeline import (
     RegimeTrainingResult,
     run_regime_training,
 )
+from ui.regime_mapping import to_regime_leg_spec
 from config import (
     DEFAULT_REGIME_CONFIDENCE_THRESHOLDS,
     DEFAULT_REGIME_GLOBAL_RISK_LIMITS,
@@ -242,6 +243,80 @@ LEG_CONTROL_GROUPS: dict[str, dict[str, object]] = {
                 "min": 0.3,
                 "max": 0.95,
                 "tooltip": "Persistence filter for volatile environments.",
+            },
+        ],
+    },
+    "Regime Change": {
+        "signal_parameters": [
+            {
+                "key": "lookback_days",
+                "label": "Lookback (days)",
+                "default": 60,
+                "min": 20,
+                "max": 252,
+                "tooltip": "Window used for regime-shift detection signals.",
+            },
+            {
+                "key": "entry_zscore",
+                "label": "Detection threshold",
+                "default": 1.6,
+                "min": 0.5,
+                "max": 4.0,
+                "tooltip": "Score threshold used to flag likely regime transitions.",
+            },
+        ],
+        "sizing_risk_caps": [
+            {
+                "key": "max_position_pct",
+                "label": "Max position %",
+                "default": 0.05,
+                "min": 0.01,
+                "max": 0.15,
+                "tooltip": "Cap for transition trades during state changes.",
+            },
+            {
+                "key": "max_drawdown_stop",
+                "label": "Max drawdown stop",
+                "default": 0.08,
+                "min": 0.03,
+                "max": 0.25,
+                "tooltip": "Risk stop for false-positive transition calls.",
+            },
+        ],
+        "turnover_liquidity_assumptions": [
+            {
+                "key": "turnover_limit",
+                "label": "Turnover limit",
+                "default": 0.3,
+                "min": 0.05,
+                "max": 1.2,
+                "tooltip": "Expected position rotation around transition windows.",
+            },
+            {
+                "key": "slippage_bps",
+                "label": "Slippage (bps)",
+                "default": 10,
+                "min": 1,
+                "max": 60,
+                "tooltip": "Execution cost estimate when regimes reprice quickly.",
+            },
+        ],
+        "confidence_thresholds": [
+            {
+                "key": "model_confidence_min",
+                "label": "Model confidence min",
+                "default": 0.62,
+                "min": 0.4,
+                "max": 0.98,
+                "tooltip": "Confidence floor required to activate state-change trades.",
+            },
+            {
+                "key": "regime_stability_min",
+                "label": "Regime stability min",
+                "default": 0.5,
+                "min": 0.3,
+                "max": 0.95,
+                "tooltip": "Persistence filter before switching state exposure.",
             },
         ],
     },
@@ -579,6 +654,12 @@ class CreateRegimePage(ttk.Frame):
         if invalid:
             return False, invalid
 
+        try:
+            for ui_leg in self.regime_legs:
+                to_regime_leg_spec(ui_leg)
+        except ValueError as exc:
+            return False, str(exc)
+
         statuses = self._validation_snapshot(leg)
         if "red" in statuses.values():
             return False, "One or more validation badges are red. Resolve before training/export."
@@ -630,7 +711,7 @@ class CreateRegimePage(ttk.Frame):
         self.run_logs.see(tk.END)
 
     def _append_structured_log(self, *, level: str, event: str, details: str) -> None:
-        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         self._append_log(f"[{ts}] [{level.upper()}] {event}: {details}")
 
     def _active_regime_definition(self) -> dict[str, object]:
@@ -665,18 +746,20 @@ class CreateRegimePage(ttk.Frame):
         for leg in self.regime_legs:
             controls = leg.get("controls", {})
             cast_controls = {key: float(value) for key, value in controls.items()}
+            mapped_leg = to_regime_leg_spec(leg)
+            mapped_controls = {key: float(value) for key, value in mapped_leg.leg_spec.knobs.items()}
             legs.append(
                 RegimeLegTrainingConfig(
                     name=str(leg.get("name", "Unnamed leg")),
-                    model_type=str(leg.get("model_type", "Trend Following")),
-                    controls=cast_controls,
+                    model_type=mapped_leg.leg_spec.leg_family,
+                    controls={**cast_controls, **mapped_controls},
                 )
             )
 
         return RegimeTrainingRequest(
             regime_id=regime_id,
             regime_label=regime_label,
-            requested_at=datetime.now(UTC).isoformat(),
+            requested_at=datetime.now(timezone.utc).isoformat(),
             training_window={key: int(value) for key, value in training_window.items()},
             global_risk_limits={key: float(value) for key, value in global_risk_limits.items()},
             confidence_thresholds={key: float(value) for key, value in confidence_thresholds.items()},

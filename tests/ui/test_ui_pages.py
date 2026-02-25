@@ -614,6 +614,7 @@ def _build_create_regime_logic_page() -> create_regime_page.CreateRegimePage:
     page.leg_control_vars = {}
     page.validation_badge_vars = {}
     page.validation_badges = {}
+    page._is_training = False
     return page
 
 
@@ -629,6 +630,15 @@ def test_create_regime_leg_type_switching_updates_controls():
     assert leg["model_type"] == "Mean Reversion"
     assert float(leg["controls"]["lookback_days"]) == 30
     assert float(leg["controls"]["entry_zscore"]) == 2.0
+
+
+def test_create_regime_unknown_leg_mapping_blocks_training() -> None:
+    page = _build_create_regime_logic_page()
+    page.regime_legs[0]["model_type"] = "Not A Leg"
+
+    ok, message = page._can_train_export()
+    assert not ok
+    assert "Unsupported UI leg" in message
 
 
 def test_create_regime_invalid_knob_combinations_are_blocked():
