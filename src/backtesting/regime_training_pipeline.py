@@ -17,7 +17,7 @@ from backtesting.scenario_toolkit import ScenarioSpec, build_custom_scenarios
 from modeling_nextgen.calibration.probability import ProbabilityCalibrator
 from modeling_nextgen.validation.quality_gates import evaluate_modeling_quality_gates, promotion_blocked
 from models.deployment import PromotionGates
-from models.regime_catalog import list_models_for_leg, validate_model_leg_pairing
+from models.regime_catalog import get_model_descriptor, list_models_for_leg, validate_model_leg_pairing
 from models.registry import create_model
 from models.robustness import build_robustness_scorecards
 from backtesting.walk_forward import build_walk_forward_folds, run_walk_forward_optimization
@@ -953,6 +953,8 @@ def validate_model_specific_specs(request: RegimeTrainingRequest) -> list[str]:
     errors: list[str] = []
     for idx, leg in enumerate(request.legs):
         model_id = leg.resolved_model_id.lower()
+        descriptor = get_model_descriptor(leg.model_type, model_id) if model_id else None
+        capability_tags = descriptor.capability_tags if descriptor is not None else frozenset()
 
         errors.extend(
             _validate_optional_spec_object(leg.architecture_spec, field_path=f"legs[{idx}].architecture_spec")
@@ -962,15 +964,15 @@ def validate_model_specific_specs(request: RegimeTrainingRequest) -> list[str]:
             _validate_optional_spec_object(leg.event_process_spec, field_path=f"legs[{idx}].event_process_spec")
         )
 
-        if _requires_architecture_spec(model_id):
+        if "needs_architecture_spec" in capability_tags:
             errors.extend(
                 _validate_architecture_spec(leg.architecture_spec, field_path=f"legs[{idx}].architecture_spec")
             )
-        if _requires_calibration_spec(model_id):
+        if "needs_calibration_spec" in capability_tags:
             errors.extend(
                 _validate_calibration_spec(leg.calibration_spec, field_path=f"legs[{idx}].calibration_spec")
             )
-        if _requires_event_process_spec(model_id):
+        if "needs_event_process_spec" in capability_tags:
             errors.extend(
                 _validate_event_process_spec(leg.event_process_spec, field_path=f"legs[{idx}].event_process_spec")
             )
@@ -983,18 +985,6 @@ def _validate_optional_spec_object(payload: dict[str, Any] | None, *, field_path
     if isinstance(payload, dict):
         return []
     return [f"{field_path} must be an object when provided"]
-
-
-def _requires_architecture_spec(model_id: str) -> bool:
-    return any(token in model_id for token in ("ann", "neural", "transformer", "mlp"))
-
-
-def _requires_calibration_spec(model_id: str) -> bool:
-    return any(token in model_id for token in ("local_vol", "heston", "sabr", "vol_surface", "black_scholes"))
-
-
-def _requires_event_process_spec(model_id: str) -> bool:
-    return any(token in model_id for token in ("hawkes", "jump", "intensity"))
 
 
 def _validate_architecture_spec(payload: dict[str, Any] | None, *, field_path: str) -> list[str]:

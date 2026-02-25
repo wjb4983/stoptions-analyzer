@@ -165,15 +165,15 @@ def test_pipeline_validation_rejects_incomplete_model_specific_specs(tmp_path):
         legs=(
             RegimeLegTrainingConfig(
                 name="Vol Surface",
-                model_type="regime_change_detection",
+                model_type="vol_surface_calibration",
                 controls={"model_confidence_min": 0.6},
-                model_id="heston_surface_model",
+                model_id="options_volatility",
             ),
             RegimeLegTrainingConfig(
                 name="Event Intensity",
-                model_type="regime_change_detection",
+                model_type="self_exciting_event_intensity",
                 controls={"model_confidence_min": 0.6},
-                model_id="hawkes_jump_intensity",
+                model_id="event_driven",
             ),
         ),
     )
@@ -190,24 +190,24 @@ def test_pipeline_validation_accepts_complete_model_specific_specs(tmp_path):
         tmp_path,
         legs=(
             RegimeLegTrainingConfig(
-                name="ANN",
-                model_type="regime_change_detection",
+                name="Cross Asset Macro",
+                model_type="cross_asset_macro_conditioned",
                 controls={"model_confidence_min": 0.6},
-                model_id="ann_classifier",
+                model_id="macro_regime_conditioned",
                 architecture_spec={"layers": [{"units": 16, "activation": "relu"}]},
             ),
             RegimeLegTrainingConfig(
                 name="Vol Surface",
-                model_type="regime_change_detection",
+                model_type="vol_surface_calibration",
                 controls={"model_confidence_min": 0.6},
-                model_id="heston_surface_model",
+                model_id="options_volatility",
                 calibration_spec={"model": "heston", "parameters": {"kappa": 1.2}},
             ),
             RegimeLegTrainingConfig(
                 name="Event Intensity",
-                model_type="regime_change_detection",
+                model_type="self_exciting_event_intensity",
                 controls={"model_confidence_min": 0.6},
-                model_id="hawkes_jump_intensity",
+                model_id="event_driven",
                 event_process_spec={"process_type": "hawkes", "parameters": {"alpha": 0.3}},
             ),
         ),
@@ -408,3 +408,36 @@ def test_pipeline_manifest_contains_training_data_audit(tmp_path):
     assert audit["symbols_requested"] == ["AAPL"]
     assert audit["symbols_used"] == ["AAPL"]
     assert "effective_training_start" in audit
+
+
+
+def test_pipeline_phase2_families_compatibility_with_default_adapter(tmp_path):
+    req = RegimeTrainingRequest(
+        schema_version=2,
+        regime_id="phase2",
+        regime_name="Phase 2",
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Cross-Asset Macro",
+                model_type="cross_asset_macro_conditioned",
+                controls={"model_confidence_min": 0.62, "turnover_limit": 0.2},
+            ),
+            RegimeLegTrainingConfig(
+                name="Meta Ensemble",
+                model_type="meta_label_regime_ensemble",
+                controls={"model_confidence_min": 0.65, "turnover_limit": 0.2},
+            ),
+        ),
+        model_choice="auto",
+        training_window={"retrain_frequency_days": 14, "lookback_days": 252},
+        risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
+        output_dir=str(tmp_path),
+        training_data_settings={"allow_synthetic_fallback": True},
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    assert result.status == "success"
+    assert result.metrics["legs_trained"] == 2.0
+    assert "Cross-Asset Macro" in result.metadata["champion_by_leg"]
+    assert "Meta Ensemble" in result.metadata["champion_by_leg"]

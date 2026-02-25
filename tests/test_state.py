@@ -100,3 +100,31 @@ def test_legacy_regime_definition_payload_migrates_to_versioned_leg_schema(tmp_p
     assert leg["architecture_spec"] is None
     assert leg["calibration_spec"] is None
     assert leg["event_process_spec"] is None
+
+
+
+def test_migrate_regime_leg_model_type_aliases_to_canonical_family(tmp_path, monkeypatch) -> None:
+    app_state_path = tmp_path / "legacy_ui_type_state.json"
+    monkeypatch.setattr(state, "STATE_PATH", app_state_path)
+
+    legacy_payload = {
+        "regime_definitions": {
+            "legacy": {
+                "label": "Legacy UI mapping",
+                "legs": [
+                    {
+                        "name": "macro leg",
+                        "model_type": "Cross-Asset Macro",
+                        "selected_model_id": "macro_regime_conditioned",
+                        "hyperparameters": {},
+                    }
+                ],
+            }
+        }
+    }
+    app_state_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    loaded = AppState.load()
+    leg = loaded.regime_definitions["legacy"]["legs"][0]
+
+    assert leg["model_type"] == "cross_asset_macro_conditioned"

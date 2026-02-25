@@ -11,7 +11,27 @@ from config import (
     STATE_PATH,
 )
 
-REGIME_DEFINITION_SCHEMA_VERSION = 2
+REGIME_DEFINITION_SCHEMA_VERSION = 3
+
+
+_LEG_TYPE_ALIASES: dict[str, str] = {
+    "Trend Following": "timeseries_momentum",
+    "Mean Reversion": "cheap_vol_buying",
+    "Volatility Breakout": "volatility_risk_premium_selling",
+    "Regime Change": "regime_change_detection",
+    "Volatility Clustering": "volatility_clustering",
+    "IV/EV Spread": "iv_ev_spread_term_structure",
+    "Event Intensity": "self_exciting_event_intensity",
+    "Vol Surface": "vol_surface_calibration",
+    "Cross-Asset Macro": "cross_asset_macro_conditioned",
+    "Meta-Label Ensemble": "meta_label_regime_ensemble",
+    "iv_ev_spread": "iv_ev_spread_term_structure",
+}
+
+
+def _normalize_leg_model_type(raw_model_type: object) -> str:
+    model_type = str(raw_model_type or "").strip()
+    return _LEG_TYPE_ALIASES.get(model_type, model_type)
 
 
 def _baseline_regime_definitions() -> dict[str, dict[str, object]]:
@@ -32,6 +52,7 @@ def _migrate_leg_payload(raw_leg: object) -> dict[str, object] | None:
     if not isinstance(raw_leg, dict):
         return None
     migrated = dict(raw_leg)
+    migrated["model_type"] = _normalize_leg_model_type(migrated.get("model_type"))
     selected_model_id = str(migrated.get("selected_model_id", "")).strip()
     model_id = str(migrated.get("model_id", "")).strip() or selected_model_id
     migrated["model_id"] = model_id
