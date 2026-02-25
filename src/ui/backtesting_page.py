@@ -62,6 +62,7 @@ class BacktestingPage(ttk.Frame):
         self._optimizer_json_lint_vars: dict[str, tk.StringVar] = {}
         self._validation_messages: list[str] = []
         self._stale_preset_messages: list[str] = []
+        self._updating_risk_limit_controls = False
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -356,19 +357,45 @@ class BacktestingPage(ttk.Frame):
         self.portfolio_max_net_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
-        ttk.Label(strategy_frame, text="Max Net Gamma").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_max_net_gamma_var = tk.StringVar(value="")
-        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_net_gamma_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
-
-        row += 1
-        ttk.Label(strategy_frame, text="Max Abs Vega Bucket").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_max_abs_vega_bucket_var = tk.StringVar(value="")
-        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_abs_vega_bucket_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
-
-        row += 1
-        ttk.Label(strategy_frame, text="Max Abs Delta / Underlying").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.portfolio_max_abs_delta_underlying_var = tk.StringVar(value="")
-        ttk.Entry(strategy_frame, textvariable=self.portfolio_max_abs_delta_underlying_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.portfolio_max_participation_rate_var = tk.StringVar(value="")
+
+        risk_limits_card = ttk.LabelFrame(strategy_frame, text="Options Risk Limits")
+        risk_limits_card.grid(row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
+        risk_limits_card.columnconfigure(1, weight=1)
+
+        self._risk_limit_slider_vars: dict[str, tk.DoubleVar] = {
+            "portfolio_max_net_gamma": tk.DoubleVar(value=0.0),
+            "portfolio_max_abs_vega_bucket": tk.DoubleVar(value=0.0),
+            "portfolio_max_abs_delta_per_underlying": tk.DoubleVar(value=0.0),
+            "max_participation_rate": tk.DoubleVar(value=0.0),
+        }
+        self._risk_limit_vars: dict[str, tk.StringVar] = {
+            "portfolio_max_net_gamma": self.portfolio_max_net_gamma_var,
+            "portfolio_max_abs_vega_bucket": self.portfolio_max_abs_vega_bucket_var,
+            "portfolio_max_abs_delta_per_underlying": self.portfolio_max_abs_delta_underlying_var,
+            "max_participation_rate": self.portfolio_max_participation_rate_var,
+        }
+        self._risk_limit_ranges: dict[str, tuple[float, float, float]] = {
+            "portfolio_max_net_gamma": (0.0, 5.0, 0.05),
+            "portfolio_max_abs_vega_bucket": (0.0, 50_000.0, 250.0),
+            "portfolio_max_abs_delta_per_underlying": (0.0, 10_000.0, 50.0),
+            "max_participation_rate": (0.0, 1.0, 0.01),
+        }
+
+        self._build_risk_limit_slider_row(risk_limits_card, 0, "Max Net Gamma", "portfolio_max_net_gamma")
+        self._build_risk_limit_slider_row(risk_limits_card, 1, "Max Abs Vega Bucket", "portfolio_max_abs_vega_bucket")
+        self._build_risk_limit_slider_row(risk_limits_card, 2, "Max Abs Delta / Underlying", "portfolio_max_abs_delta_per_underlying")
+        self._build_risk_limit_slider_row(risk_limits_card, 3, "Max Participation / Capacity Threshold", "max_participation_rate")
+
+        presets_row = ttk.Frame(risk_limits_card)
+        presets_row.grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 6))
+        ttk.Label(presets_row, text="Quick presets:").pack(side="left")
+        ttk.Button(presets_row, text="Conservative", command=lambda: self._apply_options_risk_limit_preset("conservative")).pack(side="left", padx=(6, 0))
+        ttk.Button(presets_row, text="Balanced", command=lambda: self._apply_options_risk_limit_preset("balanced")).pack(side="left", padx=(6, 0))
+        ttk.Button(presets_row, text="Aggressive", command=lambda: self._apply_options_risk_limit_preset("aggressive")).pack(side="left", padx=(6, 0))
 
         row += 1
         self.use_walk_forward_var = tk.BooleanVar(value=False)
@@ -2141,6 +2168,89 @@ class BacktestingPage(ttk.Frame):
             self._updating_wf_fractions = False
         self._refresh_wf_fraction_labels()
 
+    def _build_risk_limit_slider_row(self, parent: ttk.Frame, row: int, label: str, key: str) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        minimum, maximum, resolution = self._risk_limit_ranges[key]
+        slider = tk.Scale(
+            parent,
+            from_=minimum,
+            to=maximum,
+            resolution=resolution,
+            orient="horizontal",
+            showvalue=False,
+            variable=self._risk_limit_slider_vars[key],
+            command=lambda value, risk_key=key: self._on_risk_limit_slider_changed(risk_key, value),
+        )
+        slider.grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+        entry = ttk.Entry(parent, textvariable=self._risk_limit_vars[key], width=14)
+        entry.grid(row=row, column=2, sticky="w", padx=8, pady=4)
+        self._risk_limit_vars[key].trace_add("write", lambda *_args, risk_key=key: self._on_risk_limit_entry_changed(risk_key))
+
+    def _format_risk_limit_value(self, key: str, value: float) -> str:
+        if key == "max_participation_rate":
+            return f"{value:.2f}"
+        if key == "portfolio_max_net_gamma":
+            return f"{value:.3f}".rstrip("0").rstrip(".")
+        return f"{value:.1f}".rstrip("0").rstrip(".")
+
+    def _on_risk_limit_slider_changed(self, key: str, raw_value: str) -> None:
+        if getattr(self, "_updating_risk_limit_controls", False):
+            return
+        self._updating_risk_limit_controls = True
+        try:
+            self._risk_limit_vars[key].set(self._format_risk_limit_value(key, float(raw_value)))
+        finally:
+            self._updating_risk_limit_controls = False
+
+    def _on_risk_limit_entry_changed(self, key: str) -> None:
+        if getattr(self, "_updating_risk_limit_controls", False):
+            return
+        text = self._risk_limit_vars[key].get().strip()
+        if not text:
+            return
+        parsed = parse_float(text)
+        if parsed is None:
+            return
+        minimum, maximum, _resolution = self._risk_limit_ranges[key]
+        clamped = max(minimum, min(maximum, float(parsed)))
+        self._updating_risk_limit_controls = True
+        try:
+            self._risk_limit_slider_vars[key].set(clamped)
+        finally:
+            self._updating_risk_limit_controls = False
+
+    def _apply_options_risk_limit_preset(self, preset_name: str) -> None:
+        presets = {
+            "conservative": {
+                "portfolio_max_net_gamma": 0.50,
+                "portfolio_max_abs_vega_bucket": 2_500.0,
+                "portfolio_max_abs_delta_per_underlying": 600.0,
+                "max_participation_rate": 0.10,
+            },
+            "balanced": {
+                "portfolio_max_net_gamma": 1.25,
+                "portfolio_max_abs_vega_bucket": 7_500.0,
+                "portfolio_max_abs_delta_per_underlying": 1_800.0,
+                "max_participation_rate": 0.25,
+            },
+            "aggressive": {
+                "portfolio_max_net_gamma": 2.50,
+                "portfolio_max_abs_vega_bucket": 15_000.0,
+                "portfolio_max_abs_delta_per_underlying": 3_500.0,
+                "max_participation_rate": 0.45,
+            },
+        }
+        preset = presets.get(preset_name)
+        if not preset:
+            return
+        self._updating_risk_limit_controls = True
+        try:
+            for key, value in preset.items():
+                self._risk_limit_slider_vars[key].set(float(value))
+                self._risk_limit_vars[key].set(self._format_risk_limit_value(key, float(value)))
+        finally:
+            self._updating_risk_limit_controls = False
+
     def _build_momentum_options(self, parent: ttk.Frame) -> None:
         self.momentum_options_frame = ttk.LabelFrame(parent, text="Momentum Options")
         self.momentum_options_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
@@ -2421,6 +2531,13 @@ class BacktestingPage(ttk.Frame):
         self.portfolio_max_net_gamma_var.set(str(settings.get("portfolio_max_net_gamma", "")))
         self.portfolio_max_abs_vega_bucket_var.set(str(settings.get("portfolio_max_abs_vega_bucket", "")))
         self.portfolio_max_abs_delta_underlying_var.set(str(settings.get("portfolio_max_abs_delta_per_underlying", "")))
+        self.portfolio_max_participation_rate_var.set(str(settings.get("max_participation_rate", "")))
+        for risk_key, variable in self._risk_limit_vars.items():
+            parsed_value = parse_float(variable.get())
+            if parsed_value is None:
+                continue
+            low, high, _ = self._risk_limit_ranges[risk_key]
+            self._risk_limit_slider_vars[risk_key].set(max(low, min(high, float(parsed_value))))
         self.wf_train_fraction_var.set(float(settings.get("wf_train_fraction", "0.70")))
         self.wf_validation_fraction_var.set(float(settings.get("wf_validation_fraction", "0.15")))
         self.wf_test_fraction_var.set(float(settings.get("wf_test_fraction", "0.15")))
@@ -2651,6 +2768,7 @@ class BacktestingPage(ttk.Frame):
             "portfolio_max_net_gamma": self.portfolio_max_net_gamma_var.get().strip(),
             "portfolio_max_abs_vega_bucket": self.portfolio_max_abs_vega_bucket_var.get().strip(),
             "portfolio_max_abs_delta_per_underlying": self.portfolio_max_abs_delta_underlying_var.get().strip(),
+            "max_participation_rate": self.portfolio_max_participation_rate_var.get().strip(),
             "selected_entry_signals": ",".join(selected_entries),
             "selected_exit_signals": ",".join(selected_exits),
             "start_date": self.start_date_var.get().strip(),
@@ -2734,6 +2852,7 @@ class BacktestingPage(ttk.Frame):
         parsed_max_gamma = parse_float(self.portfolio_max_net_gamma_var.get())
         parsed_max_vega_bucket = parse_float(self.portfolio_max_abs_vega_bucket_var.get())
         parsed_max_delta_underlying = parse_float(self.portfolio_max_abs_delta_underlying_var.get())
+        parsed_max_participation_rate = parse_float(self.portfolio_max_participation_rate_var.get())
 
         portfolio_cfg = {
             "portfolio_method": self.portfolio_method_var.get().strip() or "equal_weight",
@@ -2750,6 +2869,7 @@ class BacktestingPage(ttk.Frame):
             "portfolio_max_net_gamma": float(parsed_max_gamma) if parsed_max_gamma is not None else None,
             "portfolio_max_abs_vega_bucket": float(parsed_max_vega_bucket) if parsed_max_vega_bucket is not None else None,
             "portfolio_max_abs_delta_per_underlying": float(parsed_max_delta_underlying) if parsed_max_delta_underlying is not None else None,
+            "max_participation_rate": float(parsed_max_participation_rate) if parsed_max_participation_rate is not None else None,
         }
         if portfolio_cfg["portfolio_method"] not in PORTFOLIO_METHODS:
             messagebox.showinfo("Invalid input", "Please select a valid portfolio method.")

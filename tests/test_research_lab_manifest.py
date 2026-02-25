@@ -118,6 +118,10 @@ def test_build_signal_grids_serializes_universe_filters_into_core_grid():
 
     assert entry_grid == {"ts_momentum": [{}]}
     assert exit_grid == {"none": [{}]}
+    assert core_grid["portfolio_max_net_gamma"][0] == 1.25
+    assert core_grid["portfolio_max_abs_vega_bucket"][0] == 7500.0
+    assert core_grid["portfolio_max_abs_delta_per_underlying"][0] == 1800.0
+    assert core_grid["max_participation_rate"][0] == 0.25
     assert core_grid["universe_filters"][0]["options_eligibility"]["require_weeklies"] is True
 
 
