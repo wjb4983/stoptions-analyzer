@@ -7,6 +7,7 @@ from config import (
     DEFAULT_REGIME_CONFIDENCE_THRESHOLDS,
     DEFAULT_REGIME_GLOBAL_RISK_LIMITS,
     DEFAULT_REGIME_TRAINING_WINDOW,
+    DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
     STATE_PATH,
 )
 
@@ -21,6 +22,7 @@ def _baseline_regime_definitions() -> dict[str, dict[str, object]]:
             "global_risk_limits": dict(DEFAULT_REGIME_GLOBAL_RISK_LIMITS),
             "training_window": dict(DEFAULT_REGIME_TRAINING_WINDOW),
             "confidence_thresholds": dict(DEFAULT_REGIME_CONFIDENCE_THRESHOLDS),
+            "training_data_settings": dict(DEFAULT_REGIME_TRAINING_DATA_SETTINGS),
             "legs": [],
         }
     }
@@ -54,6 +56,8 @@ def _migrate_regime_definitions(payload: object) -> dict[str, dict[str, object]]
 
         definition = dict(raw_definition)
         definition["schema_version"] = REGIME_DEFINITION_SCHEMA_VERSION
+        if not isinstance(definition.get("training_data_settings"), dict):
+            definition["training_data_settings"] = dict(DEFAULT_REGIME_TRAINING_DATA_SETTINGS)
 
         raw_legs = definition.get("legs")
         migrated_legs: list[dict[str, object]] = []

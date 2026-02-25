@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from pathlib import Path
+from datetime import date, datetime, timedelta, timezone
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING, Any
@@ -12,13 +13,17 @@ from backtesting.regime_training_pipeline import (
     RegimeTrainingResult,
     execute_regime_training_pipeline,
 )
+from backtesting.cache_runner import run_backtest_cache
 from backtesting.regime_export_service import export_regime_training_bundle
+from data_access.cache import _safe_ticker_name
 from models.regime_catalog import ModelDescriptor, list_models_for_leg
 from ui.regime_mapping import to_regime_leg_spec
 from config import (
     DEFAULT_REGIME_CONFIDENCE_THRESHOLDS,
     DEFAULT_REGIME_GLOBAL_RISK_LIMITS,
     DEFAULT_REGIME_TRAINING_WINDOW,
+    DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
+    BACKTEST_CACHE_DIR,
 )
 
 if TYPE_CHECKING:
@@ -1019,6 +1024,10 @@ class CreateRegimePage(ttk.Frame):
             **DEFAULT_REGIME_CONFIDENCE_THRESHOLDS,
             **(definition.get("confidence_thresholds", {}) if isinstance(definition.get("confidence_thresholds"), dict) else {}),
         }
+        training_data_settings = {
+            **DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
+            **(definition.get("training_data_settings", {}) if isinstance(definition.get("training_data_settings"), dict) else {}),
+        }
 
         legs: list[RegimeLegTrainingConfig] = []
         for leg in self.regime_legs:
@@ -1050,6 +1059,10 @@ class CreateRegimePage(ttk.Frame):
             **{f"confidence_{key}": float(value) for key, value in confidence_thresholds.items()},
         }
 
+        backtest_root = str(self.controller.state.backtest_settings.get("backtest_data_root", BACKTEST_CACHE_DIR))
+        training_data_settings["cache_root"] = backtest_root
+        training_data_settings["universe_symbols"] = [item.strip().upper() for item in self.controller.state.tickers if item.strip()]
+
         return RegimeTrainingRequest(
             schema_version=2,
             regime_id=regime_id,
@@ -1058,6 +1071,7 @@ class CreateRegimePage(ttk.Frame):
             training_window={key: int(value) for key, value in training_window.items()},
             risk_limits=risk_limits,
             legs=tuple(legs),
+            training_data_settings=training_data_settings,
         )
 
     def _last_successful_training_run(self) -> dict[str, object] | None:
@@ -1095,6 +1109,9 @@ class CreateRegimePage(ttk.Frame):
 
         def _worker() -> None:
             try:
+                cache_note = self._ensure_regime_training_cache(request)
+                if cache_note:
+                    self.after(0, lambda note=cache_note: self._append_structured_log(level="info", event="cache_check", details=note))
                 result = execute_regime_training_pipeline(request)
             except Exception as exc:
                 self.after(0, lambda error=exc: self._on_training_failed(error))
@@ -1106,6 +1123,44 @@ class CreateRegimePage(ttk.Frame):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+
+
+    def _ensure_regime_training_cache(self, request: RegimeTrainingRequest) -> str:
+        settings = dict(request.training_data_settings or {})
+        if not bool(settings.get("enable_cache_backfill", True)):
+            return "cache backfill disabled"
+
+        symbols = [str(item).strip().upper() for item in settings.get("universe_symbols", []) if str(item).strip()]
+        if not symbols:
+            return "no universe symbols configured for cache check"
+
+        required_years = max(1, int(settings.get("required_history_years", 5)))
+        cache_root = Path(str(settings.get("cache_root", BACKTEST_CACHE_DIR))).expanduser()
+        end_date = date.today()
+        start_date = end_date - timedelta(days=365 * required_years + 7)
+
+        missing: list[str] = []
+        for symbol in symbols:
+            safe = _safe_ticker_name(symbol)
+            symbol_dir = cache_root / safe / "1m"
+            year_files = [symbol_dir / f"{safe}_1m_{year}.npz" for year in range(start_date.year, end_date.year + 1)]
+            if not any(path.exists() for path in year_files):
+                missing.append(symbol)
+
+        if not missing:
+            return f"cache ready for {len(symbols)} symbol(s)"
+
+        if not self.controller.api_key:
+            return f"cache incomplete for {len(missing)} symbol(s), skipped backfill (missing API key)"
+
+        run_backtest_cache(
+            tickers=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            cache_root=cache_root,
+            api_key=self.controller.api_key,
+        )
+        return f"cache backfill requested for {len(symbols)} symbol(s) over {required_years} years"
 
     def _on_training_result_failed(self, result: RegimeTrainingResult) -> None:
         self._is_training = False
