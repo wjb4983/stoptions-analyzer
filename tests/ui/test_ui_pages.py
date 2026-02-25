@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from state import AppState
-from ui import analysis_page, backtesting_page, call_put_analysis_page, general_analysis_page, main_menu, research_lab_page, spread_analysis_page, ticker_entry_page, ticker_select_page
+from ui import analysis_page, backtesting_page, call_put_analysis_page, create_regime_page, general_analysis_page, main_menu, research_lab_page, spread_analysis_page, ticker_entry_page, ticker_select_page
 
 
 class Var:
@@ -68,6 +68,9 @@ class FakeWidget:
 
     def config(self, **kwargs):
         self.config_calls.append(kwargs)
+
+    def configure(self, **kwargs):
+        self.config(**kwargs)
 
 
 class FakeFrameWidget(FakeWidget):
@@ -600,3 +603,77 @@ def test_wizard_export_import_session_merges_comments_history(monkeypatch, tmp_p
     assert owners == {"alice", "bob"}
     assert "created" in events and "local" in events
     assert any(title == "Session exported" for title, _ in infos)
+
+
+def _build_create_regime_logic_page() -> create_regime_page.CreateRegimePage:
+    page = create_regime_page.CreateRegimePage.__new__(create_regime_page.CreateRegimePage)
+    page.regime_legs = [
+        create_regime_page.CreateRegimePage._build_default_leg(page, "Trend Following")
+    ]
+    page.selected_leg_index = 0
+    page.leg_control_vars = {}
+    page.validation_badge_vars = {}
+    page.validation_badges = {}
+    return page
+
+
+def test_create_regime_leg_type_switching_updates_controls():
+    page = _build_create_regime_logic_page()
+
+    leg = page._selected_leg()
+    assert leg["model_type"] == "Trend Following"
+    assert float(leg["controls"]["lookback_days"]) == 90
+
+    page._apply_leg_type("Mean Reversion")
+    leg = page._selected_leg()
+    assert leg["model_type"] == "Mean Reversion"
+    assert float(leg["controls"]["lookback_days"]) == 30
+    assert float(leg["controls"]["entry_zscore"]) == 2.0
+
+
+def test_create_regime_invalid_knob_combinations_are_blocked():
+    page = _build_create_regime_logic_page()
+    leg = page._selected_leg()
+    leg["controls"]["entry_zscore"] = 0.8
+    leg["controls"]["model_confidence_min"] = 0.9
+
+    ok, message = page._can_train_export()
+    assert not ok
+    assert "Entry z-score" in message
+
+
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        ({"lookback_days": 120, "entry_zscore": 1.4, "turnover_limit": 0.3, "slippage_bps": 8}, True),
+        ({"lookback_days": 20, "entry_zscore": 3.2, "turnover_limit": 1.2, "slippage_bps": 45}, False),
+    ],
+)
+def test_create_regime_train_export_buttons_follow_validation(overrides, expected):
+    page = _build_create_regime_logic_page()
+    page.train_button = FakeWidget()
+    page.export_button = FakeWidget()
+    page.validation_message_var = Var()
+    page.risk_summary_var = Var()
+
+    class _FakeProsCons:
+        def configure(self, **_kwargs):
+            return None
+
+        def delete(self, *_args):
+            return None
+
+        def insert(self, *_args):
+            return None
+
+    page.pros_cons_text = _FakeProsCons()
+
+    leg = page._selected_leg()
+    for key, value in overrides.items():
+        leg["controls"][key] = value
+
+    page._update_validation_and_actions()
+
+    expected_state = "normal" if expected else "disabled"
+    assert page.train_button.config_calls[-1]["state"] == expected_state
+    assert page.export_button.config_calls[-1]["state"] == expected_state
