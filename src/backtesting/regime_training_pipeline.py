@@ -4,7 +4,7 @@ import hashlib
 import json
 import shutil
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -127,6 +127,7 @@ class RegimeTrainingAdapterOutput:
     candidate_leaderboards: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     champion_by_leg: dict[str, str] = field(default_factory=dict)
     governance_by_leg: dict[str, dict[str, Any]] = field(default_factory=dict)
+    training_data_audit: dict[str, Any] = field(default_factory=dict)
 
     def warnings(self) -> tuple[str, ...]:
         return tuple(
@@ -171,6 +172,14 @@ class RegistryBackedRegimeTrainingAdapter:
         candidate_leaderboards: dict[str, list[dict[str, Any]]] = {}
         champion_by_leg: dict[str, str] = {}
         governance_by_leg: dict[str, dict[str, Any]] = {}
+        training_data_bundle = self._load_training_data_bundle(request)
+
+        if not bool(training_data_bundle.metadata.get("pass", True)):
+            ratio = float(training_data_bundle.metadata.get("universe_pass_ratio", 0.0))
+            threshold = float(training_data_bundle.metadata.get("required_universe_pass_ratio", 1.0))
+            raise ValueError(
+                f"Training data universe pass ratio {ratio:.3f} below required threshold {threshold:.3f}"
+            )
 
         for idx, leg in enumerate(request.legs):
             leg_key = f"{idx:02d}_{leg.name.lower().replace(' ', '_')}"
@@ -187,6 +196,7 @@ class RegistryBackedRegimeTrainingAdapter:
                         leg.controls,
                         request=request,
                         seed=idx,
+                        training_data_bundle=training_data_bundle,
                     )
 
                 sample_size = max(64, int(next(iter(candidate_payloads.values()))[1].size))
@@ -413,6 +423,7 @@ class RegistryBackedRegimeTrainingAdapter:
             candidate_leaderboards=candidate_leaderboards,
             champion_by_leg=champion_by_leg,
             governance_by_leg=governance_by_leg,
+            training_data_audit=training_data_bundle.metadata,
         )
 
     @staticmethod
@@ -447,6 +458,21 @@ class RegistryBackedRegimeTrainingAdapter:
                 for i in range(int(pnl.size))
             ],
         }
+
+    @staticmethod
+    def _load_training_data_bundle(request: RegimeTrainingRequest) -> "TrainingDataBundle":
+        settings = dict(request.training_data_settings or {})
+        symbols = [str(s).strip().upper() for s in settings.get("universe_symbols", []) if str(s).strip()]
+        required_years = max(1, int(settings.get("required_history_years", 5)))
+        cache_root = Path(str(settings.get("cache_root", BACKTEST_CACHE_DIR)))
+        return _load_returns_from_cache(
+            symbols=symbols,
+            cache_root=cache_root,
+            min_usable_history_years=required_years,
+            required_universe_pass_ratio=float(
+                settings.get("required_universe_pass_ratio", settings.get("min_universe_pass_ratio", 1.0))
+            ),
+        )
 
     @staticmethod
     def _build_candidate_leaderboard(
@@ -491,16 +517,13 @@ class RegistryBackedRegimeTrainingAdapter:
         *,
         request: RegimeTrainingRequest,
         seed: int,
+        training_data_bundle: "TrainingDataBundle",
         sample_size: int = 160,
     ) -> tuple[dict[str, np.ndarray], np.ndarray]:
         rng_seed = int(sum(abs(float(v)) for v in controls.values()) * 10_000) + seed
         rng = np.random.default_rng(rng_seed)
         settings = dict(request.training_data_settings or {})
-        symbols = [str(s).strip().upper() for s in settings.get("universe_symbols", []) if str(s).strip()]
-        required_years = max(1, int(settings.get("required_history_years", 5)))
-        cache_root = Path(str(settings.get("cache_root", BACKTEST_CACHE_DIR)))
-
-        base_returns = _load_returns_from_cache(symbols=symbols, cache_root=cache_root, required_years=required_years)
+        base_returns = training_data_bundle.returns
         if base_returns.size < 32:
             base_returns = rng.normal(loc=0.0, scale=0.01, size=max(sample_size, 160)).astype(float)
 
@@ -601,39 +624,195 @@ class RegistryBackedRegimeTrainingAdapter:
 
 
 
-def _load_returns_from_cache(*, symbols: list[str], cache_root: Path, required_years: int) -> np.ndarray:
-    if not symbols:
-        return np.array([], dtype=float)
-    now_year = datetime.now(timezone.utc).year
-    start_year = now_year - required_years + 1
-    series: list[np.ndarray] = []
-    for symbol in symbols:
-        safe = _safe_ticker_name(symbol)
-        symbol_dir = cache_root / safe / "1m"
-        closes: list[np.ndarray] = []
-        for year in range(start_year, now_year + 1):
-            path = symbol_dir / f"{safe}_1m_{year}.npz"
-            if not path.exists():
-                continue
-            try:
-                with np.load(path, mmap_mode="r") as payload:
-                    close = np.asarray(payload.get("c"), dtype=float)
-            except Exception:
-                continue
-            if close.size:
-                closes.append(close)
-        if not closes:
+@dataclass(frozen=True)
+class _SymbolReturns:
+    symbol: str
+    timestamps_ms: np.ndarray
+    returns: np.ndarray
+    earliest_ts_ms: int
+    latest_ts_ms: int
+
+
+@dataclass(frozen=True)
+class TrainingDataBundle:
+    returns: np.ndarray
+    metadata: dict[str, Any]
+
+
+def _normalize_timestamps_ms(values: np.ndarray) -> np.ndarray:
+    ts = np.asarray(values, dtype=np.int64).reshape(-1)
+    if not ts.size:
+        return ts
+    max_abs = int(np.max(np.abs(ts)))
+    # If epoch seconds are provided, convert to milliseconds.
+    if max_abs < 10**11:
+        ts = ts * 1000
+    return ts
+
+
+def _to_iso(ts_ms: int | None) -> str | None:
+    if ts_ms is None:
+        return None
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+
+
+def _resolve_effective_start_ms(*, now: datetime, earliest_cached_ms: int) -> int:
+    five_year_cutoff = int((now - timedelta(days=365 * 5)).timestamp() * 1000)
+    return min(five_year_cutoff, int(earliest_cached_ms))
+
+
+def _load_symbol_returns_from_cache(*, symbol: str, cache_root: Path) -> _SymbolReturns | None:
+    safe = _safe_ticker_name(symbol)
+    symbol_dir = cache_root / safe / "1m"
+    if not symbol_dir.exists():
+        return None
+
+    closes: list[np.ndarray] = []
+    timestamps: list[np.ndarray] = []
+    for path in sorted(symbol_dir.glob(f"{safe}_1m_*.npz")):
+        try:
+            with np.load(path, mmap_mode="r") as payload:
+                close = np.asarray(payload.get("c"), dtype=float).reshape(-1)
+                raw_ts = payload.get("t")
+        except Exception:
             continue
-        joined = np.concatenate(closes)
-        if joined.size < 3:
+        if raw_ts is None:
             continue
-        returns = np.diff(joined) / np.where(np.abs(joined[:-1]) < 1e-8, 1.0, joined[:-1])
-        returns = np.clip(returns, -0.25, 0.25)
-        series.append(returns.astype(float))
-    if not series:
-        return np.array([], dtype=float)
-    merged = np.concatenate(series)
-    return merged[np.isfinite(merged)]
+        ts = _normalize_timestamps_ms(np.asarray(raw_ts))
+        length = min(int(close.size), int(ts.size))
+        if length < 3:
+            continue
+        closes.append(close[:length])
+        timestamps.append(ts[:length])
+
+    if not closes or not timestamps:
+        return None
+    joined_close = np.concatenate(closes)
+    joined_ts = np.concatenate(timestamps)
+    order = np.argsort(joined_ts, kind="mergesort")
+    joined_close = joined_close[order]
+    joined_ts = joined_ts[order]
+
+    pct_returns = np.diff(joined_close) / np.where(np.abs(joined_close[:-1]) < 1e-8, 1.0, joined_close[:-1])
+    pct_returns = np.clip(pct_returns, -0.25, 0.25)
+    return_ts = joined_ts[1:]
+    finite_mask = np.isfinite(pct_returns) & np.isfinite(return_ts)
+    if not np.any(finite_mask):
+        return None
+    filtered_returns = np.asarray(pct_returns[finite_mask], dtype=float)
+    filtered_ts = np.asarray(return_ts[finite_mask], dtype=np.int64)
+    return _SymbolReturns(
+        symbol=symbol,
+        timestamps_ms=filtered_ts,
+        returns=filtered_returns,
+        earliest_ts_ms=int(np.min(joined_ts)),
+        latest_ts_ms=int(np.max(filtered_ts)),
+    )
+
+
+def _load_returns_from_cache(
+    *,
+    symbols: list[str],
+    cache_root: Path,
+    min_usable_history_years: int,
+    required_universe_pass_ratio: float = 1.0,
+    now: datetime | None = None,
+) -> TrainingDataBundle:
+    normalized_symbols = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
+    if not normalized_symbols:
+        return TrainingDataBundle(
+            returns=np.array([], dtype=float),
+            metadata={
+                "symbols_requested": [],
+                "symbols_used": [],
+                "symbols_excluded": [],
+                "effective_training_start": None,
+                "effective_training_end": None,
+                "per_symbol": {},
+                "universe_pass_ratio": 1.0,
+                "required_universe_pass_ratio": float(required_universe_pass_ratio),
+                "minimum_usable_history_years": int(min_usable_history_years),
+            },
+        )
+
+    now_utc = now or datetime.now(timezone.utc)
+    min_years = max(0.0, float(min_usable_history_years))
+    required_pass_ratio = max(0.0, min(1.0, float(required_universe_pass_ratio)))
+
+    per_symbol: dict[str, dict[str, Any]] = {}
+    used_symbols: list[str] = []
+    excluded: list[dict[str, Any]] = []
+    usable_returns: list[np.ndarray] = []
+    training_start_ms: int | None = None
+    training_end_ms: int | None = None
+
+    for symbol in normalized_symbols:
+        loaded = _load_symbol_returns_from_cache(symbol=symbol, cache_root=cache_root)
+        if loaded is None:
+            excluded.append({"symbol": symbol, "reason": "missing_or_unreadable_cache"})
+            per_symbol[symbol] = {"bars_used": 0, "years_used": 0.0, "excluded": True}
+            continue
+
+        effective_start_ms = _resolve_effective_start_ms(now=now_utc, earliest_cached_ms=loaded.earliest_ts_ms)
+        usable_mask = loaded.timestamps_ms >= effective_start_ms
+        usable_ts = loaded.timestamps_ms[usable_mask]
+        usable_rets = loaded.returns[usable_mask]
+
+        if usable_ts.size >= 2:
+            years_used = float((int(usable_ts[-1]) - int(usable_ts[0])) / (1000 * 60 * 60 * 24 * 365.25))
+        else:
+            years_used = 0.0
+        bars_used = int(usable_rets.size)
+
+        detail = {
+            "effective_start": _to_iso(int(effective_start_ms)),
+            "effective_end": _to_iso(int(usable_ts[-1])) if usable_ts.size else None,
+            "bars_used": bars_used,
+            "years_used": years_used,
+            "excluded": False,
+        }
+
+        history_tolerance_years = 2.0 / 365.25
+        if years_used + history_tolerance_years < min_years:
+            detail["excluded"] = True
+            detail["exclusion_reason"] = "insufficient_usable_history"
+            excluded.append(
+                {
+                    "symbol": symbol,
+                    "reason": "insufficient_usable_history",
+                    "bars_used": bars_used,
+                    "years_used": years_used,
+                }
+            )
+            per_symbol[symbol] = detail
+            continue
+
+        used_symbols.append(symbol)
+        per_symbol[symbol] = detail
+        usable_returns.append(usable_rets)
+        if usable_ts.size:
+            symbol_start = int(np.min(usable_ts))
+            symbol_end = int(np.max(usable_ts))
+            training_start_ms = symbol_start if training_start_ms is None else min(training_start_ms, symbol_start)
+            training_end_ms = symbol_end if training_end_ms is None else max(training_end_ms, symbol_end)
+
+    total = len(normalized_symbols)
+    pass_ratio = float(len(used_symbols) / total) if total else 1.0
+    merged_returns = np.concatenate(usable_returns) if usable_returns else np.array([], dtype=float)
+
+    metadata = {
+        "symbols_requested": normalized_symbols,
+        "symbols_used": used_symbols,
+        "symbols_excluded": excluded,
+        "effective_training_start": _to_iso(training_start_ms),
+        "effective_training_end": _to_iso(training_end_ms),
+        "per_symbol": per_symbol,
+        "universe_pass_ratio": pass_ratio,
+        "required_universe_pass_ratio": required_pass_ratio,
+        "minimum_usable_history_years": min_years,
+        "pass": pass_ratio >= required_pass_ratio,
+    }
+    return TrainingDataBundle(returns=merged_returns[np.isfinite(merged_returns)], metadata=metadata)
 
 
 def _build_regime_training_scenarios(settings: dict[str, Any], *, n_assets: int) -> list[dict[str, Any]]:
@@ -954,6 +1133,7 @@ def run_regime_training(
                 "candidate_leaderboard": adapter_output.candidate_leaderboards,
                 "champion_by_leg": adapter_output.champion_by_leg,
                 "governance_by_leg": adapter_output.governance_by_leg,
+                "training_data_audit": adapter_output.training_data_audit,
             },
             logs=logs,
         )
