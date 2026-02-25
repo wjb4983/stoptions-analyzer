@@ -4,7 +4,7 @@ import threading
 from datetime import datetime, timezone
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from backtesting.regime_training_pipeline import (
     RegimeLegTrainingConfig,
@@ -12,6 +12,7 @@ from backtesting.regime_training_pipeline import (
     RegimeTrainingResult,
     execute_regime_training_pipeline,
 )
+from models.regime_catalog import ModelDescriptor, list_models_for_leg
 from ui.regime_mapping import to_regime_leg_spec
 from config import (
     DEFAULT_REGIME_CONFIDENCE_THRESHOLDS,
@@ -330,6 +331,11 @@ GROUP_TITLES = {
 }
 
 STATUS_COLORS = {"green": "#1b8f3a", "yellow": "#b07d00", "red": "#b12704"}
+TRAINING_MODE_CHOICES = {
+    "single_model": "Single model",
+    "ensemble": "Ensemble",
+    "auto_model_search": "Auto-model-search",
+}
 
 
 class CreateRegimePage(ttk.Frame):
@@ -348,8 +354,11 @@ class CreateRegimePage(ttk.Frame):
             self.controller.state.active_regime_id = next(iter(self.controller.state.regime_definitions), None)
 
         self.regime_legs: list[dict[str, object]] = [self._build_default_leg("Trend Following")]
+        self.training_mode: str = "auto_model_search"
         self.selected_leg_index = 0
         self.leg_control_vars: dict[str, tk.Variable] = {}
+        self.hyperparameter_vars: dict[str, tk.Variable] = {}
+        self._model_selection_by_label: dict[str, ModelDescriptor] = {}
         self._is_training = False
 
         self.columnconfigure(0, weight=1)
@@ -378,6 +387,8 @@ class CreateRegimePage(ttk.Frame):
         self._build_summary_panel()
         self._build_bottom_panel()
 
+        self._load_editor_state_from_definition()
+
         self._refresh_legs_list()
         self._load_selected_leg_into_form()
         self._update_validation_and_actions()
@@ -388,11 +399,111 @@ class CreateRegimePage(ttk.Frame):
         for group in schema.values():
             for control in group:
                 controls[control["key"]] = control["default"]
+        selected_model_id, hyperparameters = self._default_model_config_for_leg_type(leg_type)
         return {
             "name": f"{leg_type} leg",
             "model_type": leg_type,
             "controls": controls,
+            "selected_model_id": selected_model_id,
+            "hyperparameters": hyperparameters,
         }
+
+    def _default_model_config_for_leg_type(self, leg_type: str) -> tuple[str, dict[str, Any]]:
+        leg = {
+            "name": f"{leg_type} leg",
+            "model_type": leg_type,
+            "controls": {},
+        }
+        mapped = to_regime_leg_spec(leg)
+        descriptors = list_models_for_leg(mapped.leg_spec.leg_family)
+        if not descriptors:
+            return "", {}
+        descriptor = descriptors[0]
+        return descriptor.model_name, dict(descriptor.hyperparameter_template)
+
+    def _load_editor_state_from_definition(self) -> None:
+        definition = self._active_regime_definition()
+        raw_legs = definition.get("legs") if isinstance(definition.get("legs"), list) else None
+        if raw_legs:
+            self.regime_legs = [self._normalize_leg_payload(item) for item in raw_legs]
+        else:
+            self.regime_legs = [self._build_default_leg("Trend Following")]
+        self.training_mode = str(definition.get("training_mode", "auto_model_search"))
+        if self.training_mode not in TRAINING_MODE_CHOICES:
+            self.training_mode = "auto_model_search"
+        self.selected_leg_index = max(0, min(self.selected_leg_index, len(self.regime_legs) - 1))
+
+    def _normalize_leg_payload(self, raw_leg: object) -> dict[str, object]:
+        if not isinstance(raw_leg, dict):
+            return self._build_default_leg("Trend Following")
+        leg_type = str(raw_leg.get("model_type", "Trend Following"))
+        if leg_type not in LEG_CONTROL_GROUPS:
+            leg_type = "Trend Following"
+        leg = self._build_default_leg(leg_type)
+        leg["name"] = str(raw_leg.get("name", leg["name"]))
+        controls = raw_leg.get("controls")
+        if isinstance(controls, dict):
+            for key, value in controls.items():
+                if key in leg["controls"]:
+                    try:
+                        leg["controls"][key] = float(value)
+                    except (TypeError, ValueError):
+                        pass
+        selected_model_id = raw_leg.get("selected_model_id")
+        if isinstance(selected_model_id, str):
+            leg["selected_model_id"] = selected_model_id
+        hyperparameters = raw_leg.get("hyperparameters")
+        if isinstance(hyperparameters, dict):
+            leg["hyperparameters"] = dict(hyperparameters)
+        self._ensure_leg_model_defaults(leg)
+        return leg
+
+    def _persist_editor_state(self) -> None:
+        controller = getattr(self, "controller", None)
+        if controller is None or not hasattr(controller, "state"):
+            return
+        regime_id = controller.state.active_regime_id
+        if not regime_id:
+            return
+        definition = controller.state.regime_definitions.get(regime_id)
+        if not isinstance(definition, dict):
+            return
+        definition["legs"] = [self._serialize_leg(leg) for leg in self.regime_legs]
+        definition["training_mode"] = getattr(self, "training_mode", "auto_model_search")
+        controller.persist_state()
+
+    @staticmethod
+    def _serialize_leg(leg: dict[str, object]) -> dict[str, object]:
+        return {
+            "name": str(leg.get("name", "Unnamed leg")),
+            "model_type": str(leg.get("model_type", "Trend Following")),
+            "controls": dict(leg.get("controls", {})),
+            "selected_model_id": str(leg.get("selected_model_id", "")),
+            "hyperparameters": dict(leg.get("hyperparameters", {})),
+        }
+
+    def _allowed_models_for_leg(self, leg: dict[str, object]) -> list[ModelDescriptor]:
+        mapped_leg = to_regime_leg_spec(leg)
+        return list_models_for_leg(mapped_leg.leg_spec.leg_family)
+
+    def _ensure_leg_model_defaults(self, leg: dict[str, object]) -> None:
+        descriptors = self._allowed_models_for_leg(leg)
+        if not descriptors:
+            leg["selected_model_id"] = ""
+            leg["hyperparameters"] = {}
+            return
+        selected = str(leg.get("selected_model_id", "")).strip()
+        descriptor_by_model = {item.model_name: item for item in descriptors}
+        if selected not in descriptor_by_model:
+            selected = descriptors[0].model_name
+            leg["selected_model_id"] = selected
+        selected_descriptor = descriptor_by_model[selected]
+        current_hyperparams = leg.get("hyperparameters")
+        if not isinstance(current_hyperparams, dict):
+            current_hyperparams = {}
+        merged_hyperparams = dict(selected_descriptor.hyperparameter_template)
+        merged_hyperparams.update(current_hyperparams)
+        leg["hyperparameters"] = merged_hyperparams
 
     def _build_legs_panel(self) -> None:
         ttk.Label(self.legs_panel, text="Regime legs", font=("Arial", 12, "bold")).pack(anchor="w")
@@ -454,6 +565,20 @@ class CreateRegimePage(ttk.Frame):
         action_row.pack(fill="x")
         ttk.Label(action_row, text="Train / export", font=("Arial", 12, "bold")).pack(side="left")
 
+        training_mode_frame = ttk.Frame(action_row)
+        training_mode_frame.pack(side="left", padx=(12, 8))
+        ttk.Label(training_mode_frame, text="Training mode").pack(side="left")
+        self.training_mode_var = tk.StringVar(value=TRAINING_MODE_CHOICES.get(self.training_mode, "Auto-model-search"))
+        self.training_mode_combo = ttk.Combobox(
+            training_mode_frame,
+            textvariable=self.training_mode_var,
+            values=list(TRAINING_MODE_CHOICES.values()),
+            state="readonly",
+            width=20,
+        )
+        self.training_mode_combo.pack(side="left", padx=(6, 0))
+        self.training_mode_combo.bind("<<ComboboxSelected>>", self._on_training_mode_selected)
+
         self.train_button = ttk.Button(action_row, text="Train", command=self._run_train)
         self.train_button.pack(side="left", padx=(12, 4))
         self.export_button = ttk.Button(action_row, text="Export", command=self._run_export)
@@ -496,6 +621,7 @@ class CreateRegimePage(ttk.Frame):
     def add_leg(self) -> None:
         self.regime_legs.append(self._build_default_leg("Trend Following"))
         self.selected_leg_index = len(self.regime_legs) - 1
+        self._persist_editor_state()
         self._refresh_legs_list()
         self._load_selected_leg_into_form()
 
@@ -504,6 +630,7 @@ class CreateRegimePage(ttk.Frame):
             return
         self.regime_legs.pop(self.selected_leg_index)
         self.selected_leg_index = max(0, self.selected_leg_index - 1)
+        self._persist_editor_state()
         self._refresh_legs_list()
         self._load_selected_leg_into_form()
 
@@ -516,6 +643,7 @@ class CreateRegimePage(ttk.Frame):
             self.regime_legs[self.selected_leg_index],
         )
         self.selected_leg_index = target
+        self._persist_editor_state()
         self._refresh_legs_list()
 
     def _on_leg_type_selected(self, _event=None) -> None:
@@ -530,19 +658,72 @@ class CreateRegimePage(ttk.Frame):
             for group in LEG_CONTROL_GROUPS[leg_type].values()
             for control in group
         }
+        selected_model_id, hyperparameters = self._default_model_config_for_leg_type(leg_type)
+        leg["selected_model_id"] = selected_model_id
+        leg["hyperparameters"] = hyperparameters
+        self._persist_editor_state()
         self._refresh_legs_list()
         self._load_selected_leg_into_form()
 
     def _load_selected_leg_into_form(self) -> None:
         leg = self._selected_leg()
+        self._ensure_leg_model_defaults(leg)
         if hasattr(self, "leg_type_var"):
             self.leg_type_var.set(str(leg["model_type"]))
+        if hasattr(self, "training_mode_var"):
+            self.training_mode_var.set(TRAINING_MODE_CHOICES.get(self.training_mode, "Auto-model-search"))
         if not hasattr(self, "form_container"):
             self._update_validation_and_actions()
             return
 
         for widget in self.form_container.winfo_children():
             widget.destroy()
+
+        selector_section = ttk.LabelFrame(self.form_container, text="Model selection", padding=6)
+        selector_section.pack(fill="x", pady=3)
+
+        ttk.Label(selector_section, text="Model").grid(row=0, column=0, sticky="w")
+        model_descriptors = self._allowed_models_for_leg(leg)
+        self._model_selection_by_label = {
+            f"{descriptor.display_name} ({descriptor.model_name})": descriptor
+            for descriptor in model_descriptors
+        }
+        if not self._model_selection_by_label:
+            self._model_selection_by_label = {"No models available": ModelDescriptor("", "", {})}
+        selected_model_id = str(leg.get("selected_model_id", ""))
+        default_label = next(
+            (
+                label
+                for label, descriptor in self._model_selection_by_label.items()
+                if descriptor.model_name == selected_model_id
+            ),
+            next(iter(self._model_selection_by_label)),
+        )
+        self.selected_model_var = tk.StringVar(value=default_label)
+        self.model_combo = ttk.Combobox(
+            selector_section,
+            textvariable=self.selected_model_var,
+            values=list(self._model_selection_by_label.keys()),
+            state="readonly",
+            width=42,
+        )
+        self.model_combo.grid(row=0, column=1, sticky="w", padx=4)
+        self.model_combo.bind("<<ComboboxSelected>>", self._on_leg_model_selected)
+
+        self.hyperparameter_vars = {}
+        hyperparameter_section = ttk.LabelFrame(self.form_container, text="Model hyperparameters", padding=6)
+        hyperparameter_section.pack(fill="x", pady=3)
+        hyperparameters = leg.get("hyperparameters", {})
+        if isinstance(hyperparameters, dict) and hyperparameters:
+            for row, key in enumerate(sorted(hyperparameters)):
+                ttk.Label(hyperparameter_section, text=key).grid(row=row, column=0, sticky="w")
+                var = tk.StringVar(value=str(hyperparameters[key]))
+                entry = ttk.Entry(hyperparameter_section, textvariable=var, width=20)
+                entry.grid(row=row, column=1, sticky="w", padx=4)
+                entry.bind("<FocusOut>", lambda _e, hyper_key=key: self._on_hyperparameter_edited(hyper_key))
+                self.hyperparameter_vars[key] = var
+        else:
+            ttk.Label(hyperparameter_section, text="No editable hyperparameters for selected model.").grid(row=0, column=0, sticky="w")
 
         self.leg_control_vars = {}
         schema = LEG_CONTROL_GROUPS[str(leg["model_type"])]
@@ -562,6 +743,43 @@ class CreateRegimePage(ttk.Frame):
 
         self._update_validation_and_actions()
 
+    def _on_training_mode_selected(self, _event=None) -> None:
+        selected_label = self.training_mode_var.get()
+        for mode, label in TRAINING_MODE_CHOICES.items():
+            if label == selected_label:
+                self.training_mode = mode
+                break
+        self._persist_editor_state()
+        self._update_validation_and_actions()
+
+    def _on_leg_model_selected(self, _event=None) -> None:
+        leg = self._selected_leg()
+        selected_descriptor = self._model_selection_by_label.get(self.selected_model_var.get())
+        if selected_descriptor is None:
+            return
+        leg["selected_model_id"] = selected_descriptor.model_name
+        leg["hyperparameters"] = dict(selected_descriptor.hyperparameter_template)
+        self._persist_editor_state()
+        self._load_selected_leg_into_form()
+
+    def _on_hyperparameter_edited(self, key: str) -> None:
+        leg = self._selected_leg()
+        hyperparameters = leg.get("hyperparameters")
+        if not isinstance(hyperparameters, dict):
+            hyperparameters = {}
+            leg["hyperparameters"] = hyperparameters
+        raw = self.hyperparameter_vars[key].get().strip()
+        if raw.lower() in {"true", "false"}:
+            parsed: Any = raw.lower() == "true"
+        else:
+            try:
+                parsed = float(raw) if "." in raw else int(raw)
+            except ValueError:
+                parsed = raw
+        hyperparameters[key] = parsed
+        self._persist_editor_state()
+        self._update_validation_and_actions()
+
     def _on_control_edited(self, key: str) -> None:
         leg = self._selected_leg()
         raw = self.leg_control_vars[key].get()
@@ -578,6 +796,7 @@ class CreateRegimePage(ttk.Frame):
             self.leg_control_vars[key].set(str(parsed))
 
         leg["controls"][key] = parsed
+        self._persist_editor_state()
         self._update_validation_and_actions()
 
     def _compute_insights_text(self, leg: dict[str, object]) -> str:
@@ -786,11 +1005,18 @@ class CreateRegimePage(ttk.Frame):
             cast_controls = {key: float(value) for key, value in controls.items()}
             mapped_leg = to_regime_leg_spec(leg)
             mapped_controls = {key: float(value) for key, value in mapped_leg.leg_spec.knobs.items()}
+            selected_model_id = str(leg.get("selected_model_id", "")).strip()
+            hyperparameters_raw = leg.get("hyperparameters", {})
+            hyperparameters: dict[str, Any] = {}
+            if isinstance(hyperparameters_raw, dict):
+                hyperparameters = dict(hyperparameters_raw)
             legs.append(
                 RegimeLegTrainingConfig(
                     name=str(leg.get("name", "Unnamed leg")),
                     model_type=mapped_leg.leg_spec.leg_family,
                     controls={**cast_controls, **mapped_controls},
+                    selected_model_id=selected_model_id,
+                    hyperparameters=hyperparameters,
                 )
             )
 
@@ -802,7 +1028,7 @@ class CreateRegimePage(ttk.Frame):
         return RegimeTrainingRequest(
             regime_id=regime_id,
             regime_name=regime_label,
-            model_choice="auto",
+            model_choice=str(getattr(self, "training_mode", "auto_model_search")),
             training_window={key: int(value) for key, value in training_window.items()},
             risk_limits=risk_limits,
             legs=tuple(legs),
