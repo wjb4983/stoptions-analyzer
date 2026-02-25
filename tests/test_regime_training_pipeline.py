@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from backtesting.regime_training_pipeline import (
     AdapterIssue,
@@ -209,3 +210,27 @@ def test_pipeline_validation_accepts_complete_model_specific_specs(tmp_path):
     result = execute_regime_training_pipeline(req)
 
     assert result.status == "success"
+
+
+def test_pipeline_persists_cache_audit_report_into_run_dir(tmp_path):
+    audit_path = tmp_path / "cache_audit_input.json"
+    audit_path.write_text(json.dumps({"pass": False, "failing_symbols": ["MSFT"]}), encoding="utf-8")
+
+    req = _request(
+        tmp_path,
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Trend",
+                model_type="timeseries_momentum",
+                controls={"model_confidence_min": 0.7, "turnover_limit": 0.2},
+            ),
+        ),
+    )
+    req.training_data_settings["cache_audit_report"] = str(audit_path)
+
+    result = execute_regime_training_pipeline(req, adapter=_StableAdapter())
+
+    assert "cache_audit_report" in result.artifact_paths
+    copied = Path(result.artifact_paths["cache_audit_report"])
+    assert copied.exists()
+    assert copied.name == "cache_audit_report.json"

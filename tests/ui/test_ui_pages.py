@@ -760,6 +760,7 @@ def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch
     monkeypatch.setattr(create_regime_page.messagebox, "showinfo", lambda title, msg: infos.append((title, msg)))
 
     page, _controller = _build_create_regime_training_page()
+    monkeypatch.setattr(create_regime_page.messagebox, "showinfo", lambda *_args, **_kwargs: None)
     page._append_structured_log = lambda **_kwargs: None
 
     page.regime_legs = [
@@ -819,6 +820,9 @@ def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch
     assert request.legs[1].controls["detection_threshold"] == pytest.approx(1.9)
     assert request.training_data_settings["required_history_years"] == 5
     assert isinstance(request.training_data_settings["scenario_settings"], list)
+    assert request.training_data_settings["cache_audit_strict"] is True
+    assert request.training_data_settings["min_symbol_coverage_ratio"] == 1.0
+    assert request.training_data_settings["min_bars_per_year"] == 1
 
 
 def test_create_regime_successful_training_appends_run_and_persists(monkeypatch):
@@ -911,3 +915,81 @@ def test_create_regime_run_export_builds_bundle_from_latest_manifest(monkeypatch
     assert infos and infos[-1][0] == "Export completed"
     assert "Bundle path: data/regime_exports/regime_export_run-1-abc" in infos[-1][1]
     assert any(entry.get("event") == "export_completed" for entry in logs)
+
+
+def test_prepare_regime_training_cache_selective_backfill_symbols(monkeypatch, tmp_path):
+    page, controller = _build_create_regime_training_page()
+    controller.api_key = "demo"
+
+    controller.state.tickers = ["AAPL", "MSFT"]
+    request = page._build_regime_training_request()
+    request.training_data_settings["cache_root"] = str(tmp_path)
+    request.training_data_settings["required_history_years"] = 3
+
+    captured = {}
+
+    monkeypatch.setattr(
+        create_regime_page,
+        "audit_universe_history",
+        lambda **_kwargs: {
+            "failing_symbols": ["MSFT"],
+            "failing_details": {"MSFT": {"missing_year_gaps": [2024], "corrupted_years": []}},
+            "pass": False,
+        },
+    )
+
+    def _fake_backfill(*, tickers, start_date, end_date, cache_root, api_key):
+        captured["tickers"] = list(tickers)
+        captured["start_date"] = start_date
+        captured["end_date"] = end_date
+        captured["cache_root"] = cache_root
+        captured["api_key"] = api_key
+
+    monkeypatch.setattr(create_regime_page, "run_backtest_cache", _fake_backfill)
+
+    report = page._prepare_regime_training_cache(request)
+
+    assert captured["tickers"] == ["MSFT"]
+    assert report["failing_symbols"] == ["MSFT"]
+    assert Path(report["artifact_path"]).exists()
+
+
+def test_create_regime_run_train_attaches_cache_audit_metadata(monkeypatch, tmp_path):
+    page, _controller = _build_create_regime_training_page()
+    monkeypatch.setattr(create_regime_page.messagebox, "showinfo", lambda *_args, **_kwargs: None)
+    page._append_structured_log = lambda **_kwargs: None
+
+    class _ImmediateThread:
+        def __init__(self, *, target, daemon):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(create_regime_page.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        create_regime_page.CreateRegimePage,
+        "_prepare_regime_training_cache",
+        lambda _self, _request: {"note": "ok", "failing_symbols": [], "artifact_path": str(tmp_path / "audit.json")},
+    )
+
+    calls = []
+
+    def _fake_run(request):
+        calls.append(dict(request.training_data_settings))
+        return RegimeTrainingResult(
+            run_id="run-1",
+            status="success",
+            metrics={"sharpe": 1.0},
+            artifact_paths={"manifest": "manifest.json"},
+            timestamps={"started_at": "2024-01-01T00:00:00+00:00", "completed_at": "2024-01-01T00:01:00+00:00"},
+            summary="ok",
+            metadata={},
+        )
+
+    monkeypatch.setattr(create_regime_page, "execute_regime_training_pipeline", _fake_run)
+
+    page._run_train()
+
+    assert calls
+    assert calls[0]["cache_audit_report"].endswith("audit.json")
