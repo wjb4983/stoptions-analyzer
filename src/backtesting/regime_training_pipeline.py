@@ -9,6 +9,10 @@ from typing import Any, Literal, Protocol
 
 import numpy as np
 
+from config import BACKTEST_CACHE_DIR
+from data_access.cache import _safe_ticker_name
+from backtesting.scenario_toolkit import ScenarioSpec, build_custom_scenarios
+
 from modeling_nextgen.calibration.probability import ProbabilityCalibrator
 from modeling_nextgen.validation.quality_gates import evaluate_modeling_quality_gates, promotion_blocked
 from models.deployment import PromotionGates
@@ -50,6 +54,7 @@ class RegimeTrainingRequest:
     training_window: dict[str, int]
     risk_limits: dict[str, float]
     output_dir: str | None = None
+    training_data_settings: dict[str, Any] = field(default_factory=dict)
 
     @property
     def regime_label(self) -> str:
@@ -179,11 +184,13 @@ class RegistryBackedRegimeTrainingAdapter:
                     candidate_payloads[candidate_id] = self._build_dataset(
                         candidate_model.required_feature_names(),
                         leg.controls,
+                        request=request,
                         seed=idx,
                     )
 
+                sample_size = max(64, int(next(iter(candidate_payloads.values()))[1].size))
                 folds = build_walk_forward_folds(
-                    total_bars=160,
+                    total_bars=sample_size,
                     train_bars=72,
                     validation_bars=24,
                     test_bars=24,
@@ -481,19 +488,49 @@ class RegistryBackedRegimeTrainingAdapter:
         required_features: tuple[str, ...],
         controls: dict[str, float],
         *,
+        request: RegimeTrainingRequest,
         seed: int,
         sample_size: int = 160,
     ) -> tuple[dict[str, np.ndarray], np.ndarray]:
         rng_seed = int(sum(abs(float(v)) for v in controls.values()) * 10_000) + seed
         rng = np.random.default_rng(rng_seed)
-        features: dict[str, np.ndarray] = {}
-        for feature_name in required_features:
-            features[feature_name] = rng.normal(loc=0.0, scale=1.0, size=sample_size).astype(float)
+        settings = dict(request.training_data_settings or {})
+        symbols = [str(s).strip().upper() for s in settings.get("universe_symbols", []) if str(s).strip()]
+        required_years = max(1, int(settings.get("required_history_years", 5)))
+        cache_root = Path(str(settings.get("cache_root", BACKTEST_CACHE_DIR)))
 
-        latent = np.zeros(sample_size, dtype=float)
+        base_returns = _load_returns_from_cache(symbols=symbols, cache_root=cache_root, required_years=required_years)
+        if base_returns.size < 32:
+            base_returns = rng.normal(loc=0.0, scale=0.01, size=max(sample_size, 160)).astype(float)
+
+        scenario_rows = _build_regime_training_scenarios(settings, n_assets=1)
+        if scenario_rows:
+            synthetic = [base_returns]
+            for payload in scenario_rows:
+                adjusted = _apply_training_path_adjustments(base_returns, payload.get("path_adjustments"))
+                shift = float(payload.get("spec").params.get("returns_shift", 0.0)) if payload.get("spec") else 0.0
+                synthetic.append(adjusted + shift)
+            data = np.concatenate(synthetic)
+        else:
+            data = base_returns
+
+        data = data[-max(sample_size, 160):]
+        if data.size < sample_size:
+            pad = rng.normal(loc=float(np.mean(data) if data.size else 0.0), scale=max(1e-6, float(np.std(data) if data.size else 0.01)), size=sample_size - data.size)
+            data = np.concatenate([pad, data])
+
+        features: dict[str, np.ndarray] = {}
+        n = data.size
+        for idx, feature_name in enumerate(required_features):
+            window = max(2, (idx % 20) + 2)
+            rolled = np.convolve(data, np.ones(window) / window, mode="same")
+            noise = rng.normal(loc=0.0, scale=0.001 + idx * 0.0001, size=n)
+            features[feature_name] = (rolled + noise).astype(float)
+
+        latent = np.zeros(n, dtype=float)
         for feature_values in features.values():
             latent += feature_values
-        latent += rng.normal(loc=0.0, scale=0.5, size=sample_size)
+        latent += rng.normal(loc=0.0, scale=0.25, size=n)
         labels = np.where(latent >= np.median(latent), 1.0, -1.0)
         return features, labels
 
@@ -561,6 +598,77 @@ class RegistryBackedRegimeTrainingAdapter:
                 aggregate[f"portfolio_avg_{metric_key}"] = float(np.mean(values))
         return aggregate
 
+
+
+def _load_returns_from_cache(*, symbols: list[str], cache_root: Path, required_years: int) -> np.ndarray:
+    if not symbols:
+        return np.array([], dtype=float)
+    now_year = datetime.now(timezone.utc).year
+    start_year = now_year - required_years + 1
+    series: list[np.ndarray] = []
+    for symbol in symbols:
+        safe = _safe_ticker_name(symbol)
+        symbol_dir = cache_root / safe / "1m"
+        closes: list[np.ndarray] = []
+        for year in range(start_year, now_year + 1):
+            path = symbol_dir / f"{safe}_1m_{year}.npz"
+            if not path.exists():
+                continue
+            try:
+                with np.load(path, mmap_mode="r") as payload:
+                    close = np.asarray(payload.get("c"), dtype=float)
+            except Exception:
+                continue
+            if close.size:
+                closes.append(close)
+        if not closes:
+            continue
+        joined = np.concatenate(closes)
+        if joined.size < 3:
+            continue
+        returns = np.diff(joined) / np.where(np.abs(joined[:-1]) < 1e-8, 1.0, joined[:-1])
+        returns = np.clip(returns, -0.25, 0.25)
+        series.append(returns.astype(float))
+    if not series:
+        return np.array([], dtype=float)
+    merged = np.concatenate(series)
+    return merged[np.isfinite(merged)]
+
+
+def _build_regime_training_scenarios(settings: dict[str, Any], *, n_assets: int) -> list[dict[str, Any]]:
+    scenario_settings = settings.get("scenario_settings", [])
+    if not isinstance(scenario_settings, list) or not scenario_settings:
+        return []
+    specs: list[ScenarioSpec] = []
+    for row in scenario_settings:
+        if not isinstance(row, dict):
+            continue
+        specs.append(
+            ScenarioSpec(
+                name=str(row.get("name", "scenario")),
+                scenario_type=str(row.get("scenario_type", "vol_shock")),
+                params=dict(row.get("params", {})),
+            )
+        )
+    if not specs:
+        return []
+    return build_custom_scenarios(specs=specs, n_assets=n_assets)
+
+
+def _apply_training_path_adjustments(values: np.ndarray, path_adjustments: dict[str, Any] | None) -> np.ndarray:
+    adjusted = np.asarray(values, dtype=float).copy()
+    if not path_adjustments or adjusted.size == 0:
+        return adjusted
+    n_periods = adjusted.shape[0]
+    crash_len = min(n_periods, int(path_adjustments.get("crash_len", 0)))
+    rebound_len = min(max(0, n_periods - crash_len), int(path_adjustments.get("rebound_len", 0)))
+    crash_shift = float(path_adjustments.get("crash_shift", 0.0))
+    rebound_shift = float(path_adjustments.get("rebound_shift", 0.0))
+    if crash_len > 0:
+        adjusted[:crash_len] += crash_shift
+    if rebound_len > 0:
+        adjusted[crash_len : crash_len + rebound_len] += rebound_shift
+    return adjusted
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

@@ -817,6 +817,8 @@ def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch
     assert request.legs[0].controls["sizing_cap"] == pytest.approx(0.07)
     assert request.legs[0].controls["stop_loss_pct"] == pytest.approx(0.11)
     assert request.legs[1].controls["detection_threshold"] == pytest.approx(1.9)
+    assert request.training_data_settings["required_history_years"] == 5
+    assert isinstance(request.training_data_settings["scenario_settings"], list)
 
 
 def test_create_regime_successful_training_appends_run_and_persists(monkeypatch):

@@ -148,6 +148,33 @@ DEFAULT_REGIME_CONFIDENCE_THRESHOLDS = {
     "alert_confidence": 0.70,
 }
 
+DEFAULT_REGIME_TRAINING_DATA_SETTINGS = {
+    "required_history_years": 5,
+    "enable_cache_backfill": True,
+    "scenario_settings": [
+        {
+            "name": "panic_crash",
+            "scenario_type": "crash_rebound_path",
+            "params": {"crash_periods": 60, "rebound_periods": 45, "crash_shift": -0.006, "rebound_shift": 0.0025},
+        },
+        {
+            "name": "bull_low_vol",
+            "scenario_type": "vol_shock",
+            "params": {"jump_multiplier": 0.65, "trigger_quantile": 0.9, "returns_shift": 0.0008},
+        },
+        {
+            "name": "broad_correlation_spike",
+            "scenario_type": "gap_risk",
+            "params": {"gap_jump": 0.03, "returns_shift": -0.0015},
+        },
+        {
+            "name": "intraday_liquidity_flush",
+            "scenario_type": "rate_shock",
+            "params": {"rate_shift": -0.0012, "duration_beta": 1.25},
+        },
+    ],
+}
+
 BACKTEST_STRATEGY_PRESETS = {
     "daily_trend": {
         "label": "Daily Trend",
