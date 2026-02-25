@@ -41,7 +41,7 @@ from ui.option_registry import (
     normalize_supported_option,
     validate_option_values,
 )
-from ui.workflow_preset_validator import validate_workflow_preset_payload
+from ui.workflow_preset_validator import WORKFLOW_PRESET_SCHEMA_VERSION, validate_workflow_preset_payload
 from utils.parsing import normalize_cache_root, parse_date, parse_float
 
 
@@ -123,6 +123,7 @@ STRESS_PROFILES: dict[str, dict[str, float]] = {
 }
 
 DEFAULT_RESEARCH_WORKFLOW_PRESETS: dict[str, Any] = {
+    "schema_version": WORKFLOW_PRESET_SCHEMA_VERSION,
     "default_preset": "balanced_baseline",
     "presets": {
         "balanced_baseline": {
