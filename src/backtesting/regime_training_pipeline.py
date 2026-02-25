@@ -13,6 +13,7 @@ import numpy as np
 from config import BACKTEST_CACHE_DIR
 from data_access.cache import _safe_ticker_name
 from backtesting.scenario_toolkit import ScenarioSpec, build_custom_scenarios
+from backtesting.schema_contracts import REGIME_TRAINING_MANIFEST_CONTRACT
 
 from modeling_nextgen.calibration.probability import ProbabilityCalibrator
 from modeling_nextgen.validation.quality_gates import evaluate_modeling_quality_gates, promotion_blocked
@@ -925,8 +926,8 @@ def _deterministic_run_id(request: RegimeTrainingRequest) -> str:
 
 def validate_regime_spec(request: RegimeTrainingRequest) -> list[str]:
     errors: list[str] = []
-    if int(request.schema_version) < 2:
-        errors.append("schema_version must be >= 2")
+    if int(request.schema_version) < 1:
+        errors.append("schema_version must be >= 1")
     if not request.regime_id.strip():
         errors.append("regime_id is required")
     if not request.regime_name.strip():
@@ -1164,7 +1165,10 @@ def write_regime_training_manifest(
     result: RegimeTrainingResult,
 ) -> Path:
     manifest_path = run_dir / "manifest.json"
+    reproducibility_payload = _build_reproducibility_payload(request)
     manifest = {
+        "manifest_schema_version": REGIME_TRAINING_MANIFEST_CONTRACT.current_version,
+        "manifest_schema_min_reader_version": REGIME_TRAINING_MANIFEST_CONTRACT.minimum_compatible_version,
         "run_id": result.run_id,
         "status": result.status,
         "request": asdict(request),
@@ -1175,11 +1179,35 @@ def write_regime_training_manifest(
         "errors": list(result.errors),
         "error_payload": result.error_payload,
         "artifact_paths": result.artifact_paths,
-        "metadata": result.metadata,
+        "metadata": {**result.metadata, "reproducibility": reproducibility_payload},
         "logs": list(result.logs),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return manifest_path
+
+
+def _json_sha256(payload: Any) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _build_reproducibility_payload(request: RegimeTrainingRequest) -> dict[str, Any]:
+    legs: dict[str, dict[str, str]] = {}
+    for idx, leg in enumerate(request.legs):
+        leg_key = f"{idx:02d}:{leg.name}"
+        legs[leg_key] = {
+            "model_id": leg.resolved_model_id,
+            "hyperparameters_checksum": _json_sha256(leg.hyperparameters),
+            "architecture_spec_checksum": _json_sha256(leg.architecture_spec or {}),
+            "calibration_spec_checksum": _json_sha256(leg.calibration_spec or {}),
+            "event_process_spec_checksum": _json_sha256(leg.event_process_spec or {}),
+        }
+
+    request_payload = asdict(request)
+    request_payload["legs"] = [asdict(leg) for leg in request.legs]
+    return {
+        "request_checksum": _json_sha256(request_payload),
+        "legs": legs,
+    }
 
 
 def run_regime_training(

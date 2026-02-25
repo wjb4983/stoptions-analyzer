@@ -22,6 +22,8 @@ def test_export_bundle_collects_expected_artifacts_and_metadata(tmp_path):
     diagnostics = _write_json(run_dir / "trend_diagnostics.json", {"accuracy": 0.71})
 
     manifest = {
+        "manifest_schema_version": "2.1.0",
+        "manifest_schema_min_reader_version": "2.0.0",
         "run_id": "abcd1234",
         "status": "success",
         "summary": "ok",
@@ -47,6 +49,10 @@ def test_export_bundle_collects_expected_artifacts_and_metadata(tmp_path):
     assert Path(bundle.exported_paths["trend_calibration_object"]).exists()
     assert Path(bundle.exported_paths["trend_diagnostics"]).exists()
 
+    bundle_manifest = json.loads(Path(bundle.bundle_manifest_path).read_text(encoding="utf-8"))
+    assert bundle_manifest["manifest_schema_version"] == "1.1.0"
+    assert bundle_manifest["manifest_schema_min_reader_version"] == "1.0.0"
+
     feature_schema = json.loads(Path(bundle.exported_paths["feature_schema"]).read_text(encoding="utf-8"))
     assert feature_schema["feature_schema_version"] == "regime-v2"
     assert feature_schema["required_features"] == ["ret_5d", "vol_20d"]
@@ -57,6 +63,8 @@ def test_export_bundle_versioning_is_deterministic(tmp_path):
     manifest_path = _write_json(
         run_dir / "manifest.json",
         {
+            "manifest_schema_version": "2.1.0",
+            "manifest_schema_min_reader_version": "2.0.0",
             "run_id": "run-z",
             "status": "success",
             "request": {"schema_version": 3, "regime_name": "Risk Off"},
@@ -78,6 +86,8 @@ def test_export_bundle_blocks_unintentional_synthetic_fallback(tmp_path):
     manifest_path = _write_json(
         run_dir / "manifest.json",
         {
+            "manifest_schema_version": "2.1.0",
+            "manifest_schema_min_reader_version": "2.0.0",
             "run_id": "run-fallback",
             "status": "success",
             "request": {
@@ -93,3 +103,21 @@ def test_export_bundle_blocks_unintentional_synthetic_fallback(tmp_path):
 
     with pytest.raises(ValueError, match="synthetic fallback"):
         export_regime_training_bundle(manifest_path, output_dir=tmp_path / "exports")
+
+
+def test_export_bundle_supports_n_minus_one_legacy_training_manifest(tmp_path):
+    run_dir = tmp_path / "run"
+    manifest_path = _write_json(
+        run_dir / "manifest.json",
+        {
+            "run_id": "legacy-run",
+            "status": "success",
+            "request": {"schema_version": 2, "regime_name": "Legacy"},
+            "metrics": {},
+            "metadata": {},
+            "artifact_paths": {},
+        },
+    )
+
+    bundle = export_regime_training_bundle(manifest_path, output_dir=tmp_path / "exports")
+    assert Path(bundle.bundle_manifest_path).exists()

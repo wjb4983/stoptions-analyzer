@@ -89,10 +89,17 @@ def test_pipeline_success_writes_manifest_and_returns_artifacts(tmp_path):
     manifest_path = result.artifact_paths["manifest"]
     payload = json.loads(open(manifest_path, encoding="utf-8").read())
     assert payload["status"] == "success"
+    assert payload["manifest_schema_version"] == "2.1.0"
+    assert payload["manifest_schema_min_reader_version"] == "2.0.0"
     assert payload["request"]["regime_name"] == "Risk On"
     assert payload["artifact_paths"]["spec"].endswith("regime_spec_snapshot.json")
     assert payload["metadata"]["candidate_leaderboard"] == {}
     assert payload["metadata"]["champion_by_leg"] == {}
+    reproducibility = payload["metadata"]["reproducibility"]
+    assert reproducibility["request_checksum"]
+    leg_fingerprint = reproducibility["legs"]["00:Trend"]
+    assert leg_fingerprint["hyperparameters_checksum"]
+    assert leg_fingerprint["architecture_spec_checksum"]
 
 
 def test_pipeline_validation_failure_returns_machine_readable_error(tmp_path):
