@@ -774,6 +774,14 @@ def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch
                 "max_position_pct": 0.07,
                 "max_drawdown_stop": 0.11,
             },
+            "architecture_spec": {
+                "schema_version": 1,
+                "layers": [{"type": "Dense", "units": 32, "activation": "relu"}],
+                "optimizer": {"name": "adam", "learning_rate": 0.001},
+                "loss": {"name": "binary_cross_entropy"},
+                "scheduler": {"name": "none"},
+                "training": {"batch_size": 16, "epochs": 12, "early_stopping": {"enabled": True, "patience": 3}},
+            },
         },
         {
             "name": "Regime Change leg",
@@ -816,6 +824,8 @@ def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch
     request = calls[0]
     assert [leg.model_type for leg in request.legs] == ["timeseries_momentum", "regime_change_detection"]
     assert request.legs[0].controls["sizing_cap"] == pytest.approx(0.07)
+    assert request.legs[0].architecture_spec is not None
+    assert request.legs[0].architecture_spec["layers"][0]["units"] == 32
     assert request.legs[0].controls["stop_loss_pct"] == pytest.approx(0.11)
     assert request.legs[1].controls["detection_threshold"] == pytest.approx(1.9)
     assert request.training_data_settings["required_history_years"] == 5

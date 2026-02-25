@@ -1,0 +1,45 @@
+{
+  "default_preset": "small_mlp",
+  "presets": {
+    "small_mlp": {
+      "schema_version": 1,
+      "layers": [
+        {"type": "Dense", "units": 64, "activation": "relu"},
+        {"type": "Dropout", "rate": 0.2},
+        {"type": "Dense", "units": 1, "activation": "sigmoid"}
+      ],
+      "optimizer": {"name": "adam", "learning_rate": 0.001, "weight_decay": 0.0},
+      "loss": {"name": "binary_cross_entropy"},
+      "scheduler": {"name": "none"},
+      "training": {"batch_size": 32, "epochs": 40, "early_stopping": {"enabled": true, "patience": 6, "min_delta": 0.0001}}
+    },
+    "temporal_mlp": {
+      "schema_version": 1,
+      "layers": [
+        {"type": "Dense", "units": 128, "activation": "relu"},
+        {"type": "Norm", "norm": "layer"},
+        {"type": "Dense", "units": 64, "activation": "relu"},
+        {"type": "Dropout", "rate": 0.15},
+        {"type": "Dense", "units": 1, "activation": "sigmoid"}
+      ],
+      "optimizer": {"name": "adamw", "learning_rate": 0.0008, "weight_decay": 0.0005},
+      "loss": {"name": "binary_cross_entropy"},
+      "scheduler": {"name": "cosine"},
+      "training": {"batch_size": 64, "epochs": 60, "early_stopping": {"enabled": true, "patience": 8, "min_delta": 0.0001}}
+    },
+    "residual_mlp": {
+      "schema_version": 1,
+      "layers": [
+        {"type": "Dense", "units": 256, "activation": "relu"},
+        {"type": "Dense", "units": 256, "activation": "relu", "residual": true},
+        {"type": "Norm", "norm": "batch"},
+        {"type": "Dropout", "rate": 0.2},
+        {"type": "Dense", "units": 1, "activation": "sigmoid"}
+      ],
+      "optimizer": {"name": "adamw", "learning_rate": 0.0005, "weight_decay": 0.001},
+      "loss": {"name": "focal"},
+      "scheduler": {"name": "one_cycle"},
+      "training": {"batch_size": 128, "epochs": 80, "early_stopping": {"enabled": true, "patience": 10, "min_delta": 0.0001}}
+    }
+  }
+}
