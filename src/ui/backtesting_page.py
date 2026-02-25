@@ -16,6 +16,13 @@ from backtesting.cache_runner import (
     run_time_series_momentum_backtest,
     run_walk_forward_backtest,
 )
+from backtesting.regime_backtest_adapter import (
+    RegimeBundleCompatibilityError,
+    RegimeBacktestContract,
+    RegimeBacktestOption,
+    discover_regime_backtest_options,
+    load_regime_backtest_contract,
+)
 from backtesting.scenario_toolkit import list_scenario_pack_templates
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PRESETS, DEFAULT_BACKTEST_SETTINGS
 from ui.backtesting_insights import (
@@ -96,6 +103,12 @@ class BacktestingPage(ttk.Frame):
         self._validation_messages: list[str] = []
         self._stale_preset_messages: list[str] = []
         self._updating_risk_limit_controls = False
+        self._regime_backtest_options: list[RegimeBacktestOption] = []
+        self._regime_option_lookup: dict[str, RegimeBacktestOption] = {}
+        self._active_regime_contract: RegimeBacktestContract | None = None
+        self._regime_loading_defaults = False
+        self._regime_locked_fields = True
+        self._regime_loaded_values: dict[str, str] = {}
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -190,6 +203,21 @@ class BacktestingPage(ttk.Frame):
             pady=(0, 6),
         )
 
+        ttk.Label(workflow_frame, text="Trained Regime").grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        self.trained_regime_var = tk.StringVar(value="")
+        self.trained_regime_combo = ttk.Combobox(workflow_frame, textvariable=self.trained_regime_var, state="readonly", values=[])
+        self.trained_regime_combo.grid(row=3, column=1, sticky="ew", padx=8, pady=6)
+        self.trained_regime_combo.bind("<<ComboboxSelected>>", self._on_trained_regime_selected)
+
+        lock_row = ttk.Frame(workflow_frame)
+        lock_row.grid(row=4, column=1, sticky="w", padx=8, pady=(0, 6))
+        self.regime_lock_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(lock_row, text="Lock loaded fields", variable=self.regime_lock_var, command=self._on_regime_lock_toggled).pack(side="left")
+        self.regime_provenance_var = tk.StringVar(value="No trained regime loaded.")
+        self.regime_diff_var = tk.StringVar(value="")
+        ttk.Label(workflow_frame, textvariable=self.regime_provenance_var, justify="left", foreground="#225577").grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
+        ttk.Label(workflow_frame, textvariable=self.regime_diff_var, justify="left", foreground="#995500", wraplength=640).grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
+
         strategy_frame = ttk.LabelFrame(run_setup_tab, text="Strategy")
         strategy_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=10)
         strategy_frame.columnconfigure(1, weight=1)
@@ -197,24 +225,26 @@ class BacktestingPage(ttk.Frame):
         row = 0
         ttk.Label(strategy_frame, text="Strategy").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.strategy_var = tk.StringVar(value="momentum")
-        strategy_combo = ttk.Combobox(
+        self.strategy_combo = ttk.Combobox(
             strategy_frame,
             textvariable=self.strategy_var,
             state="readonly",
             values=STRATEGIES,
         )
-        strategy_combo.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
-        strategy_combo.bind("<<ComboboxSelected>>", self._on_strategy_changed)
+        self.strategy_combo.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.strategy_combo.bind("<<ComboboxSelected>>", self._on_strategy_changed)
 
         row += 1
         ttk.Label(strategy_frame, text="Lookback (bars)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.lookback_days_var = tk.StringVar()
-        ttk.Entry(strategy_frame, textvariable=self.lookback_days_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.lookback_days_entry = ttk.Entry(strategy_frame, textvariable=self.lookback_days_var)
+        self.lookback_days_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Skip (bars)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
         self.skip_days_var = tk.StringVar()
-        ttk.Entry(strategy_frame, textvariable=self.skip_days_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self.skip_days_entry = ttk.Entry(strategy_frame, textvariable=self.skip_days_var)
+        self.skip_days_entry.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="Costs (bps)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
@@ -819,12 +849,14 @@ class BacktestingPage(ttk.Frame):
                 self.gov_min_oos_periods_var = var
             elif label == "Min Stability":
                 self.gov_min_stability_var = var
+                self.gov_min_stability_entry = entry
             elif label == "Max Turnover":
                 self.gov_max_turnover_var = var
             elif label == "Min Capacity":
                 self.gov_min_capacity_var = var
             elif label == "Max Signal Drift":
                 self.gov_max_signal_agreement_drift_var = var
+                self.gov_max_signal_agreement_drift_entry = entry
             elif label == "Max Fill Drift (bps)":
                 self.gov_max_fill_slippage_drift_bps_var = var
             else:
@@ -837,7 +869,8 @@ class BacktestingPage(ttk.Frame):
         self.gov_expected_signal_agreement_var = tk.StringVar(value="1.0")
         self.gov_expected_fill_slippage_bps_var = tk.StringVar(value="0.0")
         self.gov_expected_pnl_attribution_var = tk.StringVar(value="1.0")
-        ttk.Entry(expected_row, textvariable=self.gov_expected_signal_agreement_var, width=8).pack(side="left")
+        self.gov_expected_signal_agreement_entry = ttk.Entry(expected_row, textvariable=self.gov_expected_signal_agreement_var, width=8)
+        self.gov_expected_signal_agreement_entry.pack(side="left")
         ttk.Label(expected_row, text=" / ").pack(side="left")
         ttk.Entry(expected_row, textvariable=self.gov_expected_fill_slippage_bps_var, width=8).pack(side="left")
         ttk.Label(expected_row, text=" / ").pack(side="left")
@@ -892,10 +925,12 @@ class BacktestingPage(ttk.Frame):
 
         self._register_advanced_widgets()
         self._bind_validation_watchers()
+        self._bind_regime_override_watchers()
         self._build_results_tabs()
         self._on_strategy_changed()
         self._on_mode_changed()
         self._refresh_template_choices()
+        self._refresh_trained_regime_choices()
         self._update_validation_hint()
 
     def _append_governance_note(self) -> None:
@@ -2277,6 +2312,12 @@ class BacktestingPage(ttk.Frame):
             self._risk_limit_vars[key].set(self._format_risk_limit_value(key, float(raw_value)))
         finally:
             self._updating_risk_limit_controls = False
+        self._regime_backtest_options: list[RegimeBacktestOption] = []
+        self._regime_option_lookup: dict[str, RegimeBacktestOption] = {}
+        self._active_regime_contract: RegimeBacktestContract | None = None
+        self._regime_loading_defaults = False
+        self._regime_locked_fields = True
+        self._regime_loaded_values: dict[str, str] = {}
 
     def _on_risk_limit_entry_changed(self, key: str) -> None:
         if getattr(self, "_updating_risk_limit_controls", False):
@@ -2294,6 +2335,12 @@ class BacktestingPage(ttk.Frame):
             self._risk_limit_slider_vars[key].set(clamped)
         finally:
             self._updating_risk_limit_controls = False
+        self._regime_backtest_options: list[RegimeBacktestOption] = []
+        self._regime_option_lookup: dict[str, RegimeBacktestOption] = {}
+        self._active_regime_contract: RegimeBacktestContract | None = None
+        self._regime_loading_defaults = False
+        self._regime_locked_fields = True
+        self._regime_loaded_values: dict[str, str] = {}
 
     def _apply_options_risk_limit_preset(self, preset_name: str) -> None:
         presets = {
@@ -2326,6 +2373,12 @@ class BacktestingPage(ttk.Frame):
                 self._risk_limit_vars[key].set(self._format_risk_limit_value(key, float(value)))
         finally:
             self._updating_risk_limit_controls = False
+        self._regime_backtest_options: list[RegimeBacktestOption] = []
+        self._regime_option_lookup: dict[str, RegimeBacktestOption] = {}
+        self._active_regime_contract: RegimeBacktestContract | None = None
+        self._regime_loading_defaults = False
+        self._regime_locked_fields = True
+        self._regime_loaded_values: dict[str, str] = {}
 
     def _build_momentum_options(self, parent: ttk.Frame) -> None:
         self.momentum_options_frame = ttk.LabelFrame(parent, text="Momentum Options")
@@ -2515,6 +2568,162 @@ class BacktestingPage(ttk.Frame):
         if selected and selected not in names:
             self.template_var.set("")
 
+    def _refresh_trained_regime_choices(self) -> None:
+        self._regime_backtest_options = discover_regime_backtest_options(self.controller.state.regime_training_runs)
+        labels = ["(none)"] + [item.label for item in self._regime_backtest_options]
+        self._regime_option_lookup = {item.label: item for item in self._regime_backtest_options}
+        self.trained_regime_combo.configure(values=labels)
+        selected = self.trained_regime_var.get().strip()
+        if selected and selected not in labels:
+            self.trained_regime_var.set("(none)")
+
+    def _on_trained_regime_selected(self, _event: object | None = None) -> None:
+        selected = self.trained_regime_var.get().strip()
+        if not selected or selected == "(none)":
+            self._active_regime_contract = None
+            self._regime_loaded_values = {}
+            self.regime_provenance_var.set("No trained regime loaded.")
+            self.regime_diff_var.set("")
+            self._apply_regime_lock_state()
+            return
+        option = self._regime_option_lookup.get(selected)
+        if option is None:
+            return
+        try:
+            contract = load_regime_backtest_contract(option)
+        except RegimeBundleCompatibilityError as exc:
+            messagebox.showerror(
+                "Regime bundle compatibility error",
+                f"Cannot load selected trained regime.\n\n{exc}",
+            )
+            self.trained_regime_var.set("(none)")
+            self._active_regime_contract = None
+            self._regime_loaded_values = {}
+            self.regime_provenance_var.set("No trained regime loaded.")
+            self.regime_diff_var.set("")
+            self._apply_regime_lock_state()
+            return
+        self._active_regime_contract = contract
+        self._apply_regime_contract_defaults(contract)
+
+    def _apply_regime_contract_defaults(self, contract: RegimeBacktestContract) -> None:
+        var_map = self._regime_field_var_map()
+        self._regime_loading_defaults = True
+        try:
+            for key, value in contract.defaults.items():
+                var = var_map.get(key)
+                if var is None:
+                    continue
+                var.set(str(value))
+            selected_packs = [item.strip() for item in str(contract.defaults.get("selected_scenario_packs", "")).split(",") if item.strip()]
+            self._set_listbox_selection(self.scenario_pack_listbox, selected_packs, valid_options=self._scenario_pack_options)
+        finally:
+            self._regime_loading_defaults = False
+
+        self._regime_loaded_values = {
+            key: str(var.get())
+            for key, var in var_map.items()
+            if key in contract.defaults
+        }
+        self._regime_loaded_values["selected_scenario_packs"] = ",".join(selected_packs)
+
+        self.regime_provenance_var.set(
+            f"Loaded from regime {contract.regime_name} ({contract.source})\nManifest: {contract.manifest_path}"
+        )
+        self._apply_regime_lock_state()
+        self._refresh_regime_diff_indicator()
+
+    def _regime_field_var_map(self) -> dict[str, tk.Variable]:
+        return {
+            "strategy": self.strategy_var,
+            "lookback_days": self.lookback_days_var,
+            "skip_days": self.skip_days_var,
+            "portfolio_max_gross_exposure": self.portfolio_max_gross_var,
+            "portfolio_min_net_exposure": self.portfolio_min_net_var,
+            "portfolio_max_net_exposure": self.portfolio_max_net_var,
+            "portfolio_max_symbol_weight": self.portfolio_max_symbol_var,
+            "portfolio_max_sector_weight": self.portfolio_max_sector_var,
+            "governance_min_stability_score": self.gov_min_stability_var,
+            "governance_expected_signal_agreement": self.gov_expected_signal_agreement_var,
+            "governance_max_signal_agreement_drift": self.gov_max_signal_agreement_drift_var,
+            "stress_enable_historical_replay_regimes": self.stress_enable_historical_replay_var,
+        }
+
+    def _bind_regime_override_watchers(self) -> None:
+        for var in self._regime_field_var_map().values():
+            var.trace_add("write", lambda *_args: self._refresh_regime_diff_indicator())
+
+    def _current_regime_field_snapshot(self) -> dict[str, str]:
+        snapshot = {key: str(var.get()) for key, var in self._regime_field_var_map().items()}
+        snapshot["selected_scenario_packs"] = ",".join(self._selected_listbox_values(self.scenario_pack_listbox))
+        return snapshot
+
+    def _refresh_regime_diff_indicator(self) -> None:
+        if self._regime_loading_defaults:
+            return
+        if self._regime_locked_fields and self._active_regime_contract is not None:
+            self._apply_regime_contract_lock_enforcement()
+            return
+        if not self._regime_loaded_values:
+            self.regime_diff_var.set("")
+            return
+        current = self._current_regime_field_snapshot()
+        changed = [key for key, expected in self._regime_loaded_values.items() if current.get(key, "") != expected]
+        if not changed:
+            self.regime_diff_var.set("No overrides yet.")
+            return
+        self.regime_diff_var.set("Overrides: " + ", ".join(changed))
+
+    def _apply_regime_contract_lock_enforcement(self) -> None:
+        if not self._regime_loaded_values:
+            return
+        self._regime_loading_defaults = True
+        try:
+            for key, expected in self._regime_loaded_values.items():
+                if key == "selected_scenario_packs":
+                    packs = [item.strip() for item in expected.split(",") if item.strip()]
+                    self._set_listbox_selection(self.scenario_pack_listbox, packs, valid_options=self._scenario_pack_options)
+                    continue
+                var = self._regime_field_var_map().get(key)
+                if var is not None and str(var.get()) != expected:
+                    var.set(expected)
+        finally:
+            self._regime_loading_defaults = False
+        self.regime_diff_var.set("Overrides disabled while lock is enabled.")
+
+    def _on_regime_lock_toggled(self) -> None:
+        self._regime_locked_fields = bool(self.regime_lock_var.get())
+        self._apply_regime_lock_state()
+        self._refresh_regime_diff_indicator()
+
+    def _apply_regime_lock_state(self) -> None:
+        enabled = bool(self._active_regime_contract)
+        state = "disabled" if enabled and self._regime_locked_fields else "normal"
+        for widget in (
+            self.strategy_combo,
+            self.lookback_days_entry,
+            self.skip_days_entry,
+            self.portfolio_max_gross_entry,
+            self.portfolio_min_net_entry,
+            self.portfolio_max_net_entry,
+            self.portfolio_max_symbol_entry,
+            self.portfolio_max_sector_entry,
+            self.gov_min_stability_entry,
+            self.gov_expected_signal_agreement_entry,
+            self.gov_max_signal_agreement_drift_entry,
+            self.scenario_pack_listbox,
+        ):
+            try:
+                widget.configure(state=state)
+            except tk.TclError:
+                pass
+        if not enabled:
+            self.regime_lock_var.set(False)
+            self._regime_locked_fields = False
+            return
+        if self.regime_lock_var.get() != self._regime_locked_fields:
+            self.regime_lock_var.set(self._regime_locked_fields)
+
     def _migrate_backtest_settings(self, settings: dict[str, object]) -> tuple[dict[str, object], list[str], bool]:
         migrated = dict(settings)
         warnings: list[str] = []
@@ -2593,6 +2802,7 @@ class BacktestingPage(ttk.Frame):
         self.controller.state.backtest_settings["selected_template"] = template_name
         self.controller.persist_state()
         self._refresh_template_choices()
+        self._refresh_trained_regime_choices()
         messagebox.showinfo("Saved", f"Template '{template_name}' saved.")
 
     def load_template(self) -> None:
@@ -2607,6 +2817,9 @@ class BacktestingPage(ttk.Frame):
         messagebox.showinfo("Loaded", f"Template '{template_name}' loaded.")
 
     def refresh(self) -> None:
+        self._refresh_trained_regime_choices()
+        if not self.trained_regime_var.get().strip():
+            self.trained_regime_var.set("(none)")
         settings = dict(DEFAULT_BACKTEST_SETTINGS)
         settings.update(self.controller.state.backtest_settings)
         settings, migration_messages, migration_changed = self._migrate_backtest_settings(settings)
@@ -2625,6 +2838,9 @@ class BacktestingPage(ttk.Frame):
         if selected_preset not in {"custom", *BACKTEST_STRATEGY_PRESETS.keys()}:
             selected_preset = "custom"
         self.preset_var.set(self._preset_key_to_display.get(selected_preset, "Custom"))
+        selected_trained_regime = str(settings.get("selected_trained_regime", "(none)"))
+        regime_labels = set(self.trained_regime_combo.cget("values"))
+        self.trained_regime_var.set(selected_trained_regime if selected_trained_regime in regime_labels else "(none)")
 
         self.lookback_days_var.set(str(settings.get("lookback_days", "90")))
         self.skip_days_var.set(str(settings.get("skip_days", "5")))
@@ -2810,6 +3026,7 @@ class BacktestingPage(ttk.Frame):
         self.logs_text.delete("1.0", tk.END)
         self.logs_text.insert("1.0", str(settings.get("notes", "")))
         self._refresh_template_choices()
+        self._refresh_trained_regime_choices()
         self._on_strategy_changed()
         self._on_mode_changed()
         self._update_validation_hint()
@@ -2962,11 +3179,13 @@ class BacktestingPage(ttk.Frame):
             "show_advanced_controls": bool(self.show_advanced_controls_var.get()),
             "selected_preset": self._preset_display_to_key.get(self.preset_var.get().strip(), "custom"),
             "selected_template": self.template_var.get().strip(),
+            "selected_trained_regime": self.trained_regime_var.get().strip(),
             "schema_version": BACKTEST_SETTINGS_SCHEMA_VERSION,
             **xsmom_params,
         }
         self.controller.persist_state()
         self._refresh_template_choices()
+        self._refresh_trained_regime_choices()
         if show_confirmation:
             messagebox.showinfo("Saved", "Backtesting parameters saved.")
         return True
