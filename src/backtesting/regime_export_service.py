@@ -7,8 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backtesting.schema_contracts import (
+    EXPORT_BUNDLE_MANIFEST_CONTRACT,
+    REGIME_TRAINING_MANIFEST_CONTRACT,
+)
+
 DEFAULT_REGIME_EXPORT_OUTPUT_DIR = Path("data/regime_exports")
-EXPORT_SCHEMA_VERSION = "1.0"
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,7 @@ def export_regime_training_bundle(
 ) -> RegimeExportBundle:
     manifest_path = Path(training_manifest_path)
     payload = _read_manifest(manifest_path)
+    _validate_training_manifest_contract(payload)
 
     run_id = str(payload.get("run_id", "")).strip()
     if not run_id:
@@ -97,7 +102,7 @@ def export_regime_training_bundle(
     copied["evaluation_report"] = str(evaluation_report_path)
 
     provenance_payload = {
-        "export_schema_version": EXPORT_SCHEMA_VERSION,
+        "export_schema_version": EXPORT_BUNDLE_MANIFEST_CONTRACT.current_version,
         "bundle_id": bundle_id,
         "deployment_version": deployment_version,
         "source_run": {
@@ -115,8 +120,10 @@ def export_regime_training_bundle(
     copied["provenance"] = str(provenance_path)
 
     bundle_manifest_payload = {
+        "manifest_schema_version": EXPORT_BUNDLE_MANIFEST_CONTRACT.current_version,
+        "manifest_schema_min_reader_version": EXPORT_BUNDLE_MANIFEST_CONTRACT.minimum_compatible_version,
         "bundle_id": bundle_id,
-        "bundle_version": EXPORT_SCHEMA_VERSION,
+        "bundle_version": EXPORT_BUNDLE_MANIFEST_CONTRACT.current_version,
         "deployment_version": deployment_version,
         "run_id": run_id,
         "bundle_dir": str(bundle_dir),
@@ -215,4 +222,21 @@ def _validate_synthetic_fallback_export_guard(payload: dict[str, Any]) -> None:
         raise ValueError(
             "Export blocked: synthetic fallback was used without "
             "request.training_data_settings.allow_synthetic_fallback=true"
+        )
+
+
+def _validate_training_manifest_contract(payload: dict[str, Any]) -> None:
+    version = str(payload.get("manifest_schema_version", "")).strip()
+    if not version:
+        legacy_schema_version = int(payload.get("request", {}).get("schema_version", 0) or 0)
+        if legacy_schema_version >= 2:
+            return
+        raise ValueError(
+            "Training manifest missing manifest_schema_version and does not satisfy legacy compatibility requirements."
+        )
+    if not REGIME_TRAINING_MANIFEST_CONTRACT.is_compatible(version):
+        raise ValueError(
+            f"Training manifest schema '{version}' is incompatible with exporter "
+            f"(supported: {REGIME_TRAINING_MANIFEST_CONTRACT.minimum_compatible_version}"
+            f"-{REGIME_TRAINING_MANIFEST_CONTRACT.current_version})."
         )

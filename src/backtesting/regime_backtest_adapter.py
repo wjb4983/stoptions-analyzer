@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
-SUPPORTED_BUNDLE_SCHEMA_MAJOR = 1
-
+from backtesting.schema_contracts import (
+    BACKTEST_HYDRATION_PAYLOAD_CONTRACT,
+    EXPORT_BUNDLE_MANIFEST_CONTRACT,
+    REGIME_TRAINING_MANIFEST_CONTRACT,
+)
 
 class RegimeBundleCompatibilityError(ValueError):
     """Raised when a regime bundle/manifest cannot be safely consumed."""
@@ -89,7 +91,8 @@ def discover_regime_backtest_options(
 
 def load_regime_backtest_contract(option: RegimeBacktestOption) -> RegimeBacktestContract:
     payload = _read_manifest_payload(Path(option.manifest_path), source=option.source)
-    request = payload.get("request", {}) if isinstance(payload.get("request"), dict) else {}
+    training_payload = _normalize_training_manifest_payload(payload)
+    request = training_payload.get("request", {}) if isinstance(training_payload.get("request"), dict) else {}
     training_window = request.get("training_window", {}) if isinstance(request.get("training_window"), dict) else {}
     risk_limits = request.get("risk_limits", {}) if isinstance(request.get("risk_limits"), dict) else {}
     training_data_settings = (
@@ -121,7 +124,8 @@ def load_regime_backtest_contract(option: RegimeBacktestOption) -> RegimeBacktes
         "stress_enable_historical_replay_regimes": bool(scenario_names),
         "selected_scenario_packs": ",".join(scenario_names),
     }
-    regime_name = str(request.get("regime_name", payload.get("run_id", option.option_id))).strip() or option.option_id
+    defaults["hydration_schema_version"] = BACKTEST_HYDRATION_PAYLOAD_CONTRACT.current_version
+    regime_name = str(request.get("regime_name", training_payload.get("run_id", option.option_id))).strip() or option.option_id
     return RegimeBacktestContract(
         option_id=option.option_id,
         regime_name=regime_name,
@@ -147,24 +151,19 @@ def _read_manifest_payload(manifest_path: Path, *, source: str) -> dict[str, Any
         raise RegimeBundleCompatibilityError(f"Manifest at '{manifest_path}' must be a JSON object.")
 
     if source != "bundle":
+        _ensure_training_manifest_compatible(payload)
         return payload
 
-    bundle_version_raw = payload.get("bundle_version", "")
-    bundle_version = str(bundle_version_raw).strip()
+    bundle_version = str(payload.get("manifest_schema_version", payload.get("bundle_version", ""))).strip()
     if not bundle_version:
         raise RegimeBundleCompatibilityError(
             "Bundle manifest missing 'bundle_version'. Re-export using the latest regime export workflow."
         )
-    try:
-        major = int(bundle_version.split(".", 1)[0])
-    except ValueError as exc:
-        raise RegimeBundleCompatibilityError(
-            f"Unsupported bundle_version='{bundle_version}'. Expected semantic version format like '1.0'."
-        ) from exc
-    if major != SUPPORTED_BUNDLE_SCHEMA_MAJOR:
+    if not EXPORT_BUNDLE_MANIFEST_CONTRACT.is_compatible(bundle_version):
         raise RegimeBundleCompatibilityError(
             f"Bundle schema v{bundle_version} is not supported by this UI. "
-            f"Supported major version: {SUPPORTED_BUNDLE_SCHEMA_MAJOR}. "
+            f"Supported version range: {EXPORT_BUNDLE_MANIFEST_CONTRACT.minimum_compatible_version}"
+            f"-{EXPORT_BUNDLE_MANIFEST_CONTRACT.current_version}. "
             "Re-export with a compatible app version."
         )
 
@@ -177,9 +176,37 @@ def _read_manifest_payload(manifest_path: Path, *, source: str) -> dict[str, Any
     return _read_manifest_payload(Path(training_manifest_path), source="training_run")
 
 
+def _ensure_training_manifest_compatible(payload: dict[str, Any]) -> None:
+    version = str(payload.get("manifest_schema_version", "")).strip()
+    if version:
+        if not REGIME_TRAINING_MANIFEST_CONTRACT.is_compatible(version):
+            raise RegimeBundleCompatibilityError(
+                f"Training manifest schema v{version} is not compatible with this loader. "
+                f"Supported version range: {REGIME_TRAINING_MANIFEST_CONTRACT.minimum_compatible_version}"
+                f"-{REGIME_TRAINING_MANIFEST_CONTRACT.current_version}."
+            )
+        return
+
+    # N-1 adapter for legacy manifests (pre-contract-field). Treat request schema >=2 as 2.0.0.
+    legacy_request = payload.get("request", {}) if isinstance(payload.get("request"), dict) else {}
+    legacy_schema = int(legacy_request.get("schema_version", 0) or 0)
+    if legacy_schema < 2:
+        raise RegimeBundleCompatibilityError(
+            "Legacy training manifest is too old for hydration. Expected request.schema_version >= 2."
+        )
+
+
+def _normalize_training_manifest_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("manifest_schema_version"):
+        return payload
+    normalized = dict(payload)
+    normalized["manifest_schema_version"] = REGIME_TRAINING_MANIFEST_CONTRACT.minimum_compatible_version
+    normalized.setdefault("metadata", {})
+    return normalized
+
+
 def _strategy_from_model_choice(model_choice: str) -> str:
     normalized = model_choice.strip().lower()
     if normalized in {"cross_sectional", "xsmom", "cross_sectional_momentum"}:
         return "xsmom"
     return "momentum"
-
