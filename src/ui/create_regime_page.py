@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
@@ -14,8 +15,8 @@ from backtesting.regime_training_pipeline import (
     execute_regime_training_pipeline,
 )
 from backtesting.cache_runner import run_backtest_cache
+from data_access.cache_audit import audit_universe_history
 from backtesting.regime_export_service import export_regime_training_bundle
-from data_access.cache import _safe_ticker_name
 from models.regime_catalog import ModelDescriptor, list_models_for_leg
 from ui.regime_mapping import to_regime_leg_spec
 from config import (
@@ -1109,10 +1110,46 @@ class CreateRegimePage(ttk.Frame):
 
         def _worker() -> None:
             try:
-                cache_note = self._ensure_regime_training_cache(request)
-                if cache_note:
-                    self.after(0, lambda note=cache_note: self._append_structured_log(level="info", event="cache_check", details=note))
+                cache_report = self._prepare_regime_training_cache(request)
+                if cache_report.get("note"):
+                    self.after(
+                        0,
+                        lambda note=str(cache_report.get("note")): self._append_structured_log(
+                            level="info", event="cache_check", details=note
+                        ),
+                    )
+                if cache_report.get("failing_symbols"):
+                    self.after(
+                        0,
+                        lambda payload=cache_report: self._append_structured_log(
+                            level="warning",
+                            event="cache_audit_failures",
+                            details=(
+                                f"failing_symbols={payload.get('failing_symbols', [])}; "
+                                f"details={payload.get('failing_details', {})}"
+                            ),
+                        ),
+                    )
+                artifact_path = str(cache_report.get("artifact_path", "")).strip()
+                if artifact_path:
+                    request.training_data_settings["cache_audit_report"] = artifact_path
                 result = execute_regime_training_pipeline(request)
+                metadata = dict(result.metadata)
+                if cache_report.get("artifact_path"):
+                    metadata["cache_audit_report"] = str(cache_report["artifact_path"])
+                result = RegimeTrainingResult(
+                    run_id=result.run_id,
+                    status=result.status,
+                    metrics=result.metrics,
+                    artifact_paths=result.artifact_paths,
+                    timestamps=result.timestamps,
+                    warnings=result.warnings,
+                    errors=result.errors,
+                    error_payload=result.error_payload,
+                    summary=result.summary,
+                    metadata=metadata,
+                    logs=result.logs,
+                )
             except Exception as exc:
                 self.after(0, lambda error=exc: self._on_training_failed(error))
                 return
@@ -1123,44 +1160,81 @@ class CreateRegimePage(ttk.Frame):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-
-
-    def _ensure_regime_training_cache(self, request: RegimeTrainingRequest) -> str:
+    def _prepare_regime_training_cache(self, request: RegimeTrainingRequest) -> dict[str, Any]:
         settings = dict(request.training_data_settings or {})
-        if not bool(settings.get("enable_cache_backfill", True)):
-            return "cache backfill disabled"
-
         symbols = [str(item).strip().upper() for item in settings.get("universe_symbols", []) if str(item).strip()]
         if not symbols:
-            return "no universe symbols configured for cache check"
+            return {"note": "no universe symbols configured for cache check", "failing_symbols": []}
 
         required_years = max(1, int(settings.get("required_history_years", 5)))
         cache_root = Path(str(settings.get("cache_root", BACKTEST_CACHE_DIR))).expanduser()
-        end_date = date.today()
-        start_date = end_date - timedelta(days=365 * required_years + 7)
+        strict = bool(settings.get("cache_audit_strict", True))
+        min_symbol_coverage_ratio = float(settings.get("min_symbol_coverage_ratio", 1.0))
+        min_bars_per_year = max(1, int(settings.get("min_bars_per_year", 1)))
 
-        missing: list[str] = []
-        for symbol in symbols:
-            safe = _safe_ticker_name(symbol)
-            symbol_dir = cache_root / safe / "1m"
-            year_files = [symbol_dir / f"{safe}_1m_{year}.npz" for year in range(start_date.year, end_date.year + 1)]
-            if not any(path.exists() for path in year_files):
-                missing.append(symbol)
+        report = audit_universe_history(
+            symbols=symbols,
+            cache_root=cache_root,
+            min_years=required_years,
+            timeframe="1m",
+            strict=strict,
+            min_symbol_coverage_ratio=min_symbol_coverage_ratio,
+            min_bars_per_year=min_bars_per_year,
+        )
+        report["requested_symbols"] = symbols
+        report["run_audit_created_at"] = datetime.now(timezone.utc).isoformat()
 
-        if not missing:
-            return f"cache ready for {len(symbols)} symbol(s)"
+        run_root = Path("data/regime_training_runs")
+        run_root.mkdir(parents=True, exist_ok=True)
+        report_path = run_root / f"run_audit_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')}.json"
+        report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+        failing_symbols = [str(item).upper() for item in report.get("failing_symbols", [])]
+        if not failing_symbols:
+            return {
+                "note": f"cache audit passed for {len(symbols)} symbol(s)",
+                "failing_symbols": [],
+                "failing_details": {},
+                "artifact_path": str(report_path),
+            }
+
+        if not bool(settings.get("enable_cache_backfill", True)):
+            return {
+                "note": (
+                    f"cache audit failed for {len(failing_symbols)} symbol(s), backfill disabled"
+                ),
+                "failing_symbols": failing_symbols,
+                "failing_details": report.get("failing_details", {}),
+                "artifact_path": str(report_path),
+            }
 
         if not self.controller.api_key:
-            return f"cache incomplete for {len(missing)} symbol(s), skipped backfill (missing API key)"
+            return {
+                "note": (
+                    f"cache audit failed for {len(failing_symbols)} symbol(s), skipped backfill (missing API key)"
+                ),
+                "failing_symbols": failing_symbols,
+                "failing_details": report.get("failing_details", {}),
+                "artifact_path": str(report_path),
+            }
 
+        end_date = date.today()
+        start_date = end_date - timedelta(days=365 * required_years + 7)
         run_backtest_cache(
-            tickers=symbols,
+            tickers=failing_symbols,
             start_date=start_date,
             end_date=end_date,
             cache_root=cache_root,
             api_key=self.controller.api_key,
         )
-        return f"cache backfill requested for {len(symbols)} symbol(s) over {required_years} years"
+        return {
+            "note": (
+                f"cache backfill requested for failing symbols={failing_symbols} over {required_years} years"
+            ),
+            "failing_symbols": failing_symbols,
+            "failing_details": report.get("failing_details", {}),
+            "artifact_path": str(report_path),
+        }
 
     def _on_training_result_failed(self, result: RegimeTrainingResult) -> None:
         self._is_training = False

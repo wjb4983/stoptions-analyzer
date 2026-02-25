@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -825,6 +826,20 @@ def _flatten_artifact_locations(
     return paths
 
 
+
+
+def _persist_cache_audit_report(request: RegimeTrainingRequest, run_dir: Path) -> str | None:
+    settings = dict(request.training_data_settings or {})
+    source_raw = str(settings.get("cache_audit_report", "")).strip()
+    if not source_raw:
+        return None
+    source = Path(source_raw)
+    if not source.exists() or not source.is_file():
+        return None
+    target = run_dir / "cache_audit_report.json"
+    shutil.copyfile(source, target)
+    return str(target)
+
 def write_regime_training_manifest(
     *,
     run_dir: Path,
@@ -865,6 +880,7 @@ def run_regime_training(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     spec_path = save_regime_spec(request, run_dir)
+    cache_audit_artifact = _persist_cache_audit_report(request, run_dir)
     validation_errors = validate_regime_spec(request)
     if validation_errors:
         completed_at = _utc_now_iso()
@@ -877,7 +893,7 @@ def run_regime_training(
             run_id=run_id,
             status="failed",
             metrics={},
-            artifact_paths={"spec": str(spec_path)},
+            artifact_paths={"spec": str(spec_path), **({"cache_audit_report": cache_audit_artifact} if cache_audit_artifact else {})},
             timestamps={"started_at": started_at, "completed_at": completed_at},
             warnings=(),
             errors=tuple(validation_errors),
@@ -898,7 +914,7 @@ def run_regime_training(
         completed_at = _utc_now_iso()
         warnings = adapter_output.warnings()
         adapter_errors = adapter_output.errors()
-        artifacts = {"spec": str(spec_path), **_flatten_artifact_locations(adapter_output)}
+        artifacts = {"spec": str(spec_path), **_flatten_artifact_locations(adapter_output), **({"cache_audit_report": cache_audit_artifact} if cache_audit_artifact else {})}
         oos_metrics_payload = {
             leg_name: {
                 "model_id": leg_metrics.model_id,
@@ -953,7 +969,7 @@ def run_regime_training(
             run_id=run_id,
             status="failed",
             metrics={},
-            artifact_paths={"spec": str(spec_path)},
+            artifact_paths={"spec": str(spec_path), **({"cache_audit_report": cache_audit_artifact} if cache_audit_artifact else {})},
             timestamps={"started_at": started_at, "completed_at": completed_at},
             warnings=(),
             errors=(str(exc),),

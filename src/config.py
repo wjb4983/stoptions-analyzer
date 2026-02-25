@@ -151,6 +151,9 @@ DEFAULT_REGIME_CONFIDENCE_THRESHOLDS = {
 DEFAULT_REGIME_TRAINING_DATA_SETTINGS = {
     "required_history_years": 5,
     "enable_cache_backfill": True,
+    "cache_audit_strict": True,
+    "min_symbol_coverage_ratio": 1.0,
+    "min_bars_per_year": 1,
     "scenario_settings": [
         {
             "name": "panic_crash",
