@@ -12,6 +12,7 @@ from backtesting.regime_training_pipeline import (
     RegimeTrainingResult,
     execute_regime_training_pipeline,
 )
+from backtesting.regime_export_service import export_regime_training_bundle
 from models.regime_catalog import ModelDescriptor, list_models_for_leg
 from ui.regime_mapping import to_regime_leg_spec
 from config import (
@@ -1158,11 +1159,23 @@ class CreateRegimePage(ttk.Frame):
             return
 
         artifact_path = str(latest.get("artifact_path", ""))
-        summary = str(latest.get("summary", ""))
-        self._append_structured_log(level="info", event="export_completed", details=f"artifact={artifact_path}")
+        if not artifact_path.strip():
+            self._append_structured_log(level="warning", event="export_blocked", details="missing_manifest_path")
+            messagebox.showinfo("Export blocked", "Latest successful training run does not have a manifest path.")
+            return
+
+        try:
+            bundle = export_regime_training_bundle(artifact_path)
+        except Exception as exc:
+            self._append_structured_log(level="error", event="export_failed", details=str(exc))
+            messagebox.showerror("Export failed", f"Failed to export training bundle:\n{exc}")
+            return
+
+        self._append_structured_log(level="info", event="export_completed", details=f"bundle={bundle.bundle_dir}")
         messagebox.showinfo(
             "Export completed",
-            "Export uses the latest successful training artifact.\n"
-            f"Path: {artifact_path}\n"
-            f"Summary: {summary}",
+            "Export bundle created from the latest successful training artifact.\n"
+            f"Bundle path: {bundle.bundle_dir}\n"
+            f"Bundle manifest: {bundle.bundle_manifest_path}\n"
+            f"Deployment version: {bundle.deployment_version}",
         )
