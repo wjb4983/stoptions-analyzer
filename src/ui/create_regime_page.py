@@ -1,8 +1,22 @@
 from __future__ import annotations
 
+import threading
+from datetime import UTC, datetime
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
+
+from backtesting.regime_training_pipeline import (
+    RegimeLegTrainingConfig,
+    RegimeTrainingRequest,
+    RegimeTrainingResult,
+    run_regime_training,
+)
+from config import (
+    DEFAULT_REGIME_CONFIDENCE_THRESHOLDS,
+    DEFAULT_REGIME_GLOBAL_RISK_LIMITS,
+    DEFAULT_REGIME_TRAINING_WINDOW,
+)
 
 if TYPE_CHECKING:
     from main import StoptionsApp
@@ -261,6 +275,7 @@ class CreateRegimePage(ttk.Frame):
         self.regime_legs: list[dict[str, object]] = [self._build_default_leg("Trend Following")]
         self.selected_leg_index = 0
         self.leg_control_vars: dict[str, tk.Variable] = {}
+        self._is_training = False
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -598,6 +613,9 @@ class CreateRegimePage(ttk.Frame):
                 self.validation_badges[key].configure(foreground=STATUS_COLORS[status])
 
         can_run, message = self._can_train_export()
+        if self._is_training:
+            can_run = False
+            message = "Training currently running..."
         if hasattr(self, "train_button"):
             self.train_button.configure(state=("normal" if can_run else "disabled"))
         if hasattr(self, "export_button"):
@@ -611,16 +629,150 @@ class CreateRegimePage(ttk.Frame):
         self.run_logs.insert(tk.END, message + "\n")
         self.run_logs.see(tk.END)
 
+    def _append_structured_log(self, *, level: str, event: str, details: str) -> None:
+        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        self._append_log(f"[{ts}] [{level.upper()}] {event}: {details}")
+
+    def _active_regime_definition(self) -> dict[str, object]:
+        regime_id = self.controller.state.active_regime_id
+        definitions = self.controller.state.regime_definitions
+        definition = definitions.get(regime_id) if regime_id else None
+        if isinstance(definition, dict):
+            return definition
+        if definitions:
+            return next(iter(definitions.values()))
+        return {}
+
+    def _build_regime_training_request(self) -> RegimeTrainingRequest:
+        definition = self._active_regime_definition()
+        regime_id = self.controller.state.active_regime_id or "baseline"
+        regime_label = str(definition.get("label", regime_id))
+
+        training_window = {
+            **DEFAULT_REGIME_TRAINING_WINDOW,
+            **(definition.get("training_window", {}) if isinstance(definition.get("training_window"), dict) else {}),
+        }
+        global_risk_limits = {
+            **DEFAULT_REGIME_GLOBAL_RISK_LIMITS,
+            **(definition.get("global_risk_limits", {}) if isinstance(definition.get("global_risk_limits"), dict) else {}),
+        }
+        confidence_thresholds = {
+            **DEFAULT_REGIME_CONFIDENCE_THRESHOLDS,
+            **(definition.get("confidence_thresholds", {}) if isinstance(definition.get("confidence_thresholds"), dict) else {}),
+        }
+
+        legs: list[RegimeLegTrainingConfig] = []
+        for leg in self.regime_legs:
+            controls = leg.get("controls", {})
+            cast_controls = {key: float(value) for key, value in controls.items()}
+            legs.append(
+                RegimeLegTrainingConfig(
+                    name=str(leg.get("name", "Unnamed leg")),
+                    model_type=str(leg.get("model_type", "Trend Following")),
+                    controls=cast_controls,
+                )
+            )
+
+        return RegimeTrainingRequest(
+            regime_id=regime_id,
+            regime_label=regime_label,
+            requested_at=datetime.now(UTC).isoformat(),
+            training_window={key: int(value) for key, value in training_window.items()},
+            global_risk_limits={key: float(value) for key, value in global_risk_limits.items()},
+            confidence_thresholds={key: float(value) for key, value in confidence_thresholds.items()},
+            legs=tuple(legs),
+        )
+
+    def _last_successful_training_run(self) -> dict[str, object] | None:
+        runs = self.controller.state.regime_training_runs
+        for run in reversed(runs):
+            if run.get("status") == "success":
+                return run
+        return None
+
     def _run_train(self) -> None:
+        if self._is_training:
+            messagebox.showinfo("Training in progress", "A regime training run is already in progress.")
+            return
+
         can_run, msg = self._can_train_export()
         if not can_run:
             messagebox.showinfo("Validation blocked", msg)
             return
-        self._append_log(f"Training queued for {self._selected_leg()['name']}")
+
+        try:
+            request = self._build_regime_training_request()
+        except Exception as exc:
+            self._append_structured_log(level="error", event="request_build_failed", details=str(exc))
+            messagebox.showerror("Training failed", f"Failed to build training request: {exc}")
+            return
+
+        self._is_training = True
+        self.train_button.configure(state="disabled")
+        self.export_button.configure(state="disabled")
+        self._append_structured_log(
+            level="info",
+            event="training_queued",
+            details=f"regime={request.regime_label}, legs={len(request.legs)}",
+        )
+
+        def _worker() -> None:
+            try:
+                result = run_regime_training(request)
+            except Exception as exc:
+                self.after(0, lambda error=exc: self._on_training_failed(error))
+                return
+            self.after(0, lambda training_result=result: self._on_training_succeeded(training_result))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_training_failed(self, exc: Exception) -> None:
+        self._is_training = False
+        self._update_validation_and_actions()
+        self._append_structured_log(level="error", event="training_failed", details=str(exc))
+        messagebox.showerror("Training failed", f"Regime training failed:\n{exc}")
+
+    def _on_training_succeeded(self, result: RegimeTrainingResult) -> None:
+        self._is_training = False
+        run_record = {
+            "run_id": result.run_id,
+            "status": result.status,
+            "started_at": result.started_at,
+            "completed_at": result.completed_at,
+            "artifact_path": result.artifact_path,
+            "summary": result.summary,
+            "metrics": result.metrics,
+            "metadata": result.metadata,
+            "logs": list(result.logs),
+        }
+        self.controller.state.regime_training_runs.append(run_record)
+        self.controller.persist_state()
+        self._append_structured_log(level="info", event="training_completed", details=result.summary)
+        self._append_structured_log(level="info", event="training_artifact", details=result.artifact_path)
+        messagebox.showinfo("Training completed", result.summary)
+        self._update_validation_and_actions()
 
     def _run_export(self) -> None:
         can_run, msg = self._can_train_export()
         if not can_run:
             messagebox.showinfo("Validation blocked", msg)
             return
-        self._append_log(f"Export completed for {self._selected_leg()['name']}")
+
+        latest = self._last_successful_training_run()
+        if latest is None:
+            messagebox.showinfo(
+                "Export blocked",
+                "No successful training run exists yet. Train a regime before exporting.",
+            )
+            self._append_structured_log(level="warning", event="export_blocked", details="missing_successful_training")
+            return
+
+        artifact_path = str(latest.get("artifact_path", ""))
+        summary = str(latest.get("summary", ""))
+        self._append_structured_log(level="info", event="export_completed", details=f"artifact={artifact_path}")
+        messagebox.showinfo(
+            "Export completed",
+            "Export uses the latest successful training artifact.\n"
+            f"Path: {artifact_path}\n"
+            f"Summary: {summary}",
+        )
