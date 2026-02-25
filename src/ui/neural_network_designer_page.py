@@ -7,8 +7,6 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from typing import Any, Callable
 
-import yaml
-
 NN_PRESETS_PATH = Path("config/nn_presets.json")
 NN_EXPORT_DIR = Path("data/nn_architectures")
 
@@ -109,7 +107,13 @@ def save_nn_presets(presets: dict[str, dict[str, Any]]) -> None:
 
 
 def architecture_to_yaml(payload: dict[str, Any]) -> str:
-    return yaml.safe_dump(normalize_architecture_spec(payload), sort_keys=False)
+    normalized = normalize_architecture_spec(payload)
+    try:
+        import yaml
+    except ModuleNotFoundError:
+        # JSON is valid YAML, so this remains parseable by downstream YAML tooling.
+        return json.dumps(normalized, indent=2)
+    return yaml.safe_dump(normalized, sort_keys=False)
 
 
 def architecture_to_python(payload: dict[str, Any], *, function_name: str = "build_model_spec") -> str:

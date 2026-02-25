@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import yaml
 
 from ui import neural_network_designer_page as nn_page
@@ -46,3 +47,19 @@ def test_normalize_architecture_spec_fills_defaults():
     normalized = nn_page.normalize_architecture_spec({"layers": [{"type": "Dense", "units": 8, "activation": "relu"}]})
     assert normalized["optimizer"]["name"] == "adam"
     assert normalized["training"]["early_stopping"]["enabled"] is True
+
+
+def test_yaml_export_falls_back_to_json_when_pyyaml_missing(monkeypatch):
+    original_import = builtins.__import__
+
+    def raising_import(name, *args, **kwargs):
+        if name == "yaml":
+            raise ModuleNotFoundError("No module named 'yaml'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", raising_import)
+    content = nn_page.architecture_to_yaml(nn_page.default_architecture_spec())
+    parsed = yaml.safe_load(content)
+
+    assert parsed["layers"][0]["type"] == "Dense"
+    assert parsed["optimizer"]["name"] == "adam"
