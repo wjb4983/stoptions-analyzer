@@ -328,6 +328,226 @@ LEG_CONTROL_GROUPS: dict[str, dict[str, object]] = {
             },
         ],
     },
+    "Volatility Clustering": {
+        "signal_parameters": [
+            {"key": "lookback_days", "label": "Lookback (days)", "default": 63, "min": 10, "max": 252, "tooltip": "Vol clustering estimation window."},
+            {"key": "entry_zscore", "label": "Cluster activation threshold", "default": 1.4, "min": 0.4, "max": 4.0, "tooltip": "Threshold to activate clustering overlays."},
+        ],
+        "sizing_risk_caps": [
+            {"key": "max_position_pct", "label": "Max position %", "default": 0.05, "min": 0.01, "max": 0.15, "tooltip": "Cap for clustering overlays."},
+            {"key": "max_drawdown_stop", "label": "Max drawdown stop", "default": 0.1, "min": 0.03, "max": 0.25, "tooltip": "Stop for clustering false positives."},
+        ],
+        "turnover_liquidity_assumptions": [
+            {"key": "turnover_limit", "label": "Turnover limit", "default": 0.3, "min": 0.05, "max": 1.2, "tooltip": "Turnover expectation in clustered volatility."},
+            {"key": "slippage_bps", "label": "Slippage (bps)", "default": 11, "min": 1, "max": 70, "tooltip": "Execution drag during clustered volatility."},
+        ],
+        "confidence_thresholds": [
+            {"key": "model_confidence_min", "label": "Model confidence min", "default": 0.64, "min": 0.4, "max": 0.98, "tooltip": "Confidence floor for clustering models."},
+            {"key": "regime_stability_min", "label": "Regime stability min", "default": 0.56, "min": 0.3, "max": 0.95, "tooltip": "Persistence filter in high-vol clusters."},
+        ],
+    },
+    "IV/EV Spread": {
+        "signal_parameters": [
+            {"key": "lookback_days", "label": "Lookback (days)", "default": 45, "min": 10, "max": 180, "tooltip": "Window for IV/EV term spread estimation."},
+            {"key": "entry_zscore", "label": "Spread trigger", "default": 1.3, "min": 0.4, "max": 4.0, "tooltip": "IV/EV spread trigger threshold."},
+        ],
+        "sizing_risk_caps": [
+            {"key": "max_position_pct", "label": "Max position %", "default": 0.05, "min": 0.01, "max": 0.15, "tooltip": "Cap for term-structure carry positions."},
+            {"key": "max_drawdown_stop", "label": "Max drawdown stop", "default": 0.09, "min": 0.03, "max": 0.25, "tooltip": "Risk stop for spread blowouts."},
+        ],
+        "turnover_liquidity_assumptions": [
+            {"key": "turnover_limit", "label": "Turnover limit", "default": 0.27, "min": 0.05, "max": 1.0, "tooltip": "Expected turnover for term spread rotations."},
+            {"key": "slippage_bps", "label": "Slippage (bps)", "default": 8, "min": 1, "max": 60, "tooltip": "Execution drag in spread rebalance windows."},
+        ],
+        "confidence_thresholds": [
+            {"key": "model_confidence_min", "label": "Model confidence min", "default": 0.6, "min": 0.4, "max": 0.98, "tooltip": "Confidence floor before deploying spread legs."},
+            {"key": "regime_stability_min", "label": "Regime stability min", "default": 0.52, "min": 0.3, "max": 0.95, "tooltip": "Persistence filter for curve shape regimes."},
+        ],
+    },
+    "Event Intensity": {
+        "signal_parameters": [
+            {"key": "lookback_days", "label": "Lookback (days)", "default": 15, "min": 5, "max": 90, "tooltip": "Window used to estimate event intensity."},
+            {"key": "entry_zscore", "label": "Intensity trigger", "default": 1.4, "min": 0.4, "max": 4.0, "tooltip": "Event-intensity trigger for activation."},
+        ],
+        "sizing_risk_caps": [
+            {"key": "max_position_pct", "label": "Max position %", "default": 0.03, "min": 0.005, "max": 0.12, "tooltip": "Cap for event-driven exposure."},
+            {"key": "max_drawdown_stop", "label": "Max drawdown stop", "default": 0.07, "min": 0.02, "max": 0.2, "tooltip": "Stop for event clustering overshoots."},
+        ],
+        "turnover_liquidity_assumptions": [
+            {"key": "turnover_limit", "label": "Turnover limit", "default": 0.5, "min": 0.1, "max": 2.0, "tooltip": "Expected turnover around bursts of events."},
+            {"key": "slippage_bps", "label": "Slippage (bps)", "default": 14, "min": 1, "max": 90, "tooltip": "Execution drag around high-intensity windows."},
+        ],
+        "confidence_thresholds": [
+            {"key": "model_confidence_min", "label": "Model confidence min", "default": 0.58, "min": 0.4, "max": 0.98, "tooltip": "Confidence floor for event-intensity activation."},
+            {"key": "regime_stability_min", "label": "Regime stability min", "default": 0.48, "min": 0.3, "max": 0.95, "tooltip": "Persistence filter for event regime state."},
+        ],
+    },
+    "Vol Surface": {
+        "signal_parameters": [
+            {"key": "lookback_days", "label": "Lookback (days)", "default": 30, "min": 10, "max": 180, "tooltip": "Window for surface calibration stability checks."},
+            {"key": "entry_zscore", "label": "Calibration stress trigger", "default": 1.2, "min": 0.4, "max": 4.0, "tooltip": "Surface stress threshold to activate model."},
+        ],
+        "sizing_risk_caps": [
+            {"key": "max_position_pct", "label": "Max position %", "default": 0.04, "min": 0.01, "max": 0.12, "tooltip": "Cap for surface-calibrated exposure."},
+            {"key": "max_drawdown_stop", "label": "Max drawdown stop", "default": 0.08, "min": 0.03, "max": 0.2, "tooltip": "Risk stop for calibration drift."},
+        ],
+        "turnover_liquidity_assumptions": [
+            {"key": "turnover_limit", "label": "Turnover limit", "default": 0.26, "min": 0.05, "max": 1.0, "tooltip": "Expected rebalance cadence from surface recalibration."},
+            {"key": "slippage_bps", "label": "Slippage (bps)", "default": 9, "min": 1, "max": 60, "tooltip": "Execution drag estimate for surface-driven trades."},
+        ],
+        "confidence_thresholds": [
+            {"key": "model_confidence_min", "label": "Model confidence min", "default": 0.62, "min": 0.4, "max": 0.98, "tooltip": "Confidence floor for calibrated surfaces."},
+            {"key": "regime_stability_min", "label": "Regime stability min", "default": 0.54, "min": 0.3, "max": 0.95, "tooltip": "Stability filter for surface regime consistency."},
+        ],
+    },
+    "Cross-Asset Macro": {
+        "signal_parameters": [
+            {
+                "key": "lookback_days",
+                "label": "Lookback (days)",
+                "default": 84,
+                "min": 20,
+                "max": 252,
+                "tooltip": "Macro conditioning lookback horizon.",
+            },
+            {
+                "key": "entry_zscore",
+                "label": "Macro shock threshold",
+                "default": 1.35,
+                "min": 0.4,
+                "max": 4.0,
+                "tooltip": "Cross-asset/macro trigger threshold.",
+            },
+        ],
+        "sizing_risk_caps": [
+            {
+                "key": "max_position_pct",
+                "label": "Max position %",
+                "default": 0.04,
+                "min": 0.01,
+                "max": 0.15,
+                "tooltip": "Cap for macro-conditioned exposure.",
+            },
+            {
+                "key": "max_drawdown_stop",
+                "label": "Max drawdown stop",
+                "default": 0.08,
+                "min": 0.03,
+                "max": 0.25,
+                "tooltip": "Risk stop for cross-asset dislocations.",
+            },
+        ],
+        "turnover_liquidity_assumptions": [
+            {
+                "key": "turnover_limit",
+                "label": "Turnover limit",
+                "default": 0.28,
+                "min": 0.05,
+                "max": 1.0,
+                "tooltip": "Expected turnover for macro rotation.",
+            },
+            {
+                "key": "slippage_bps",
+                "label": "Slippage (bps)",
+                "default": 9,
+                "min": 1,
+                "max": 60,
+                "tooltip": "Execution drag in stressed macro windows.",
+            },
+        ],
+        "confidence_thresholds": [
+            {
+                "key": "model_confidence_min",
+                "label": "Model confidence min",
+                "default": 0.58,
+                "min": 0.4,
+                "max": 0.98,
+                "tooltip": "Confidence floor for macro-conditioned calls.",
+            },
+            {
+                "key": "regime_stability_min",
+                "label": "Regime stability min",
+                "default": 0.52,
+                "min": 0.3,
+                "max": 0.95,
+                "tooltip": "Persistence filter across asset regimes.",
+            },
+        ],
+    },
+    "Meta-Label Ensemble": {
+        "signal_parameters": [
+            {
+                "key": "lookback_days",
+                "label": "Lookback (days)",
+                "default": 63,
+                "min": 20,
+                "max": 252,
+                "tooltip": "Window used to form ensemble meta-labels.",
+            },
+            {
+                "key": "entry_zscore",
+                "label": "Ensemble gating threshold",
+                "default": 1.25,
+                "min": 0.4,
+                "max": 4.0,
+                "tooltip": "Threshold for activating stacked learners.",
+            },
+        ],
+        "sizing_risk_caps": [
+            {
+                "key": "max_position_pct",
+                "label": "Max position %",
+                "default": 0.04,
+                "min": 0.01,
+                "max": 0.15,
+                "tooltip": "Exposure cap for ensemble signals.",
+            },
+            {
+                "key": "max_drawdown_stop",
+                "label": "Max drawdown stop",
+                "default": 0.09,
+                "min": 0.03,
+                "max": 0.25,
+                "tooltip": "Circuit breaker for ensemble drift.",
+            },
+        ],
+        "turnover_liquidity_assumptions": [
+            {
+                "key": "turnover_limit",
+                "label": "Turnover limit",
+                "default": 0.32,
+                "min": 0.05,
+                "max": 1.2,
+                "tooltip": "Expected rotation from stacked model votes.",
+            },
+            {
+                "key": "slippage_bps",
+                "label": "Slippage (bps)",
+                "default": 8,
+                "min": 1,
+                "max": 60,
+                "tooltip": "Execution cost estimate for ensemble routing.",
+            },
+        ],
+        "confidence_thresholds": [
+            {
+                "key": "model_confidence_min",
+                "label": "Model confidence min",
+                "default": 0.66,
+                "min": 0.4,
+                "max": 0.98,
+                "tooltip": "Meta-label confidence floor before trade activation.",
+            },
+            {
+                "key": "regime_stability_min",
+                "label": "Regime stability min",
+                "default": 0.57,
+                "min": 0.3,
+                "max": 0.95,
+                "tooltip": "Persistence requirement for ensemble consensus.",
+            },
+        ],
+    },
 }
 
 GROUP_TITLES = {

@@ -15,6 +15,8 @@ _UI_TO_LEG_FAMILY: dict[str, str] = {
     "IV/EV Spread": "iv_ev_spread_term_structure",
     "Event Intensity": "self_exciting_event_intensity",
     "Vol Surface": "vol_surface_calibration",
+    "Cross-Asset Macro": "cross_asset_macro_conditioned",
+    "Meta-Label Ensemble": "meta_label_regime_ensemble",
 }
 
 _DEFAULT_MODEL_CANDIDATES_BY_LEG_FAMILY: dict[str, tuple[str, ...]] = {
@@ -59,6 +61,17 @@ _DEFAULT_MODEL_CANDIDATES_BY_LEG_FAMILY: dict[str, tuple[str, ...]] = {
         "term_structure_slope",
         "volatility_carry",
         "meta_label_classifier",
+    ),
+    "cross_asset_macro_conditioned": (
+        "macro_regime_conditioned",
+        "factor_neutral_cross_sectional_rank",
+        "dispersion",
+        "meta_label_classifier",
+    ),
+    "meta_label_regime_ensemble": (
+        "meta_label_classifier",
+        "markov_regime_switching",
+        "momentum_forecasting",
     ),
 }
 
@@ -110,6 +123,18 @@ _KNOB_TRANSLATIONS_BY_LEG_FAMILY: dict[str, dict[str, str]] = {
         "max_drawdown_stop": "stop_loss_pct",
     },
     "vol_surface_calibration": {
+        "entry_zscore": "detection_threshold",
+        "model_confidence_min": "vol_filter_max",
+        "max_position_pct": "sizing_cap",
+        "max_drawdown_stop": "stop_loss_pct",
+    },
+    "cross_asset_macro_conditioned": {
+        "entry_zscore": "detection_threshold",
+        "model_confidence_min": "vol_filter_min",
+        "max_position_pct": "sizing_cap",
+        "max_drawdown_stop": "stop_loss_pct",
+    },
+    "meta_label_regime_ensemble": {
         "entry_zscore": "detection_threshold",
         "model_confidence_min": "vol_filter_max",
         "max_position_pct": "sizing_cap",
@@ -171,6 +196,20 @@ _KNOB_DEFAULTS_BY_LEG_FAMILY: dict[str, dict[str, float]] = {
         "vol_filter_max": 0.75,
         "sizing_cap": 0.04,
         "stop_loss_pct": 0.08,
+    },
+    "cross_asset_macro_conditioned": {
+        "lookback_days": 84.0,
+        "detection_threshold": 1.35,
+        "vol_filter_min": 0.58,
+        "sizing_cap": 0.04,
+        "stop_loss_pct": 0.08,
+    },
+    "meta_label_regime_ensemble": {
+        "lookback_days": 63.0,
+        "detection_threshold": 1.25,
+        "vol_filter_max": 0.82,
+        "sizing_cap": 0.04,
+        "stop_loss_pct": 0.09,
     },
 }
 

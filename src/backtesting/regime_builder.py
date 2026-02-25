@@ -18,6 +18,8 @@ SUPPORTED_LEG_FAMILIES = (
     "iv_ev_spread_term_structure",
     "self_exciting_event_intensity",
     "vol_surface_calibration",
+    "cross_asset_macro_conditioned",
+    "meta_label_regime_ensemble",
 )
 
 _REQUIRED_KNOBS_BY_LEG_FAMILY: dict[str, tuple[str, ...]] = {
@@ -69,6 +71,20 @@ _REQUIRED_KNOBS_BY_LEG_FAMILY: dict[str, tuple[str, ...]] = {
         "stop_loss_pct",
     ),
     "vol_surface_calibration": (
+        "lookback_days",
+        "detection_threshold",
+        "vol_filter_max",
+        "sizing_cap",
+        "stop_loss_pct",
+    ),
+    "cross_asset_macro_conditioned": (
+        "lookback_days",
+        "detection_threshold",
+        "vol_filter_min",
+        "sizing_cap",
+        "stop_loss_pct",
+    ),
+    "meta_label_regime_ensemble": (
         "lookback_days",
         "detection_threshold",
         "vol_filter_max",
