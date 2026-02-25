@@ -14,6 +14,10 @@ SUPPORTED_LEG_FAMILIES = (
     "volatility_risk_premium_selling",
     "cheap_vol_buying",
     "regime_change_detection",
+    "volatility_clustering",
+    "iv_ev_spread_term_structure",
+    "self_exciting_event_intensity",
+    "vol_surface_calibration",
 )
 
 _REQUIRED_KNOBS_BY_LEG_FAMILY: dict[str, tuple[str, ...]] = {
@@ -40,6 +44,34 @@ _REQUIRED_KNOBS_BY_LEG_FAMILY: dict[str, tuple[str, ...]] = {
     "regime_change_detection": (
         "lookback_days",
         "detection_threshold",
+        "sizing_cap",
+        "stop_loss_pct",
+    ),
+    "volatility_clustering": (
+        "lookback_days",
+        "vol_filter_min",
+        "vol_filter_max",
+        "sizing_cap",
+        "stop_loss_pct",
+    ),
+    "iv_ev_spread_term_structure": (
+        "lookback_days",
+        "carry_threshold",
+        "vol_filter_min",
+        "sizing_cap",
+        "stop_loss_pct",
+    ),
+    "self_exciting_event_intensity": (
+        "lookback_days",
+        "detection_threshold",
+        "vol_filter_min",
+        "sizing_cap",
+        "stop_loss_pct",
+    ),
+    "vol_surface_calibration": (
+        "lookback_days",
+        "detection_threshold",
+        "vol_filter_max",
         "sizing_cap",
         "stop_loss_pct",
     ),

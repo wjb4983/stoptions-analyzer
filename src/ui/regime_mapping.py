@@ -6,14 +6,15 @@ from typing import Any
 from backtesting.regime_builder import RegimeLegSpec, _REQUIRED_KNOBS_BY_LEG_FAMILY
 from models.regime_catalog import validate_model_leg_pairing
 
-# Final family choices for the UI labels:
-# - Mean Reversion -> cheap_vol_buying
-# - Volatility Breakout -> volatility_risk_premium_selling
 _UI_TO_LEG_FAMILY: dict[str, str] = {
     "Trend Following": "timeseries_momentum",
     "Mean Reversion": "cheap_vol_buying",
     "Volatility Breakout": "volatility_risk_premium_selling",
     "Regime Change": "regime_change_detection",
+    "Volatility Clustering": "volatility_clustering",
+    "IV/EV Spread": "iv_ev_spread_term_structure",
+    "Event Intensity": "self_exciting_event_intensity",
+    "Vol Surface": "vol_surface_calibration",
 }
 
 _DEFAULT_MODEL_CANDIDATES_BY_LEG_FAMILY: dict[str, tuple[str, ...]] = {
@@ -33,6 +34,30 @@ _DEFAULT_MODEL_CANDIDATES_BY_LEG_FAMILY: dict[str, tuple[str, ...]] = {
         "hmm_regime_change",
         "markov_regime_switching",
         "changepoint_regime_change",
+        "meta_label_classifier",
+    ),
+    "volatility_clustering": (
+        "volatility_carry",
+        "options_volatility",
+        "term_structure_slope",
+        "meta_label_classifier",
+    ),
+    "iv_ev_spread_term_structure": (
+        "term_structure_slope",
+        "vrp_carry_relative_value",
+        "dispersion",
+        "meta_label_classifier",
+    ),
+    "self_exciting_event_intensity": (
+        "event_driven",
+        "options_flow_driven",
+        "microstructure_imbalance",
+        "meta_label_classifier",
+    ),
+    "vol_surface_calibration": (
+        "options_volatility",
+        "term_structure_slope",
+        "volatility_carry",
         "meta_label_classifier",
     ),
 }
@@ -66,6 +91,30 @@ _KNOB_TRANSLATIONS_BY_LEG_FAMILY: dict[str, dict[str, str]] = {
         "max_position_pct": "sizing_cap",
         "max_drawdown_stop": "stop_loss_pct",
     },
+    "volatility_clustering": {
+        "entry_zscore": "vol_filter_min",
+        "model_confidence_min": "vol_filter_max",
+        "max_position_pct": "sizing_cap",
+        "max_drawdown_stop": "stop_loss_pct",
+    },
+    "iv_ev_spread_term_structure": {
+        "entry_zscore": "carry_threshold",
+        "model_confidence_min": "vol_filter_min",
+        "max_position_pct": "sizing_cap",
+        "max_drawdown_stop": "stop_loss_pct",
+    },
+    "self_exciting_event_intensity": {
+        "entry_zscore": "detection_threshold",
+        "model_confidence_min": "vol_filter_min",
+        "max_position_pct": "sizing_cap",
+        "max_drawdown_stop": "stop_loss_pct",
+    },
+    "vol_surface_calibration": {
+        "entry_zscore": "detection_threshold",
+        "model_confidence_min": "vol_filter_max",
+        "max_position_pct": "sizing_cap",
+        "max_drawdown_stop": "stop_loss_pct",
+    },
 }
 
 _KNOB_DEFAULTS_BY_LEG_FAMILY: dict[str, dict[str, float]] = {
@@ -93,6 +142,34 @@ _KNOB_DEFAULTS_BY_LEG_FAMILY: dict[str, dict[str, float]] = {
         "lookback_days": 60.0,
         "detection_threshold": 1.60,
         "sizing_cap": 0.05,
+        "stop_loss_pct": 0.08,
+    },
+    "volatility_clustering": {
+        "lookback_days": 63.0,
+        "vol_filter_min": 0.2,
+        "vol_filter_max": 0.85,
+        "sizing_cap": 0.05,
+        "stop_loss_pct": 0.1,
+    },
+    "iv_ev_spread_term_structure": {
+        "lookback_days": 45.0,
+        "carry_threshold": 0.05,
+        "vol_filter_min": 0.6,
+        "sizing_cap": 0.05,
+        "stop_loss_pct": 0.09,
+    },
+    "self_exciting_event_intensity": {
+        "lookback_days": 15.0,
+        "detection_threshold": 1.4,
+        "vol_filter_min": 0.55,
+        "sizing_cap": 0.03,
+        "stop_loss_pct": 0.07,
+    },
+    "vol_surface_calibration": {
+        "lookback_days": 30.0,
+        "detection_threshold": 1.2,
+        "vol_filter_max": 0.75,
+        "sizing_cap": 0.04,
         "stop_loss_pct": 0.08,
     },
 }

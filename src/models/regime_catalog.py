@@ -92,6 +92,94 @@ _LEG_MODEL_CATALOG: dict[str, tuple[ModelDescriptor, ...]] = {
             hyperparameter_template={"confidence_threshold": 0.57, "calibration": "conformal"},
         ),
     ),
+    "volatility_clustering": (
+        ModelDescriptor(
+            model_name="volatility_carry",
+            display_name="GARCH-Style Volatility Clustering",
+            hyperparameter_template={"p_order": 1, "q_order": 1, "decay_lambda": 0.94},
+        ),
+        ModelDescriptor(
+            model_name="options_volatility",
+            display_name="EGARCH Asymmetry Wrapper",
+            hyperparameter_template={"asymmetry_term": 0.2, "vol_of_vol_window": 30},
+        ),
+        ModelDescriptor(
+            model_name="term_structure_slope",
+            display_name="HAR-RV Horizon Blend",
+            hyperparameter_template={"daily_window": 1, "weekly_window": 5, "monthly_window": 22},
+        ),
+        ModelDescriptor(
+            model_name="meta_label_classifier",
+            display_name="Meta Label Classifier",
+            hyperparameter_template={"confidence_threshold": 0.61, "calibration": "conformal"},
+        ),
+    ),
+    "iv_ev_spread_term_structure": (
+        ModelDescriptor(
+            model_name="term_structure_slope",
+            display_name="IV/EV Term Slope Decomposition",
+            hyperparameter_template={"front_tenor_days": 14, "back_tenor_days": 60, "slope_threshold": 0.03},
+        ),
+        ModelDescriptor(
+            model_name="vrp_carry_relative_value",
+            display_name="IV-EV Carry Relative Value",
+            hyperparameter_template={"iv_ev_spread_threshold": 0.05, "cross_tenor_quantile": 0.75},
+        ),
+        ModelDescriptor(
+            model_name="dispersion",
+            display_name="Cross-Sectional Spread Decomposition",
+            hyperparameter_template={"dispersion_window": 20, "cross_asset_decay": 0.9},
+        ),
+        ModelDescriptor(
+            model_name="meta_label_classifier",
+            display_name="Meta Label Classifier",
+            hyperparameter_template={"confidence_threshold": 0.59, "calibration": "conformal"},
+        ),
+    ),
+    "self_exciting_event_intensity": (
+        ModelDescriptor(
+            model_name="event_driven",
+            display_name="Hawkes Event Baseline",
+            hyperparameter_template={"baseline_intensity": 0.05, "decay_half_life_minutes": 45},
+        ),
+        ModelDescriptor(
+            model_name="options_flow_driven",
+            display_name="Flow-Triggered Self-Excitation",
+            hyperparameter_template={"excitation_alpha": 0.35, "event_window_minutes": 60},
+        ),
+        ModelDescriptor(
+            model_name="microstructure_imbalance",
+            display_name="Order-Book Hawkes Proxy",
+            hyperparameter_template={"queue_reactivity": 0.4, "imbalance_decay_minutes": 10},
+        ),
+        ModelDescriptor(
+            model_name="meta_label_classifier",
+            display_name="Meta Label Classifier",
+            hyperparameter_template={"confidence_threshold": 0.62, "calibration": "conformal"},
+        ),
+    ),
+    "vol_surface_calibration": (
+        ModelDescriptor(
+            model_name="options_volatility",
+            display_name="Local Vol Surface Wrapper",
+            hyperparameter_template={"surface_grid_points": 25, "smoothing_penalty": 1e-4},
+        ),
+        ModelDescriptor(
+            model_name="term_structure_slope",
+            display_name="SABR Term/Skew Calibration",
+            hyperparameter_template={"beta": 0.5, "nu_init": 0.3, "rho_init": -0.2},
+        ),
+        ModelDescriptor(
+            model_name="volatility_carry",
+            display_name="Heston Calibration Proxy",
+            hyperparameter_template={"kappa_init": 1.5, "theta_init": 0.04, "xi_init": 0.4},
+        ),
+        ModelDescriptor(
+            model_name="meta_label_classifier",
+            display_name="Meta Label Classifier",
+            hyperparameter_template={"confidence_threshold": 0.6, "calibration": "conformal"},
+        ),
+    ),
 }
 
 

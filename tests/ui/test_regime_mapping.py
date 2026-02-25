@@ -11,6 +11,10 @@ def test_supported_ui_legs_include_regime_change() -> None:
         "Mean Reversion",
         "Volatility Breakout",
         "Regime Change",
+        "Volatility Clustering",
+        "IV/EV Spread",
+        "Event Intensity",
+        "Vol Surface",
     }
 
 
@@ -21,6 +25,10 @@ def test_supported_ui_legs_include_regime_change() -> None:
         ("Mean Reversion", "cheap_vol_buying"),
         ("Volatility Breakout", "volatility_risk_premium_selling"),
         ("Regime Change", "regime_change_detection"),
+        ("Volatility Clustering", "volatility_clustering"),
+        ("IV/EV Spread", "iv_ev_spread_term_structure"),
+        ("Event Intensity", "self_exciting_event_intensity"),
+        ("Vol Surface", "vol_surface_calibration"),
     ],
 )
 def test_to_regime_leg_spec_maps_ui_leg_to_family(ui_leg_type: str, expected_family: str) -> None:
@@ -102,3 +110,26 @@ def test_to_regime_leg_spec_regime_change_accepts_entry_zscore_alias() -> None:
     )
 
     assert mapped.leg_spec.knobs["detection_threshold"] == 1.4
+
+
+def test_to_regime_leg_spec_translates_event_intensity_knobs() -> None:
+    mapped = to_regime_leg_spec(
+        {
+            "name": "Event Intensity leg",
+            "model_type": "Event Intensity",
+            "controls": {
+                "lookback_days": 20,
+                "entry_zscore": 1.8,
+                "model_confidence_min": 0.66,
+                "max_position_pct": 0.025,
+                "max_drawdown_stop": 0.06,
+            },
+        }
+    )
+
+    assert mapped.leg_spec.leg_family == "self_exciting_event_intensity"
+    assert mapped.leg_spec.knobs["lookback_days"] == 20.0
+    assert mapped.leg_spec.knobs["detection_threshold"] == 1.8
+    assert mapped.leg_spec.knobs["vol_filter_min"] == 0.66
+    assert mapped.leg_spec.knobs["sizing_cap"] == 0.025
+    assert mapped.leg_spec.knobs["stop_loss_pct"] == 0.06
