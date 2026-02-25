@@ -36,6 +36,7 @@ def export_regime_training_bundle(
     artifact_paths = payload.get("artifact_paths", {}) if isinstance(payload.get("artifact_paths"), dict) else {}
     metrics = payload.get("metrics", {}) if isinstance(payload.get("metrics"), dict) else {}
     metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+    _validate_synthetic_fallback_export_guard(payload)
 
     deployment_version = _deterministic_deployment_version(
         run_id=run_id,
@@ -198,3 +199,20 @@ def _artifact_hashes(paths: dict[str, str]) -> dict[str, str]:
         body = Path(path).read_bytes()
         hashes[key] = hashlib.sha256(body).hexdigest()
     return hashes
+
+
+def _validate_synthetic_fallback_export_guard(payload: dict[str, Any]) -> None:
+    metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+    request = payload.get("request", {}) if isinstance(payload.get("request"), dict) else {}
+    settings = (
+        request.get("training_data_settings", {})
+        if isinstance(request.get("training_data_settings"), dict)
+        else {}
+    )
+    fallback_used = bool(metadata.get("synthetic_fallback_used", False))
+    fallback_allowed = bool(settings.get("allow_synthetic_fallback", False))
+    if fallback_used and not fallback_allowed:
+        raise ValueError(
+            "Export blocked: synthetic fallback was used without "
+            "request.training_data_settings.allow_synthetic_fallback=true"
+        )

@@ -1241,6 +1241,14 @@ class CreateRegimePage(ttk.Frame):
         self._update_validation_and_actions()
         detail = "; ".join(result.errors) if result.errors else "unknown error"
         self._append_structured_log(level="error", event="training_failed", details=detail)
+        if "INSUFFICIENT_REAL_HISTORY" in detail:
+            messagebox.showerror(
+                "Training blocked: insufficient real history",
+                "Regime training requires sufficient real market history. "
+                "Synthetic fallback is disabled for this regime, so training cannot proceed.\n"
+                f"{detail}",
+            )
+            return
         messagebox.showerror(
             "Training failed",
             f"Regime training failed with status={result.status}.\n{detail}",

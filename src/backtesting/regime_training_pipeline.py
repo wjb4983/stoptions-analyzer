@@ -344,6 +344,11 @@ class RegistryBackedRegimeTrainingAdapter:
                     },
                     baseline_rows=baseline_rows,
                 )
+                fallback_gate = _build_synthetic_fallback_quality_gate(
+                    training_data_bundle.metadata,
+                    request.training_data_settings,
+                )
+                gate_results.append(fallback_gate)
                 blocked = promotion_blocked(gate_results)
                 gates = PromotionGates()
                 deployment_slots = {
@@ -465,7 +470,8 @@ class RegistryBackedRegimeTrainingAdapter:
         symbols = [str(s).strip().upper() for s in settings.get("universe_symbols", []) if str(s).strip()]
         required_years = max(1, int(settings.get("required_history_years", 5)))
         cache_root = Path(str(settings.get("cache_root", BACKTEST_CACHE_DIR)))
-        return _load_returns_from_cache(
+        allow_synthetic_fallback = bool(settings.get("allow_synthetic_fallback", False))
+        bundle = _load_returns_from_cache(
             symbols=symbols,
             cache_root=cache_root,
             min_usable_history_years=required_years,
@@ -473,6 +479,9 @@ class RegistryBackedRegimeTrainingAdapter:
                 settings.get("required_universe_pass_ratio", settings.get("min_universe_pass_ratio", 1.0))
             ),
         )
+        bundle.metadata["allow_synthetic_fallback"] = allow_synthetic_fallback
+        bundle.metadata["synthetic_fallback_used"] = False
+        return bundle
 
     @staticmethod
     def _build_candidate_leaderboard(
@@ -525,6 +534,24 @@ class RegistryBackedRegimeTrainingAdapter:
         settings = dict(request.training_data_settings or {})
         base_returns = training_data_bundle.returns
         if base_returns.size < 32:
+            allow_synthetic_fallback = bool(training_data_bundle.metadata.get("allow_synthetic_fallback", False))
+            diagnostics = {
+                "symbols_requested": training_data_bundle.metadata.get("symbols_requested", []),
+                "symbols_used": training_data_bundle.metadata.get("symbols_used", []),
+                "symbols_excluded": training_data_bundle.metadata.get("symbols_excluded", []),
+                "universe_pass_ratio": training_data_bundle.metadata.get("universe_pass_ratio", 0.0),
+                "required_universe_pass_ratio": training_data_bundle.metadata.get("required_universe_pass_ratio", 1.0),
+                "minimum_usable_history_years": training_data_bundle.metadata.get("minimum_usable_history_years", 0),
+                "observed_return_samples": int(base_returns.size),
+                "minimum_required_return_samples": 32,
+            }
+            if not allow_synthetic_fallback:
+                raise TrainingDataInsufficientError(
+                    "INSUFFICIENT_REAL_HISTORY: observed return samples below minimum and synthetic fallback disabled; "
+                    f"coverage_diagnostics={json.dumps(diagnostics, sort_keys=True)}"
+                )
+            training_data_bundle.metadata["synthetic_fallback_used"] = True
+            training_data_bundle.metadata["synthetic_fallback_reason"] = "insufficient_real_history"
             base_returns = rng.normal(loc=0.0, scale=0.01, size=max(sample_size, 160)).astype(float)
 
         scenario_rows = _build_regime_training_scenarios(settings, n_assets=1)
@@ -637,6 +664,10 @@ class _SymbolReturns:
 class TrainingDataBundle:
     returns: np.ndarray
     metadata: dict[str, Any]
+
+
+class TrainingDataInsufficientError(ValueError):
+    """Raised when cache-backed training history is insufficient and fallback is disabled."""
 
 
 def _normalize_timestamps_ms(values: np.ndarray) -> np.ndarray:
@@ -849,6 +880,30 @@ def _apply_training_path_adjustments(values: np.ndarray, path_adjustments: dict[
     if rebound_len > 0:
         adjusted[crash_len : crash_len + rebound_len] += rebound_shift
     return adjusted
+
+
+def _build_synthetic_fallback_quality_gate(
+    training_data_audit: dict[str, Any],
+    training_data_settings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    settings = dict(training_data_settings or {})
+    fallback_used = bool(training_data_audit.get("synthetic_fallback_used", False))
+    fallback_allowed = bool(settings.get("allow_synthetic_fallback", False))
+    fallback_intentional = (not fallback_used) or fallback_allowed
+    reason = (
+        "synthetic fallback not used"
+        if not fallback_used
+        else ("synthetic fallback used with explicit allow flag" if fallback_allowed else "synthetic fallback used without explicit allow flag")
+    )
+    return {
+        "name": "synthetic_fallback_intentional",
+        "pass": fallback_intentional,
+        "reason": reason,
+        "value": 1.0 if fallback_intentional else 0.0,
+        "threshold": 1.0,
+        "block_promotion": not fallback_intentional,
+    }
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -1101,11 +1156,18 @@ def run_regime_training(
             }
             for leg_name, leg_metrics in adapter_output.per_leg_oos_metrics.items()
         }
-        logs = (
+        synthetic_fallback_used = bool(adapter_output.training_data_audit.get("synthetic_fallback_used", False))
+        logs_list = [
             "saved config snapshot",
             f"adapter={adapter_output.adapter_name or runner.__class__.__name__}",
             "computed summary metrics",
-        )
+        ]
+        warnings_list = list(warnings)
+        if synthetic_fallback_used:
+            logs_list.append("synthetic_fallback_used=true")
+            warnings_list.append("training_data used synthetic fallback due to insufficient real history")
+        logs = tuple(logs_list)
+        warnings = tuple(warnings_list)
         status = "failed" if adapter_errors else "success"
         result = RegimeTrainingResult(
             run_id=run_id,
@@ -1134,6 +1196,7 @@ def run_regime_training(
                 "champion_by_leg": adapter_output.champion_by_leg,
                 "governance_by_leg": adapter_output.governance_by_leg,
                 "training_data_audit": adapter_output.training_data_audit,
+                "synthetic_fallback_used": synthetic_fallback_used,
             },
             logs=logs,
         )

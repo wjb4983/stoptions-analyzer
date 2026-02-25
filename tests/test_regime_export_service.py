@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 from pathlib import Path
 
 from backtesting.regime_export_service import export_regime_training_bundle
@@ -69,3 +71,25 @@ def test_export_bundle_versioning_is_deterministic(tmp_path):
 
     assert first.deployment_version == second.deployment_version
     assert first.bundle_dir == second.bundle_dir
+
+
+def test_export_bundle_blocks_unintentional_synthetic_fallback(tmp_path):
+    run_dir = tmp_path / "run"
+    manifest_path = _write_json(
+        run_dir / "manifest.json",
+        {
+            "run_id": "run-fallback",
+            "status": "success",
+            "request": {
+                "schema_version": 2,
+                "regime_name": "Risk Off",
+                "training_data_settings": {"allow_synthetic_fallback": False},
+            },
+            "metrics": {"portfolio_avg_accuracy": 0.55},
+            "metadata": {"synthetic_fallback_used": True},
+            "artifact_paths": {},
+        },
+    )
+
+    with pytest.raises(ValueError, match="synthetic fallback"):
+        export_regime_training_bundle(manifest_path, output_dir=tmp_path / "exports")

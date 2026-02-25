@@ -821,6 +821,7 @@ def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch
     assert request.training_data_settings["required_history_years"] == 5
     assert isinstance(request.training_data_settings["scenario_settings"], list)
     assert request.training_data_settings["cache_audit_strict"] is True
+    assert request.training_data_settings["allow_synthetic_fallback"] is False
     assert request.training_data_settings["min_symbol_coverage_ratio"] == 1.0
     assert request.training_data_settings["min_bars_per_year"] == 1
 
@@ -993,3 +994,27 @@ def test_create_regime_run_train_attaches_cache_audit_metadata(monkeypatch, tmp_
 
     assert calls
     assert calls[0]["cache_audit_report"].endswith("audit.json")
+
+
+def test_create_regime_training_failure_shows_hard_error_for_insufficient_real_history(monkeypatch):
+    errors = []
+    monkeypatch.setattr(create_regime_page.messagebox, "showerror", lambda title, msg: errors.append((title, msg)))
+
+    page, _controller = _build_create_regime_training_page()
+    page._append_structured_log = lambda **_kwargs: None
+
+    result = RegimeTrainingResult(
+        run_id="run-bad",
+        status="failed",
+        metrics={},
+        artifact_paths={},
+        timestamps={"started_at": "2024-01-01T00:00:00+00:00", "completed_at": "2024-01-01T00:01:00+00:00"},
+        errors=("INSUFFICIENT_REAL_HISTORY: coverage_diagnostics={}",),
+        summary="failed",
+    )
+
+    page._on_training_result_failed(result)
+
+    assert errors
+    assert errors[-1][0] == "Training blocked: insufficient real history"
+    assert "Synthetic fallback is disabled" in errors[-1][1]
