@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 
 from backtesting.regime_training_pipeline import (
+    AdapterIssue,
+    LegOutOfSampleMetrics,
     RegimeLegTrainingConfig,
+    RegimeTrainingAdapterOutput,
     RegimeTrainingRequest,
+    TrainedArtifactLocations,
     execute_regime_training_pipeline,
 )
 
@@ -16,12 +20,31 @@ class _FailingAdapter:
 
 class _StableAdapter:
     def fit_and_backtest(self, request: RegimeTrainingRequest, run_dir):  # noqa: ANN001
-        return {
-            "metrics": {"sharpe": 1.23, "max_drawdown": 0.11},
-            "warnings": ["insufficient history in one bucket"],
-            "artifacts": {"equity_curve": run_dir / "equity.csv"},
-            "adapter": "stable_test_adapter",
-        }
+        return RegimeTrainingAdapterOutput(
+            per_leg_artifacts={
+                "Trend": TrainedArtifactLocations(
+                    model_weights=str(run_dir / "trend_model_weights.json"),
+                    calibration_object=str(run_dir / "trend_calibration.json"),
+                    diagnostics=str(run_dir / "trend_diagnostics.json"),
+                ),
+            },
+            per_leg_oos_metrics={
+                "Trend": LegOutOfSampleMetrics(
+                    leg_name="Trend",
+                    model_id="momentum",
+                    metrics={"accuracy": 0.68, "brier_score": 0.19},
+                ),
+            },
+            portfolio_oos_metrics={"portfolio_avg_accuracy": 0.68, "portfolio_avg_brier_score": 0.19},
+            issues=(
+                AdapterIssue(
+                    level="warning",
+                    model_id="momentum",
+                    message="insufficient history in one bucket",
+                ),
+            ),
+            adapter_name="stable_test_adapter",
+        )
 
 
 def _request(tmp_path, *, legs: tuple[RegimeLegTrainingConfig, ...]) -> RegimeTrainingRequest:
@@ -42,7 +65,7 @@ def test_pipeline_success_writes_manifest_and_returns_artifacts(tmp_path):
         legs=(
             RegimeLegTrainingConfig(
                 name="Trend",
-                model_type="trend",
+                model_type="timeseries_momentum",
                 controls={"model_confidence_min": 0.7, "turnover_limit": 0.2},
             ),
         ),
@@ -51,8 +74,9 @@ def test_pipeline_success_writes_manifest_and_returns_artifacts(tmp_path):
     result = execute_regime_training_pipeline(req, adapter=_StableAdapter())
 
     assert result.status == "success"
-    assert result.metrics["sharpe"] == 1.23
-    assert result.warnings == ("insufficient history in one bucket",)
+    assert result.metrics["portfolio_avg_accuracy"] == 0.68
+    assert result.warnings == ("[momentum] insufficient history in one bucket",)
+    assert "trend_model_weights" in result.artifact_paths
     assert "manifest" in result.artifact_paths
 
     manifest_path = result.artifact_paths["manifest"]
@@ -80,7 +104,7 @@ def test_pipeline_adapter_failure_returns_machine_readable_error(tmp_path):
         legs=(
             RegimeLegTrainingConfig(
                 name="Carry",
-                model_type="carry",
+                model_type="volatility_risk_premium_selling",
                 controls={"model_confidence_min": 0.6},
             ),
         ),
@@ -93,3 +117,27 @@ def test_pipeline_adapter_failure_returns_machine_readable_error(tmp_path):
     assert result.error_payload["code"] == "TRAINING_EXECUTION_FAILED"
     assert result.error_payload["stage"] == "fit_and_backtest"
     assert result.error_payload["exception_type"] == "RuntimeError"
+
+
+def test_pipeline_default_adapter_runs_registry_backed_training(tmp_path):
+    req = RegimeTrainingRequest(
+        regime_id="risk_off",
+        regime_name="Risk Off",
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Regime Detection",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.62, "turnover_limit": 0.25},
+            ),
+        ),
+        model_choice="auto",
+        training_window={"retrain_frequency_days": 14, "lookback_days": 252},
+        risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
+        output_dir=str(tmp_path),
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    assert result.status == "success"
+    assert result.metrics["legs_trained"] == 1.0
+    assert any(key.endswith("_model_weights") for key in result.artifact_paths)
