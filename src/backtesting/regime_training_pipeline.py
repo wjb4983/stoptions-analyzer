@@ -10,8 +10,12 @@ from typing import Any, Literal, Protocol
 import numpy as np
 
 from modeling_nextgen.calibration.probability import ProbabilityCalibrator
+from modeling_nextgen.validation.quality_gates import evaluate_modeling_quality_gates, promotion_blocked
+from models.deployment import PromotionGates
 from models.regime_catalog import list_models_for_leg, validate_model_leg_pairing
 from models.registry import create_model
+from models.robustness import build_robustness_scorecards
+from backtesting.walk_forward import build_walk_forward_folds, run_walk_forward_optimization
 
 DEFAULT_REGIME_TRAINING_OUTPUT_DIR = Path("data/regime_training_runs")
 
@@ -114,6 +118,9 @@ class RegimeTrainingAdapterOutput:
     portfolio_oos_metrics: dict[str, float]
     issues: tuple[AdapterIssue, ...] = ()
     adapter_name: str = ""
+    candidate_leaderboards: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    champion_by_leg: dict[str, str] = field(default_factory=dict)
+    governance_by_leg: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def warnings(self) -> tuple[str, ...]:
         return tuple(
@@ -155,15 +162,55 @@ class RegistryBackedRegimeTrainingAdapter:
         per_leg_artifacts: dict[str, TrainedArtifactLocations] = {}
         per_leg_oos_metrics: dict[str, LegOutOfSampleMetrics] = {}
         issues: list[AdapterIssue] = []
+        candidate_leaderboards: dict[str, list[dict[str, Any]]] = {}
+        champion_by_leg: dict[str, str] = {}
+        governance_by_leg: dict[str, dict[str, Any]] = {}
 
         for idx, leg in enumerate(request.legs):
             leg_key = f"{idx:02d}_{leg.name.lower().replace(' ', '_')}"
             try:
-                model_id = self._select_model_id(request, leg)
-                validate_model_leg_pairing(leg.model_type, model_id)
-                model = create_model(model_id)
+                candidate_ids = self._candidate_model_ids(request, leg)
+                for candidate_id in candidate_ids:
+                    validate_model_leg_pairing(leg.model_type, candidate_id)
 
-                features, labels = self._build_dataset(model.required_feature_names(), leg.controls, seed=idx)
+                candidate_payloads: dict[str, tuple[dict[str, np.ndarray], np.ndarray]] = {}
+                for candidate_id in candidate_ids:
+                    candidate_model = create_model(candidate_id)
+                    candidate_payloads[candidate_id] = self._build_dataset(
+                        candidate_model.required_feature_names(),
+                        leg.controls,
+                        seed=idx,
+                    )
+
+                folds = build_walk_forward_folds(
+                    total_bars=160,
+                    train_bars=72,
+                    validation_bars=24,
+                    test_bars=24,
+                    step_bars=24,
+                    purge_window_bars=2,
+                    embargo_window_bars=2,
+                    label_horizon_bars=1,
+                )
+                walk_forward_result = run_walk_forward_optimization(
+                    folds=folds,
+                    parameter_candidates=[{"model_id": model_id} for model_id in candidate_ids],
+                    evaluate_segment=lambda params, start, end: self._evaluate_segment(
+                        model_id=str(params["model_id"]),
+                        start=start,
+                        end=end,
+                        candidate_payloads=candidate_payloads,
+                    ),
+                    score_metric="sharpe",
+                )
+                leaderboard = self._build_candidate_leaderboard(
+                    walk_forward_folds=walk_forward_result.folds,
+                    candidate_ids=candidate_ids,
+                )
+                champion_model_id = str(leaderboard[0]["model_id"]) if leaderboard else candidate_ids[0]
+                model = create_model(champion_model_id)
+
+                features, labels = candidate_payloads[champion_model_id]
                 split_idx = max(int(len(labels) * 0.7), 12)
                 train_x = {name: values[:split_idx] for name, values in features.items()}
                 test_x = {name: values[split_idx:] for name, values in features.items()}
@@ -197,7 +244,7 @@ class RegistryBackedRegimeTrainingAdapter:
                 weights_path.write_text(
                     json.dumps(
                         {
-                            "model_id": model_id,
+                            "model_id": champion_model_id,
                             "required_features": list(model.required_feature_names()),
                             "feature_importances": {k: float(v) for k, v in model.feature_importances_.items()},
                         },
@@ -209,7 +256,7 @@ class RegistryBackedRegimeTrainingAdapter:
                 calibration_path.write_text(
                     json.dumps(
                         {
-                            "model_id": model_id,
+                            "model_id": champion_model_id,
                             "method": report.method,
                             "sample_size": report.sample_size,
                             "expected_calibration_error": report.expected_calibration_error,
@@ -224,9 +271,10 @@ class RegistryBackedRegimeTrainingAdapter:
                     json.dumps(
                         {
                             "leg_name": leg.name,
-                            "model_id": model_id,
+                            "model_id": champion_model_id,
                             "oos_metrics": metrics,
                             "controls": {k: float(v) for k, v in leg.controls.items()},
+                            "candidate_leaderboard": leaderboard,
                         },
                         indent=2,
                         sort_keys=True,
@@ -241,9 +289,102 @@ class RegistryBackedRegimeTrainingAdapter:
                 )
                 per_leg_oos_metrics[leg.name] = LegOutOfSampleMetrics(
                     leg_name=leg.name,
-                    model_id=model_id,
+                    model_id=champion_model_id,
                     metrics=metrics,
                 )
+
+                robustness_scorecard = build_robustness_scorecards(
+                    models={champion_model_id: model},
+                    feature_payloads={champion_model_id: test_x},
+                )
+                champion_row = next(
+                    (row for row in robustness_scorecard.get("models", []) if row.get("model_id") == champion_model_id),
+                    {},
+                )
+                robust_oos_pass = float(walk_forward_result.aggregate_metrics.get("sharpe_mean", 0.0)) >= 0.0
+                stress_pass = bool(champion_row.get("meets_minimum_threshold", False))
+                scorecard = {
+                    "dimensions": {
+                        "robust_oos_performance": {"pass": robust_oos_pass},
+                        "stress_resilience": {"pass": stress_pass},
+                    }
+                }
+                baseline_rows = [
+                    {
+                        "max_drawdown": max(-0.25, -float(metrics.get("brier_score", 0.2))),
+                        "downside_deviation": min(0.03, float(metrics.get("brier_score", 0.2)) / 10.0),
+                        "rolling_drawdown_worst": max(-0.12, -float(metrics.get("brier_score", 0.2))),
+                        "turnover_total": float(leg.controls.get("turnover_limit", 0.0)) * 100.0,
+                        "slippage_bps": float(metrics.get("expected_calibration_error", 0.0)) * 100.0,
+                    }
+                ]
+                gate_results = evaluate_modeling_quality_gates(
+                    scorecard=scorecard,
+                    calibration_report={
+                        "fit_error": {"mae_bps_max": float(report.brier_score) * 100.0},
+                        "stability": {"impact_coefficient_std_bps": float(report.expected_calibration_error) * 100.0},
+                    },
+                    baseline_rows=baseline_rows,
+                )
+                blocked = promotion_blocked(gate_results)
+                gates = PromotionGates()
+                deployment_slots = {
+                    "candidate": True,
+                    "challenger": not blocked,
+                    "champion": (
+                        not blocked
+                        and float(walk_forward_result.aggregate_metrics.get("sharpe_mean", 0.0))
+                        >= gates.min_risk_adjusted_return_delta
+                        and float(champion_row.get("robustness_score", 0.0)) >= gates.min_robustness_score
+                        and len(champion_row.get("brittle_features", [])) <= gates.max_brittle_features
+                    ),
+                }
+                governance_payload = {
+                    "scorecard": scorecard,
+                    "robustness_scorecard": robustness_scorecard,
+                    "gates": gate_results,
+                    "pass_fail": {gate["name"]: bool(gate.get("pass", False)) for gate in gate_results},
+                    "promotion_eligible": not blocked,
+                    "deployment_slot_eligibility": deployment_slots,
+                }
+
+                leaderboard_path = leg_dir / "candidate_leaderboard.json"
+                governance_path = leg_dir / "governance.json"
+                champion_path = leg_dir / "champion.json"
+                leaderboard_path.write_text(json.dumps(leaderboard, indent=2, sort_keys=True), encoding="utf-8")
+                governance_path.write_text(json.dumps(governance_payload, indent=2, sort_keys=True), encoding="utf-8")
+                champion_path.write_text(
+                    json.dumps(
+                        {
+                            "model_id": champion_model_id,
+                            "promotion_eligible": governance_payload["promotion_eligible"],
+                            "deployment_slot_eligibility": deployment_slots,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
+                issues.append(
+                    AdapterIssue(
+                        level="warning",
+                        model_id=champion_model_id,
+                        leg_name=leg.name,
+                        message=f"walk-forward evaluated {len(candidate_ids)} candidate(s)",
+                    )
+                )
+                per_leg_oos_metrics[leg.name].metrics["promotion_eligible"] = float(
+                    1.0 if governance_payload["promotion_eligible"] else 0.0
+                )
+                per_leg_oos_metrics[leg.name].metrics["walk_forward_folds"] = float(len(walk_forward_result.folds))
+                per_leg_oos_metrics[leg.name].metrics["candidate_count"] = float(len(candidate_ids))
+                per_leg_oos_metrics[leg.name].metrics["selected_sharpe_mean"] = float(
+                    walk_forward_result.aggregate_metrics.get("sharpe_mean", 0.0)
+                )
+
+                candidate_leaderboards[leg.name] = leaderboard
+                champion_by_leg[leg.name] = champion_model_id
+                governance_by_leg[leg.name] = governance_payload
             except Exception as exc:
                 issues.append(
                     AdapterIssue(
@@ -261,7 +402,79 @@ class RegistryBackedRegimeTrainingAdapter:
             portfolio_oos_metrics=portfolio_oos_metrics,
             issues=tuple(issues),
             adapter_name="registry_backed",
+            candidate_leaderboards=candidate_leaderboards,
+            champion_by_leg=champion_by_leg,
+            governance_by_leg=governance_by_leg,
         )
+
+    @staticmethod
+    def _evaluate_segment(
+        *,
+        model_id: str,
+        start: int,
+        end: int,
+        candidate_payloads: dict[str, tuple[dict[str, np.ndarray], np.ndarray]],
+    ) -> dict[str, Any]:
+        model = create_model(model_id)
+        features, labels = candidate_payloads[model_id]
+        start_idx = max(0, int(start))
+        end_idx = min(int(end), int(labels.shape[0]))
+        if end_idx - start_idx <= 2:
+            return {"metrics": {"sharpe": -1.0, "accuracy": 0.0}, "equity": []}
+        seg_x = {name: values[start_idx:end_idx] for name, values in features.items()}
+        seg_y = labels[start_idx:end_idx]
+        model.fit(seg_x, seg_y)
+        probs = np.asarray(model.predict_proba(seg_x), dtype=float)
+        binary_y = np.where(seg_y > 0, 1.0, 0.0)
+        preds = np.where(probs >= 0.5, 1.0, 0.0)
+        pnl = np.where(preds == binary_y, 1.0, -1.0)
+        sharpe = float(np.mean(pnl) / max(1e-8, np.std(pnl))) if pnl.size > 1 else 0.0
+        return {
+            "metrics": {
+                "accuracy": float(np.mean(preds == binary_y)),
+                "sharpe": sharpe,
+            },
+            "equity": [
+                {"timestamp": int(start_idx + i), "equity": float(np.sum(pnl[: i + 1]))}
+                for i in range(int(pnl.size))
+            ],
+        }
+
+    @staticmethod
+    def _build_candidate_leaderboard(
+        *,
+        walk_forward_folds: list[dict[str, Any]],
+        candidate_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for candidate_id in candidate_ids:
+            scores: list[float] = []
+            oos_scores: list[float] = []
+            for fold in walk_forward_folds:
+                diagnostics = fold.get("diagnostics", [])
+                for diag in diagnostics:
+                    params = diag.get("params", {})
+                    if str(params.get("model_id", "")) != candidate_id:
+                        continue
+                    scores.append(float(diag.get("validation_score", 0.0)))
+                    oos_scores.append(float(fold.get("oos_metrics", {}).get("sharpe", 0.0)))
+            rows.append(
+                {
+                    "model_id": candidate_id,
+                    "validation_score_mean": float(np.mean(scores)) if scores else float("-inf"),
+                    "validation_score_std": float(np.std(scores, ddof=0)) if scores else 0.0,
+                    "oos_sharpe_mean": float(np.mean(oos_scores)) if oos_scores else 0.0,
+                    "folds_evaluated": len(scores),
+                }
+            )
+        rows.sort(
+            key=lambda row: (
+                -float(row["validation_score_mean"]),
+                -float(row["oos_sharpe_mean"]),
+                str(row["model_id"]),
+            )
+        )
+        return rows
 
     @staticmethod
     def _build_dataset(
@@ -309,6 +522,26 @@ class RegistryBackedRegimeTrainingAdapter:
             return mode
 
         return descriptors[0].model_name
+
+    @staticmethod
+    def _candidate_model_ids(request: RegimeTrainingRequest, leg: RegimeLegTrainingConfig) -> list[str]:
+        descriptors = list_models_for_leg(leg.model_type)
+        if not descriptors:
+            raise ValueError(f"No catalog entries configured for leg type '{leg.model_type}'")
+        mode = request.model_choice.strip().lower()
+        selected_model_id = leg.resolved_model_id.lower()
+        allowed = [item.model_name for item in descriptors]
+        if mode in {"auto_model_search", "auto"}:
+            return allowed
+        if mode in {"single_model", "", "placeholder", "dev", "test"}:
+            if selected_model_id and selected_model_id in allowed:
+                return [selected_model_id]
+            return [allowed[0]]
+        if mode == "ensemble":
+            return ["meta_label_classifier"] if "meta_label_classifier" in allowed else [allowed[0]]
+        if mode in allowed:
+            return [mode]
+        return [allowed[0]]
 
     @staticmethod
     def _aggregate_portfolio_metrics(
@@ -594,6 +827,9 @@ def run_regime_training(
                 "regime_name": request.regime_name,
                 "model_choice": request.model_choice,
                 "oos_metrics": oos_metrics_payload,
+                "candidate_leaderboard": adapter_output.candidate_leaderboards,
+                "champion_by_leg": adapter_output.champion_by_leg,
+                "governance_by_leg": adapter_output.governance_by_leg,
             },
             logs=logs,
         )

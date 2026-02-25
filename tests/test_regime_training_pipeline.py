@@ -85,6 +85,8 @@ def test_pipeline_success_writes_manifest_and_returns_artifacts(tmp_path):
     assert payload["status"] == "success"
     assert payload["request"]["regime_name"] == "Risk On"
     assert payload["artifact_paths"]["spec"].endswith("regime_spec_snapshot.json")
+    assert payload["metadata"]["candidate_leaderboard"] == {}
+    assert payload["metadata"]["champion_by_leg"] == {}
 
 
 def test_pipeline_validation_failure_returns_machine_readable_error(tmp_path):
@@ -143,6 +145,11 @@ def test_pipeline_default_adapter_runs_registry_backed_training(tmp_path):
     assert result.status == "success"
     assert result.metrics["legs_trained"] == 1.0
     assert any(key.endswith("_model_weights") for key in result.artifact_paths)
+    assert "Regime Detection" in result.metadata["candidate_leaderboard"]
+    assert result.metadata["champion_by_leg"]["Regime Detection"]
+    governance = result.metadata["governance_by_leg"]["Regime Detection"]
+    assert "pass_fail" in governance
+    assert "deployment_slot_eligibility" in governance
 
 
 def test_pipeline_validation_rejects_incomplete_model_specific_specs(tmp_path):
