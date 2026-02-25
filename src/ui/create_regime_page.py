@@ -17,7 +17,9 @@ from backtesting.regime_training_pipeline import (
 from backtesting.cache_runner import run_backtest_cache
 from data_access.cache_audit import audit_universe_history
 from backtesting.regime_export_service import export_regime_training_bundle
-from models.regime_catalog import ModelDescriptor, list_models_for_leg
+from models.regime_catalog import ModelDescriptor, get_model_descriptor, list_models_for_leg
+from ui.calibration_spec_designer_page import CalibrationSpecDesignerPage
+from ui.event_process_designer_page import EventProcessDesignerPage
 from ui.regime_mapping import to_regime_leg_spec
 from ui.neural_network_designer_page import NeuralNetworkDesignerPage
 from config import (
@@ -589,6 +591,8 @@ class CreateRegimePage(ttk.Frame):
         self._model_selection_by_label: dict[str, ModelDescriptor] = {}
         self._is_training = False
         self._nn_designer_window: NeuralNetworkDesignerPage | None = None
+        self._calibration_designer_window: CalibrationSpecDesignerPage | None = None
+        self._event_process_designer_window: EventProcessDesignerPage | None = None
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -733,6 +737,43 @@ class CreateRegimePage(ttk.Frame):
     def _allowed_models_for_leg(self, leg: dict[str, object]) -> list[ModelDescriptor]:
         mapped_leg = to_regime_leg_spec(leg)
         return list_models_for_leg(mapped_leg.leg_spec.leg_family)
+
+    def _selected_model_descriptor(self, leg: dict[str, object]) -> ModelDescriptor | None:
+        selected_model_id = str(leg.get("selected_model_id", "")).strip()
+        if not selected_model_id:
+            return None
+        mapped_leg = to_regime_leg_spec(leg)
+        return get_model_descriptor(mapped_leg.leg_spec.leg_family, selected_model_id)
+
+    @staticmethod
+    def _spec_requirements_for_descriptor(descriptor: ModelDescriptor | None) -> dict[str, str]:
+        requirements = {
+            "architecture_spec": "unsupported",
+            "calibration_spec": "unsupported",
+            "event_process_spec": "unsupported",
+        }
+        if descriptor is None:
+            return requirements
+
+        tags = descriptor.capability_tags
+        requirements["architecture_spec"] = "required" if "needs_architecture_spec" in tags else "optional" if "supports_architecture_spec" in tags else "unsupported"
+        requirements["calibration_spec"] = "required" if "needs_calibration_spec" in tags else "optional" if "supports_calibration_spec" in tags else "unsupported"
+        requirements["event_process_spec"] = "required" if "needs_event_process_spec" in tags else "optional" if "supports_event_process_spec" in tags else "unsupported"
+        return requirements
+
+    def _required_spec_blockers(self, leg: dict[str, object]) -> list[str]:
+        descriptor = self._selected_model_descriptor(leg)
+        requirements = self._spec_requirements_for_descriptor(descriptor)
+        label_map = {
+            "architecture_spec": "Architecture spec",
+            "calibration_spec": "Calibration spec",
+            "event_process_spec": "Event process spec",
+        }
+        blockers: list[str] = []
+        for key, requirement in requirements.items():
+            if requirement == "required" and not isinstance(leg.get(key), dict):
+                blockers.append(label_map[key])
+        return blockers
 
     def _ensure_leg_model_defaults(self, leg: dict[str, object]) -> None:
         descriptors = self._allowed_models_for_leg(leg)
@@ -966,6 +1007,51 @@ class CreateRegimePage(ttk.Frame):
         architecture_state = "configured" if isinstance(leg.get("architecture_spec"), dict) else "not set"
         ttk.Label(nn_row, text=f"Architecture: {architecture_state}").pack(side="left", padx=(8, 0))
 
+        selected_descriptor = self._model_selection_by_label.get(self.selected_model_var.get())
+        spec_requirements = self._spec_requirements_for_descriptor(selected_descriptor)
+        spec_labels = {
+            "architecture_spec": "Architecture spec",
+            "calibration_spec": "Calibration spec",
+            "event_process_spec": "Event process spec",
+        }
+
+        chips_row = ttk.Frame(selector_section)
+        chips_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        for idx, spec_key in enumerate(("architecture_spec", "calibration_spec", "event_process_spec")):
+            requirement = spec_requirements[spec_key]
+            configured = isinstance(leg.get(spec_key), dict)
+            if requirement == "required":
+                state_text = "required · configured" if configured else "required · missing"
+                fg_color = "#1b8f3a" if configured else "#b12704"
+            elif requirement == "optional":
+                state_text = "optional · configured" if configured else "optional · not set"
+                fg_color = "#1b8f3a" if configured else "#6a6a6a"
+            else:
+                state_text = "not required"
+                fg_color = "#6a6a6a"
+            tk.Label(
+                chips_row,
+                text=f"{spec_labels[spec_key]}: {state_text}",
+                foreground=fg_color,
+                background=self.cget("background"),
+            ).grid(row=0, column=idx, sticky="w", padx=(0, 12))
+
+        configure_row = ttk.Frame(selector_section)
+        configure_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        required_actions: list[tuple[str, object]] = []
+        if spec_requirements["architecture_spec"] == "required":
+            required_actions.append(("Configure architecture…", self._open_neural_network_designer))
+        if spec_requirements["calibration_spec"] == "required":
+            required_actions.append(("Configure calibration…", self._open_calibration_spec_designer))
+        if spec_requirements["event_process_spec"] == "required":
+            required_actions.append(("Configure event process…", self._open_event_process_designer))
+
+        if required_actions:
+            for idx, (label, callback) in enumerate(required_actions):
+                ttk.Button(configure_row, text=label, command=callback).grid(row=0, column=idx, sticky="w", padx=(0, 6))
+        else:
+            ttk.Label(configure_row, text="No required model-specific spec configuration.").grid(row=0, column=0, sticky="w")
+
         self.hyperparameter_vars = {}
         hyperparameter_section = ttk.LabelFrame(self.form_container, text="Model hyperparameters", padding=6)
         hyperparameter_section.pack(fill="x", pady=3)
@@ -1168,6 +1254,11 @@ class CreateRegimePage(ttk.Frame):
         if invalid:
             return False, invalid
 
+        blockers = self._required_spec_blockers(leg)
+        if blockers:
+            missing = ", ".join(blockers)
+            return False, f"Selected model requires missing specs: {missing}."
+
         try:
             for ui_leg in self.regime_legs:
                 to_regime_leg_spec(ui_leg)
@@ -1208,6 +1299,11 @@ class CreateRegimePage(ttk.Frame):
                 self.validation_badges[key].configure(foreground=STATUS_COLORS[status])
 
         can_run, message = self._can_train_export()
+        blockers = self._required_spec_blockers(leg)
+        if blockers:
+            blocker_text = ", ".join(blockers)
+            message = f"Blocked: selected model requires {blocker_text}. Use Configure actions in Model selection."
+            can_run = False
         if self._is_training:
             can_run = False
             message = "Training currently running..."
@@ -1327,6 +1423,40 @@ class CreateRegimePage(ttk.Frame):
             initial_spec=leg.get("architecture_spec") if isinstance(leg.get("architecture_spec"), dict) else None,
             on_save=_save,
             custom_presets=custom_presets,
+        )
+
+    def _open_calibration_spec_designer(self) -> None:
+        leg = self._selected_leg()
+        if self._calibration_designer_window is not None and self._calibration_designer_window.winfo_exists():
+            self._calibration_designer_window.focus_set()
+            return
+
+        def _save(spec: dict[str, Any]) -> None:
+            leg["calibration_spec"] = dict(spec)
+            self._persist_editor_state()
+            self._load_selected_leg_into_form()
+
+        self._calibration_designer_window = CalibrationSpecDesignerPage(
+            self,
+            initial_spec=leg.get("calibration_spec") if isinstance(leg.get("calibration_spec"), dict) else None,
+            on_save=_save,
+        )
+
+    def _open_event_process_designer(self) -> None:
+        leg = self._selected_leg()
+        if self._event_process_designer_window is not None and self._event_process_designer_window.winfo_exists():
+            self._event_process_designer_window.focus_set()
+            return
+
+        def _save(spec: dict[str, Any]) -> None:
+            leg["event_process_spec"] = dict(spec)
+            self._persist_editor_state()
+            self._load_selected_leg_into_form()
+
+        self._event_process_designer_window = EventProcessDesignerPage(
+            self,
+            initial_spec=leg.get("event_process_spec") if isinstance(leg.get("event_process_spec"), dict) else None,
+            on_save=_save,
         )
 
     def _last_successful_training_run(self) -> dict[str, object] | None:
