@@ -1331,6 +1331,7 @@ class ResearchLabPage(ttk.Frame):
             default_preset = preset_options[0] if preset_options else "custom"
         self.workflow_preset_var = tk.StringVar(value=default_preset)
         self.easy_mode_var = tk.BooleanVar(value=True)
+        self.show_advanced_controls_var = tk.BooleanVar(value=False)
         self._workflow_validation_var = tk.StringVar(value="")
         self._preset_validation_warnings_var = tk.StringVar(value=self._format_preset_warning_text())
         self._advanced_workflow_widgets: list[tk.Widget] = []
@@ -1391,6 +1392,21 @@ class ResearchLabPage(ttk.Frame):
             command=self._on_easy_mode_toggle,
         ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 5))
         add_help(row, help_text["easy"])
+
+        row += 1
+        ttk.Checkbutton(
+            controls,
+            text="Show advanced controls (Signals, Execution, Portfolio, Optimization, CV, Governance, Scenario)",
+            variable=self.show_advanced_controls_var,
+            command=self._on_show_advanced_controls_toggle,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 5))
+        add_help(row, "Toggle full CLI-parity controls for domain-level tuning. This setting is persisted in wizard page state.")
+
+        ttk.Button(
+            controls,
+            text="Restore advanced defaults",
+            command=self._restore_advanced_defaults,
+        ).grid(row=row, column=1, sticky="e", padx=8, pady=(0, 5))
 
         row += 1
         ttk.Label(controls, text="Entry signals").grid(row=row, column=0, sticky="nw", padx=8, pady=5)
@@ -2105,6 +2121,7 @@ class ResearchLabPage(ttk.Frame):
             "promotion_decision": self.wizard_promotion_decision_var.get().strip(),
             "wizard_comments": list(self._wizard_comments),
             "wizard_history": list(self._wizard_history),
+            "show_advanced_controls": bool(self.show_advanced_controls_var.get()),
         }
 
     def _wizard_state_document(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2179,6 +2196,8 @@ class ResearchLabPage(ttk.Frame):
         self.wizard_run_stress_var.set(bool(payload.get("run_stress", self.wizard_run_stress_var.get())))
         self.wizard_review_notes_var.set(str(payload.get("review_notes", self.wizard_review_notes_var.get())))
         self.wizard_promotion_decision_var.set(str(payload.get("promotion_decision", self.wizard_promotion_decision_var.get())))
+        self.show_advanced_controls_var.set(bool(payload.get("show_advanced_controls", self.show_advanced_controls_var.get())))
+        self._on_show_advanced_controls_toggle()
 
         saved_comments = payload.get("wizard_comments", [])
         if isinstance(saved_comments, list):
@@ -2339,9 +2358,35 @@ class ResearchLabPage(ttk.Frame):
             self._apply_easy_mode_defaults()
         for widget in self._advanced_workflow_widgets:
             try:
+                if not self.show_advanced_controls_var.get():
+                    widget.grid_remove()
+                    continue
+                widget.grid()
                 widget.configure(state="disabled" if easy_mode else "normal")
             except tk.TclError:
                 continue
+        self._refresh_workflow_validation_hints()
+
+    def _on_show_advanced_controls_toggle(self) -> None:
+        show_advanced = bool(self.show_advanced_controls_var.get())
+        if not show_advanced:
+            self.easy_mode_var.set(True)
+        self._on_easy_mode_toggle()
+
+    def _restore_advanced_defaults(self) -> None:
+        self._apply_easy_mode_defaults()
+        self.optimization_search_space_var.set(DEFAULT_OPTIMIZATION_SEARCH_SPACE)
+        self.optimization_objectives_var.set(DEFAULT_OPTIMIZATION_OBJECTIVES)
+        self.optimization_objective_weights_var.set(DEFAULT_OPTIMIZATION_OBJECTIVE_WEIGHTS)
+        self.optimization_overfitting_penalty_var.set(DEFAULT_OPTIMIZATION_OVERFITTING_PENALTY)
+        self.wf_train_fraction_var.set("0.70")
+        self.wf_validation_fraction_var.set("0.15")
+        self.wf_test_fraction_var.set("0.15")
+        self.wf_step_fraction_var.set("0.15")
+        self.wf_train_bars_var.set("")
+        self.wf_validation_bars_var.set("")
+        self.wf_test_bars_var.set("")
+        self.wf_step_bars_var.set("")
         self._refresh_workflow_validation_hints()
 
     def _selected_listbox_values(self, listbox: tk.Listbox) -> list[str]:

@@ -90,6 +90,7 @@ class BacktestingPage(ttk.Frame):
         self.controller = controller
         self._updating_wf_fractions = False
         self._advanced_widgets: dict[str, tk.Widget] = {}
+        self._advanced_tooltips: dict[str, str] = {}
         self._optimizer_json_lint_vars: dict[str, tk.StringVar] = {}
         self._validation_messages: list[str] = []
         self._stale_preset_messages: list[str] = []
@@ -162,8 +163,13 @@ class BacktestingPage(ttk.Frame):
         ttk.Label(workflow_frame, text="Mode").grid(row=0, column=0, sticky="w", padx=8, pady=6)
         mode_row = ttk.Frame(workflow_frame)
         mode_row.grid(row=0, column=1, sticky="w", padx=8, pady=6)
-        ttk.Radiobutton(mode_row, text="Basic", value="basic", variable=self.ui_mode_var, command=self._on_mode_changed).pack(side="left")
-        ttk.Radiobutton(mode_row, text="Advanced", value="advanced", variable=self.ui_mode_var, command=self._on_mode_changed).pack(side="left", padx=(8, 0))
+        self.show_advanced_controls_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            mode_row,
+            text="Show advanced controls",
+            variable=self.show_advanced_controls_var,
+            command=self._on_show_advanced_controls_toggled,
+        ).pack(side="left")
 
         ttk.Label(workflow_frame, text="Preset").grid(row=1, column=0, sticky="w", padx=8, pady=6)
         preset_values = list(self._preset_display_to_key.keys())
@@ -175,6 +181,13 @@ class BacktestingPage(ttk.Frame):
         )
         self.preset_combo.grid(row=1, column=1, sticky="ew", padx=8, pady=6)
         self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
+        ttk.Button(workflow_frame, text="Restore advanced defaults", command=self._restore_advanced_defaults).grid(
+            row=2,
+            column=1,
+            sticky="w",
+            padx=8,
+            pady=(0, 6),
+        )
 
         strategy_frame = ttk.LabelFrame(run_setup_tab, text="Strategy")
         strategy_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=10)
@@ -2389,6 +2402,27 @@ class BacktestingPage(ttk.Frame):
             "use_optimizer": self.use_optimizer_check,
             "walk_forward_frame": self.walk_forward_frame,
         }
+        self._advanced_tooltips = {
+            "custom_bet_pct": "Portfolio domain: custom bet size percentage used when Bet Sizing Mode is custom_pct.",
+            "portfolio_method": "Portfolio domain: weighting/optimization method (equal weight, vol targeting, risk parity variants, etc.).",
+            "portfolio_vol_lookback": "Portfolio domain: lookback window for realized volatility and covariance estimation.",
+            "portfolio_target_vol": "Portfolio domain: annualized volatility target used by vol-targeting methods.",
+            "portfolio_max_symbol": "Portfolio domain: per-symbol max weight cap.",
+            "portfolio_max_sector": "Portfolio domain: per-sector max weight cap.",
+            "portfolio_rebalance_frequency": "Portfolio domain: rebalance cadence measured in bars.",
+            "portfolio_clustering_linkage": "Portfolio domain: linkage method used for clustered allocators (HRP/HERC).",
+            "portfolio_covariance_shrinkage": "Portfolio domain: covariance shrinkage strength (0=no shrinkage, 1=full shrinkage).",
+            "portfolio_max_gross": "Portfolio domain: gross exposure ceiling.",
+            "portfolio_min_net": "Portfolio domain: minimum net exposure bound.",
+            "portfolio_max_net": "Portfolio domain: maximum net exposure bound.",
+            "use_walk_forward": "CV domain: enables walk-forward train/validation/test sequencing.",
+            "use_optimizer": "Optimization domain: enables multi-objective search over signal/parameter combinations.",
+            "walk_forward_frame": "CV domain: full cross-validation, CPCV, nested optimization, and lineage controls.",
+        }
+        for key, widget in self._advanced_widgets.items():
+            help_text = self._advanced_tooltips.get(key)
+            if help_text:
+                self._attach_tooltip(widget, help_text)
 
     def _bind_validation_watchers(self) -> None:
         for var in (
@@ -2409,6 +2443,7 @@ class BacktestingPage(ttk.Frame):
 
     def _on_mode_changed(self) -> None:
         is_advanced = self.ui_mode_var.get() == "advanced"
+        self.show_advanced_controls_var.set(is_advanced)
         state = "normal" if is_advanced else "disabled"
         for key, widget in self._advanced_widgets.items():
             if key == "walk_forward_frame":
@@ -2424,6 +2459,10 @@ class BacktestingPage(ttk.Frame):
         if not is_advanced:
             self.use_walk_forward_var.set(False)
         self._update_validation_hint()
+
+    def _on_show_advanced_controls_toggled(self) -> None:
+        self.ui_mode_var.set("advanced" if self.show_advanced_controls_var.get() else "basic")
+        self._on_mode_changed()
 
     def _update_validation_hint(self) -> bool:
         messages: list[str] = []
@@ -2530,6 +2569,8 @@ class BacktestingPage(ttk.Frame):
             strategy = "momentum"
         self.strategy_var.set(strategy)
         self.ui_mode_var.set(str(settings.get("ui_mode", "basic")))
+        self.show_advanced_controls_var.set(bool(settings.get("show_advanced_controls", self.ui_mode_var.get() == "advanced")))
+        self.ui_mode_var.set("advanced" if self.show_advanced_controls_var.get() else "basic")
         selected_preset = str(settings.get("selected_preset", "custom"))
         if selected_preset not in {"custom", *BACKTEST_STRATEGY_PRESETS.keys()}:
             selected_preset = "custom"
@@ -2867,6 +2908,7 @@ class BacktestingPage(ttk.Frame):
             "governance_review_actions": list(self._governance_review_actions),
             "governance_decision_log": list(self._governance_decision_log),
             "ui_mode": self.ui_mode_var.get().strip() or "basic",
+            "show_advanced_controls": bool(self.show_advanced_controls_var.get()),
             "selected_preset": self._preset_display_to_key.get(self.preset_var.get().strip(), "custom"),
             "selected_template": self.template_var.get().strip(),
             **xsmom_params,
@@ -3476,6 +3518,73 @@ class BacktestingPage(ttk.Frame):
             self.advanced_optimization_frame.grid()
         else:
             self.advanced_optimization_frame.grid_remove()
+
+    def _restore_advanced_defaults(self) -> None:
+        defaults = {
+            "custom_bet_pct": "10",
+            "portfolio_method": "equal_weight",
+            "portfolio_vol_lookback": "20",
+            "portfolio_target_vol": "0.10",
+            "portfolio_max_symbol": "0.25",
+            "portfolio_max_sector": "0.60",
+            "portfolio_rebalance_frequency": "1",
+            "portfolio_clustering_linkage": "single",
+            "portfolio_covariance_shrinkage": "0.0",
+            "portfolio_max_gross": "1.0",
+            "portfolio_min_net": "-1.0",
+            "portfolio_max_net": "1.0",
+            "use_walk_forward": False,
+            "use_optimizer": False,
+        }
+        self.custom_bet_pct_var.set(str(defaults["custom_bet_pct"]))
+        self.portfolio_method_var.set(str(defaults["portfolio_method"]))
+        self.portfolio_vol_lookback_var.set(str(defaults["portfolio_vol_lookback"]))
+        self.portfolio_target_vol_var.set(str(defaults["portfolio_target_vol"]))
+        self.portfolio_max_symbol_var.set(str(defaults["portfolio_max_symbol"]))
+        self.portfolio_max_sector_var.set(str(defaults["portfolio_max_sector"]))
+        self.portfolio_rebalance_frequency_var.set(str(defaults["portfolio_rebalance_frequency"]))
+        self.portfolio_clustering_linkage_var.set(str(defaults["portfolio_clustering_linkage"]))
+        self.portfolio_covariance_shrinkage_var.set(str(defaults["portfolio_covariance_shrinkage"]))
+        self.portfolio_max_gross_var.set(str(defaults["portfolio_max_gross"]))
+        self.portfolio_min_net_var.set(str(defaults["portfolio_min_net"]))
+        self.portfolio_max_net_var.set(str(defaults["portfolio_max_net"]))
+        self.use_walk_forward_var.set(bool(defaults["use_walk_forward"]))
+        self.use_optimizer_var.set(bool(defaults["use_optimizer"]))
+        self._toggle_advanced_optimization()
+        self._update_validation_hint()
+
+    def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
+        tooltip_window: tk.Toplevel | None = None
+
+        def show_tooltip(_event: object) -> None:
+            nonlocal tooltip_window
+            if tooltip_window is not None:
+                return
+            tooltip_window = tk.Toplevel(self)
+            tooltip_window.wm_overrideredirect(True)
+            x = widget.winfo_rootx() + 16
+            y = widget.winfo_rooty() + 16
+            tooltip_window.wm_geometry(f"+{x}+{y}")
+            tk.Label(
+                tooltip_window,
+                text=text,
+                bg="#fffbe8",
+                relief="solid",
+                borderwidth=1,
+                padx=6,
+                pady=4,
+                wraplength=360,
+                justify="left",
+            ).pack()
+
+        def hide_tooltip(_event: object) -> None:
+            nonlocal tooltip_window
+            if tooltip_window is not None:
+                tooltip_window.destroy()
+                tooltip_window = None
+
+        widget.bind("<Enter>", show_tooltip)
+        widget.bind("<Leave>", hide_tooltip)
 
     def _run_optimizer_worker(
         self,
