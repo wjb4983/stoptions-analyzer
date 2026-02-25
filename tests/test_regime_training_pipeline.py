@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import numpy as np
 
 from backtesting.regime_training_pipeline import (
     AdapterIssue,
@@ -10,6 +13,7 @@ from backtesting.regime_training_pipeline import (
     RegimeTrainingAdapterOutput,
     RegimeTrainingRequest,
     TrainedArtifactLocations,
+    _load_returns_from_cache,
     execute_regime_training_pipeline,
 )
 
@@ -234,3 +238,111 @@ def test_pipeline_persists_cache_audit_report_into_run_dir(tmp_path):
     copied = Path(result.artifact_paths["cache_audit_report"])
     assert copied.exists()
     assert copied.name == "cache_audit_report.json"
+
+
+def _write_symbol_cache(symbol_root: Path, symbol: str, start: datetime, days: int) -> None:
+    safe = symbol
+    bucket = symbol_root / safe / "1m"
+    bucket.mkdir(parents=True, exist_ok=True)
+    timestamps = np.array([int((start + timedelta(days=idx)).timestamp() * 1000) for idx in range(days)], dtype=np.int64)
+    close = np.linspace(100.0, 105.0, num=days, dtype=float)
+    year = start.year
+    path = bucket / f"{safe}_1m_{year}.npz"
+    np.savez_compressed(path, t=timestamps, c=close)
+
+
+def test_load_returns_from_cache_exactly_five_year_history(tmp_path):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = now - timedelta(days=365 * 5)
+    _write_symbol_cache(tmp_path, "AAPL", start, days=365 * 5 + 3)
+
+    bundle = _load_returns_from_cache(
+        symbols=["AAPL"],
+        cache_root=tmp_path,
+        min_usable_history_years=5,
+        required_universe_pass_ratio=1.0,
+        now=now,
+    )
+
+    assert bundle.metadata["symbols_used"] == ["AAPL"]
+    assert bundle.metadata["symbols_excluded"] == []
+    assert bundle.metadata["pass"] is True
+    assert bundle.metadata["effective_training_start"] is not None
+    assert bundle.metadata["per_symbol"]["AAPL"]["years_used"] >= 4.99
+
+
+def test_load_returns_from_cache_uses_deeper_than_five_year_history(tmp_path):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = now - timedelta(days=365 * 7)
+    _write_symbol_cache(tmp_path, "AAPL", start, days=365 * 7 + 4)
+
+    bundle = _load_returns_from_cache(
+        symbols=["AAPL"],
+        cache_root=tmp_path,
+        min_usable_history_years=5,
+        required_universe_pass_ratio=1.0,
+        now=now,
+    )
+
+    expected_start = start.isoformat()
+    assert bundle.metadata["per_symbol"]["AAPL"]["effective_start"] == expected_start
+    assert bundle.metadata["per_symbol"]["AAPL"]["years_used"] > 5.0
+
+
+def test_load_returns_from_cache_mixed_coverage_universe_enforces_pass_ratio(tmp_path):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    _write_symbol_cache(tmp_path, "AAPL", now - timedelta(days=365 * 6), days=365 * 6 + 3)
+    _write_symbol_cache(tmp_path, "MSFT", now - timedelta(days=200), days=220)
+
+    bundle = _load_returns_from_cache(
+        symbols=["AAPL", "MSFT", "TSLA"],
+        cache_root=tmp_path,
+        min_usable_history_years=5,
+        required_universe_pass_ratio=0.6,
+        now=now,
+    )
+
+    assert bundle.metadata["symbols_requested"] == ["AAPL", "MSFT", "TSLA"]
+    assert bundle.metadata["symbols_used"] == ["AAPL"]
+    excluded = {row["symbol"]: row["reason"] for row in bundle.metadata["symbols_excluded"]}
+    assert excluded["MSFT"] == "insufficient_usable_history"
+    assert excluded["TSLA"] == "missing_or_unreadable_cache"
+    assert bundle.metadata["universe_pass_ratio"] == 1 / 3
+    assert bundle.metadata["pass"] is False
+
+
+def test_pipeline_manifest_contains_training_data_audit(tmp_path):
+    now = datetime.now(timezone.utc)
+    cache_root = tmp_path / "cache"
+    _write_symbol_cache(cache_root, "AAPL", now - timedelta(days=365 * 6), days=365 * 6 + 3)
+
+    req = RegimeTrainingRequest(
+        schema_version=2,
+        regime_id="risk_off",
+        regime_name="Risk Off",
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Regime Detection",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.62, "turnover_limit": 0.25},
+            ),
+        ),
+        model_choice="auto",
+        training_window={"retrain_frequency_days": 14, "lookback_days": 252},
+        risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
+        output_dir=str(tmp_path),
+        training_data_settings={
+            "universe_symbols": ["AAPL"],
+            "required_history_years": 5,
+            "cache_root": str(cache_root),
+            "required_universe_pass_ratio": 1.0,
+        },
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    manifest = json.loads(Path(result.artifact_paths["manifest"]).read_text(encoding="utf-8"))
+    audit = manifest["metadata"]["training_data_audit"]
+    assert audit["symbols_requested"] == ["AAPL"]
+    assert audit["symbols_used"] == ["AAPL"]
+    assert "effective_training_start" in audit
