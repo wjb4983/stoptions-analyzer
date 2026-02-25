@@ -257,7 +257,7 @@ LEG_CONTROL_GROUPS: dict[str, dict[str, object]] = {
                 "tooltip": "Window used for regime-shift detection signals.",
             },
             {
-                "key": "entry_zscore",
+                "key": "detection_threshold",
                 "label": "Detection threshold",
                 "default": 1.6,
                 "min": 0.5,
@@ -586,6 +586,9 @@ class CreateRegimePage(ttk.Frame):
         lookback = float(controls.get("lookback_days", 30))
         turnover = float(controls.get("turnover_limit", 0.4))
         confidence = float(controls.get("model_confidence_min", 0.6))
+        detection_threshold = float(
+            controls.get("detection_threshold", controls.get("entry_zscore", 1.0))
+        )
 
         if model == "Trend Following":
             pros = "Pros: Captures persistent moves and scales well in directional markets."
@@ -597,6 +600,15 @@ class CreateRegimePage(ttk.Frame):
             cons = "Cons: Can compound losses when trends persist."
             use_case = "Best use case: Range-bound or oscillatory tape with stable liquidity."
             failure = "Failure mode: Momentum regimes overpower entry thresholds."
+        elif model == "Regime Change":
+            pros = "Pros: Reacts quickly to state transitions and can reduce exposure before drawdowns deepen."
+            cons = "Cons: Sensitive settings can overtrade during noisy consolidations."
+            use_case = "Best use case: Macro inflection points and abrupt volatility/dispersion shifts."
+            failure = (
+                "Failure mode: False transition triggers create churn and slippage drag."
+                if detection_threshold < 1.2
+                else "Failure mode: Threshold too strict causes late response to real regime breaks."
+            )
         else:
             pros = "Pros: Provides convex protection during volatility spikes."
             cons = "Cons: Carry drag in calm markets."
@@ -611,18 +623,30 @@ class CreateRegimePage(ttk.Frame):
     def _validation_snapshot(self, leg: dict[str, object] | None = None) -> dict[str, str]:
         leg = leg or self._selected_leg()
         controls = leg["controls"]
+        model = str(leg.get("model_type", ""))
         lookback = float(controls.get("lookback_days", 30))
-        entry = float(controls.get("entry_zscore", 1.0))
+        detection_threshold = float(
+            controls.get("detection_threshold", controls.get("entry_zscore", 1.0))
+        )
         turnover = float(controls.get("turnover_limit", 0.3))
         slippage = float(controls.get("slippage_bps", 8))
 
-        data_sufficiency = "green" if lookback >= 30 else "red"
-        if lookback < 50 and entry > 2.8:
-            overfit_risk = "red"
-        elif lookback < 80 and entry > 2.2:
-            overfit_risk = "yellow"
+        if model == "Regime Change":
+            data_sufficiency = "green" if lookback >= 45 else "red"
+            if lookback < 60 and detection_threshold > 2.4:
+                overfit_risk = "red"
+            elif lookback < 90 and detection_threshold > 2.0:
+                overfit_risk = "yellow"
+            else:
+                overfit_risk = "green"
         else:
-            overfit_risk = "green"
+            data_sufficiency = "green" if lookback >= 30 else "red"
+            if lookback < 50 and detection_threshold > 2.8:
+                overfit_risk = "red"
+            elif lookback < 80 and detection_threshold > 2.2:
+                overfit_risk = "yellow"
+            else:
+                overfit_risk = "green"
 
         if turnover > 1.0 or slippage > 35:
             execution_realism = "red"
@@ -638,12 +662,26 @@ class CreateRegimePage(ttk.Frame):
 
     def _invalid_knob_message(self, leg: dict[str, object]) -> str | None:
         controls = leg["controls"]
-        entry = float(controls.get("entry_zscore", 1.0))
+        model = str(leg.get("model_type", ""))
+        detection_threshold = float(
+            controls.get("detection_threshold", controls.get("entry_zscore", 1.0))
+        )
         confidence = float(controls.get("model_confidence_min", 0.6))
         drawdown = float(controls.get("max_drawdown_stop", 0.1))
         max_position = float(controls.get("max_position_pct", 0.05))
-        if entry < 1.0 and confidence > 0.85:
+
+        if model == "Regime Change":
+            if detection_threshold < 0.8:
+                return "Detection threshold is too permissive for regime change detection."
+            if detection_threshold > 3.5:
+                return "Detection threshold is too strict and may miss real regime transitions."
+            if drawdown > 0.2:
+                return "Regime Change max drawdown stop should be 20% or lower."
+            if max_position > 0.12:
+                return "Regime Change max position % should be 12% or lower."
+        elif detection_threshold < 1.0 and confidence > 0.85:
             return "Entry z-score is too permissive for the selected confidence floor."
+
         if max_position > drawdown:
             return "Max position % cannot exceed max drawdown stop."
         return None
