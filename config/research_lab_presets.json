@@ -1,4 +1,5 @@
 {
+  "schema_version": 2,
   "default_preset": "balanced_baseline",
   "presets": {
     "balanced_baseline": {

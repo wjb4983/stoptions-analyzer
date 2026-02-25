@@ -10,6 +10,7 @@ from ui.workflow_preset_validator import validate_workflow_preset_payload
 def test_load_workflow_presets_uses_repo_config(monkeypatch, tmp_path):
     preset_path = tmp_path / "research_lab_presets.json"
     payload = {
+        "schema_version": 2,
         "default_preset": "fast_iteration",
         "presets": {
             "fast_iteration": {
@@ -33,6 +34,7 @@ def test_load_workflow_presets_uses_repo_config(monkeypatch, tmp_path):
     page = object.__new__(ResearchLabPage)
     loaded = ResearchLabPage._load_workflow_presets(page)
 
+    assert loaded["schema_version"] == 2
     assert loaded["default_preset"] == "fast_iteration"
     assert loaded["presets"]["fast_iteration"]["optimization"]["n_trials"] == 5
     assert loaded["presets"]["fast_iteration"]["walk_forward"]["split_policy"] == "volatility-regime-stratified"
@@ -48,15 +50,18 @@ def test_load_workflow_presets_falls_back_on_invalid_payload(monkeypatch, tmp_pa
 
     assert loaded["default_preset"] == DEFAULT_RESEARCH_WORKFLOW_PRESETS["default_preset"]
     assert "balanced_baseline" in loaded["presets"]
-    assert any("JSON object" in warning for warning in page._workflow_preset_warnings)
+    assert any("expected JSON object" in warning for warning in page._workflow_preset_warnings)
 
 
 def test_workflow_preset_validation_migrates_legacy_sampler_and_bounds():
     payload = {
+        "schema_version": 1,
         "default_preset": "legacy",
         "presets": {
             "legacy": {
                 "optimization": {"sampler": "bayesian"},
+                "entry_signals": ["ts_momentum"],
+                "exit_signals": ["none"],
                 "walk_forward": {
                     "train_fraction": 1.5,
                     "validation_fraction": 0.2,
@@ -78,7 +83,9 @@ def test_workflow_preset_validation_migrates_legacy_sampler_and_bounds():
     assert preset["walk_forward"]["train_fraction"] == 0.70
     assert preset["stress_controls"]["historical_window_fraction"] == 0.20
     assert preset["stress_controls"]["overlay_liquidity_multiplier"] == 0.4
-    assert any("migrated optimization.sampler 'bayesian' -> 'tpe'" in warning for warning in result.warnings)
+    assert result.payload["schema_version"] == 2
+    assert any("Migrated $.schema_version from 1 to 2." in warning for warning in result.warnings)
+    assert any("optimization.sampler" in warning for warning in result.warnings)
 
 
 def test_format_preset_warning_text_summarizes_entries():

@@ -83,6 +83,7 @@ DEFAULT_OPTIMIZER_OVERFITTING_PENALTY = '{}'
 TIMEFRAME_HISTORY_DAYS = {"1m": 14, "5m": 30, "15m": 60, "30m": 120, "1h": 365, "1d": 3650}
 GOVERNANCE_PROMOTION_STATES = ["research", "paper", "shadow", "production"]
 GOVERNANCE_APPROVAL_STATES = ["pending", "in_review", "approved", "rejected", "waived"]
+BACKTEST_SETTINGS_SCHEMA_VERSION = 2
 
 class BacktestingPage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
@@ -2514,6 +2515,51 @@ class BacktestingPage(ttk.Frame):
         if selected and selected not in names:
             self.template_var.set("")
 
+    def _migrate_backtest_settings(self, settings: dict[str, object]) -> tuple[dict[str, object], list[str], bool]:
+        migrated = dict(settings)
+        warnings: list[str] = []
+        changed = False
+
+        raw_schema = migrated.get("schema_version", 1)
+        try:
+            schema_version = int(raw_schema)
+        except (TypeError, ValueError):
+            warnings.append(
+                f"Invalid key at $.backtest_settings.schema_version: expected integer, got {raw_schema!r}; treating as legacy schema 1."
+            )
+            schema_version = 1
+            changed = True
+
+        if schema_version < BACKTEST_SETTINGS_SCHEMA_VERSION:
+            defaults_to_backfill = (
+                "selected_preset",
+                "selected_template",
+                "ui_mode",
+                "show_advanced_controls",
+                "selected_stress_profile",
+            )
+            for key in defaults_to_backfill:
+                if key not in migrated:
+                    migrated[key] = DEFAULT_BACKTEST_SETTINGS[key]
+                    warnings.append(
+                        f"Missing key at $.backtest_settings.{key}; backfilled with default value {DEFAULT_BACKTEST_SETTINGS[key]!r}."
+                    )
+                    changed = True
+
+            selected_preset = str(migrated.get("selected_preset", "custom"))
+            if selected_preset not in {"custom", *BACKTEST_STRATEGY_PRESETS.keys()}:
+                warnings.append(
+                    f"Invalid key at $.backtest_settings.selected_preset: unsupported value {selected_preset!r}; using 'custom'."
+                )
+                migrated["selected_preset"] = "custom"
+                changed = True
+
+        if migrated.get("schema_version") != BACKTEST_SETTINGS_SCHEMA_VERSION:
+            migrated["schema_version"] = BACKTEST_SETTINGS_SCHEMA_VERSION
+            changed = True
+
+        return migrated, warnings, changed
+
     def _apply_settings(self, settings: dict[str, object]) -> None:
         merged = dict(DEFAULT_BACKTEST_SETTINGS)
         merged.update(settings)
@@ -2563,6 +2609,10 @@ class BacktestingPage(ttk.Frame):
     def refresh(self) -> None:
         settings = dict(DEFAULT_BACKTEST_SETTINGS)
         settings.update(self.controller.state.backtest_settings)
+        settings, migration_messages, migration_changed = self._migrate_backtest_settings(settings)
+        if migration_changed:
+            self.controller.state.backtest_settings = dict(settings)
+            self.controller.persist_state()
 
         strategy = str(settings.get("strategy", "momentum"))
         if strategy not in STRATEGIES:
@@ -2711,6 +2761,7 @@ class BacktestingPage(ttk.Frame):
             stale_messages.append(
                 f"Unsupported optimizer sampler preset value: {settings.get('optimizer_sampler')} | Supported values: {', '.join(OPTIMIZER_SAMPLERS)}"
             )
+        stale_messages.extend(migration_messages)
         self._stale_preset_messages = [item for item in stale_messages if item]
 
         self.xsmom_top_quantile_var.set(str(settings.get("xsmom_top_quantile", "0.2")))
@@ -2911,6 +2962,7 @@ class BacktestingPage(ttk.Frame):
             "show_advanced_controls": bool(self.show_advanced_controls_var.get()),
             "selected_preset": self._preset_display_to_key.get(self.preset_var.get().strip(), "custom"),
             "selected_template": self.template_var.get().strip(),
+            "schema_version": BACKTEST_SETTINGS_SCHEMA_VERSION,
             **xsmom_params,
         }
         self.controller.persist_state()
