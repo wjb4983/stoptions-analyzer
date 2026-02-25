@@ -129,6 +129,25 @@ DEFAULT_BACKTEST_SETTINGS = {
     "backtest_data_root": str(BACKTEST_CACHE_DIR),
 }
 
+DEFAULT_REGIME_GLOBAL_RISK_LIMITS = {
+    "max_gross_exposure": 1.0,
+    "max_net_exposure": 0.5,
+    "max_position_weight": 0.10,
+    "max_sector_weight": 0.25,
+}
+
+DEFAULT_REGIME_TRAINING_WINDOW = {
+    "lookback_days": 252,
+    "retrain_frequency_days": 21,
+    "validation_window_days": 63,
+}
+
+DEFAULT_REGIME_CONFIDENCE_THRESHOLDS = {
+    "min_assignment_confidence": 0.60,
+    "min_transition_confidence": 0.55,
+    "alert_confidence": 0.70,
+}
+
 BACKTEST_STRATEGY_PRESETS = {
     "daily_trend": {
         "label": "Daily Trend",

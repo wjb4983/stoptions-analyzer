@@ -15,6 +15,7 @@ UI_FILES = [
     "src/ui/call_put_analysis_page.py",
     "src/ui/ticker_select_page.py",
     "src/ui/ticker_entry_page.py",
+    "src/ui/create_regime_page.py",
 ]
 
 
@@ -47,6 +48,7 @@ def test_required_state_contracts_present_for_core_pages():
         "src/ui/analysis_page.py": {"selected_ticker", "analysis_mode", "option_strategy"},
         "src/ui/general_analysis_page.py": {"tickers", "general_analysis_settings"},
         "src/ui/backtesting_page.py": {"tickers", "backtest_settings", "backtest_templates"},
+        "src/ui/create_regime_page.py": {"regime_definitions", "regime_training_runs", "active_regime_id"},
     }
     for rel_path, expected_keys in expected.items():
         tree = ast.parse(Path(rel_path).read_text(encoding="utf-8"))
