@@ -129,3 +129,89 @@ class OptionsVolatilityModel(BaseParadigmModel):
             "oi_changes_z",
             "unusual_volume_signature_rank",
         )
+
+
+class MomentumForecastingModel(BaseParadigmModel):
+    name = "momentum_forecasting"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "returns_1m",
+            "returns_3m",
+            "returns_6m",
+            "trend_strength_20d",
+            "realized_vol_20d",
+        )
+
+
+class VRPCarryRelativeValueModel(BaseParadigmModel):
+    name = "vrp_carry_relative_value"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "implied_vol",
+            "realized_vol",
+            "iv_rv_spread",
+            "term_slope",
+            "corr_risk_premium",
+        )
+
+
+class CheapVolEventTimingModel(BaseParadigmModel):
+    name = "cheap_vol_event_timing"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "event_sentiment",
+            "post_event_drift",
+            "iv_rv_spread",
+            "skew_z",
+        )
+
+
+class CheapVolMeanReversionTimingModel(BaseParadigmModel):
+    name = "cheap_vol_mean_reversion_timing"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "zscore_5d",
+            "short_term_reversal",
+            "term_structure_curvature_z",
+            "local_surface_distortion_z",
+        )
+
+
+class HMMRegimeChangeModel(BaseParadigmModel):
+    name = "hmm_regime_change"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "implied_vol",
+            "realized_vol",
+            "returns_1m",
+            "returns_3m",
+        )
+
+
+class MarkovRegimeSwitchingModel(BaseParadigmModel):
+    name = "markov_regime_switching"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "implied_vol",
+            "realized_vol",
+            "term_slope",
+            "corr_risk_premium",
+        )
+
+
+class ChangepointRegimeChangeModel(BaseParadigmModel):
+    name = "changepoint_regime_change"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "returns_1m",
+            "returns_3m",
+            "iv_rv_spread",
+            "term_slope",
+        )

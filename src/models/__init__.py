@@ -23,6 +23,7 @@ from .capacity import (
     rank_and_allocate_by_capacity,
 )
 from .robustness import RobustnessThresholds, build_robustness_scorecards
+from .regime_catalog import ModelDescriptor, is_model_allowed_for_leg, list_models_for_leg, validate_model_leg_pairing
 
 __all__ = [
     "BaseParadigmModel",
@@ -54,4 +55,8 @@ __all__ = [
     "compute_alpha_decay_under_capital",
     "rank_and_allocate_by_capacity",
     "is_promotion_blocked_for_capacity",
+    "ModelDescriptor",
+    "list_models_for_leg",
+    "is_model_allowed_for_leg",
+    "validate_model_leg_pairing",
 ]

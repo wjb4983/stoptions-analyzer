@@ -5,19 +5,26 @@ from typing import Any
 
 from .base import ModelInterface
 from .paradigms import (
+    ChangepointRegimeChangeModel,
+    CheapVolEventTimingModel,
+    CheapVolMeanReversionTimingModel,
     DispersionModel,
     EventDrivenModel,
     FactorNeutralCrossSectionalRankModel,
+    HMMRegimeChangeModel,
     MacroRegimeConditionedModel,
+    MarkovRegimeSwitchingModel,
     MeanReversionModel,
     MetaLabelClassifierModel,
     MicrostructureImbalanceModel,
     MomentumModel,
+    MomentumForecastingModel,
     OptionsFlowDrivenModel,
     OptionsDirectionalModel,
     OptionsVolatilityModel,
     StatArbPairSpreadModel,
     TermStructureSlopeModel,
+    VRPCarryRelativeValueModel,
     VolatilityCarryModel,
 )
 
@@ -36,6 +43,13 @@ MODEL_REGISTRY: dict[str, type[ModelInterface]] = {
     OptionsVolatilityModel.name: OptionsVolatilityModel,
     MicrostructureImbalanceModel.name: MicrostructureImbalanceModel,
     MetaLabelClassifierModel.name: MetaLabelClassifierModel,
+    MomentumForecastingModel.name: MomentumForecastingModel,
+    VRPCarryRelativeValueModel.name: VRPCarryRelativeValueModel,
+    CheapVolEventTimingModel.name: CheapVolEventTimingModel,
+    CheapVolMeanReversionTimingModel.name: CheapVolMeanReversionTimingModel,
+    HMMRegimeChangeModel.name: HMMRegimeChangeModel,
+    MarkovRegimeSwitchingModel.name: MarkovRegimeSwitchingModel,
+    ChangepointRegimeChangeModel.name: ChangepointRegimeChangeModel,
 }
 
 DEPLOYMENT_SLOTS = ("champion", "challenger", "candidate")
