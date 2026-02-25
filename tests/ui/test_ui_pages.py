@@ -872,3 +872,40 @@ def test_create_regime_run_train_failure_shows_error_and_no_success_log(monkeypa
     assert controller.state.regime_training_runs == []
     assert not any(entry["event"] == "training_completed" for entry in structured_logs)
     assert any(entry["event"] == "training_failed" for entry in structured_logs)
+
+
+def test_create_regime_run_export_builds_bundle_from_latest_manifest(monkeypatch):
+    infos = []
+    monkeypatch.setattr(create_regime_page.messagebox, "showinfo", lambda title, msg: infos.append((title, msg)))
+
+    page, controller = _build_create_regime_training_page()
+    logs = []
+    page._append_structured_log = lambda **kwargs: logs.append(kwargs)
+    controller.state.regime_training_runs = [
+        {
+            "run_id": "run-1",
+            "status": "success",
+            "artifact_path": "data/run_1/manifest.json",
+            "summary": "trained",
+        }
+    ]
+
+    captured = []
+
+    class _FakeBundle:
+        bundle_dir = "data/regime_exports/regime_export_run-1-abc"
+        bundle_manifest_path = "data/regime_exports/regime_export_run-1-abc/bundle_manifest.json"
+        deployment_version = "run-1-abc"
+
+    def _fake_export(path):
+        captured.append(path)
+        return _FakeBundle()
+
+    monkeypatch.setattr(create_regime_page, "export_regime_training_bundle", _fake_export)
+
+    page._run_export()
+
+    assert captured == ["data/run_1/manifest.json"]
+    assert infos and infos[-1][0] == "Export completed"
+    assert "Bundle path: data/regime_exports/regime_export_run-1-abc" in infos[-1][1]
+    assert any(entry.get("event") == "export_completed" for entry in logs)
