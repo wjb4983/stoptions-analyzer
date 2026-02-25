@@ -178,8 +178,17 @@ class RegistryBackedRegimeTrainingAdapter:
         if not bool(training_data_bundle.metadata.get("pass", True)):
             ratio = float(training_data_bundle.metadata.get("universe_pass_ratio", 0.0))
             threshold = float(training_data_bundle.metadata.get("required_universe_pass_ratio", 1.0))
-            raise ValueError(
-                f"Training data universe pass ratio {ratio:.3f} below required threshold {threshold:.3f}"
+            training_data_bundle.metadata["degraded_universe_coverage"] = True
+            training_data_bundle.metadata["degraded_universe_coverage_reason"] = (
+                f"Training data universe pass ratio {ratio:.3f} below required threshold {threshold:.3f}; "
+                "continuing with available symbols"
+            )
+            issues.append(
+                AdapterIssue(
+                    level="warning",
+                    model_id="training_data",
+                    message=training_data_bundle.metadata["degraded_universe_coverage_reason"],
+                )
             )
 
         for idx, leg in enumerate(request.legs):
