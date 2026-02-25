@@ -239,6 +239,9 @@ def test_main_menu_and_research_navigation(monkeypatch):
     assert saved == ["abc"]
     assert controller.api_key == "abc"
 
+    menu.open_create_regime_workspace()
+    assert controller.frames[-1] == "CreateRegimePage"
+
     lab = research_lab_page.ResearchLabPage.__new__(research_lab_page.ResearchLabPage)
     lab.controller = controller
     lab.open_governance_workspace()
@@ -339,6 +342,7 @@ def test_backtesting_mode_toggle_and_preset_selection_apply_expected_settings():
     page.controller = controller
     page.ui_mode_var = Var("basic")
     page.use_walk_forward_var = Var(True)
+    page.show_advanced_controls_var = Var(False)
     page.strategy_var = Var("momentum")
     page._update_validation_hint = lambda: False
     frame = FakeFrameWidget()
@@ -550,6 +554,11 @@ def _build_wizard_lab(tmp_path: Path) -> research_lab_page.ResearchLabPage:
     lab.wizard_review_notes_var = Var("")
     lab.wizard_promotion_decision_var = Var("pending")
     lab.wizard_session_label_var = Var("team sync")
+    lab.show_advanced_controls_var = Var(False)
+    lab.easy_mode_var = Var(True)
+    lab._advanced_workflow_widgets = []
+    lab._refresh_workflow_validation_hints = lambda: None
+    lab._on_show_advanced_controls_toggle = lambda: None
     return lab
 
 

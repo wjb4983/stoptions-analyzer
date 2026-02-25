@@ -1,6 +1,7 @@
 from ui.analysis_page import AnalysisPage
 from ui.backtesting_page import BacktestingPage
 from ui.call_put_analysis_page import CallPutAnalysisPage
+from ui.create_regime_page import CreateRegimePage
 from ui.general_analysis_page import GeneralAnalysisPage
 from ui.main_menu import MainMenu
 from ui.research_lab_page import ResearchLabPage
@@ -12,6 +13,7 @@ __all__ = [
     "AnalysisPage",
     "BacktestingPage",
     "CallPutAnalysisPage",
+    "CreateRegimePage",
     "GeneralAnalysisPage",
     "MainMenu",
     "ResearchLabPage",

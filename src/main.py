@@ -16,6 +16,7 @@ from ui import (
     AnalysisPage,
     BacktestingPage,
     CallPutAnalysisPage,
+    CreateRegimePage,
     GeneralAnalysisPage,
     MainMenu,
     ResearchLabPage,
@@ -50,6 +51,7 @@ class StoptionsApp(tk.Tk):
             GeneralAnalysisPage,
             CallPutAnalysisPage,
             SpreadAnalysisPage,
+            CreateRegimePage,
         ):
             frame = frame_cls(container, self)
             self.frames[frame_cls.__name__] = frame

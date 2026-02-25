@@ -80,6 +80,16 @@ class MainMenu(ttk.Frame):
             width=30,
         ).grid(row=5, column=0, pady=10)
 
+        ttk.Button(
+            button_frame,
+            text="Create Regime",
+            command=self.open_create_regime_workspace,
+            width=30,
+        ).grid(row=6, column=0, pady=10)
+
+    def open_create_regime_workspace(self) -> None:
+        self.controller.show_frame("CreateRegimePage")
+
     def refresh(self) -> None:
         self.api_key_var.set(self.controller.api_key)
 
