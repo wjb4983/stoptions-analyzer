@@ -23,6 +23,7 @@ from backtesting.cache_runner import (
     run_walk_forward_backtest,
 )
 from backtesting.chain_runner import build_default_research_execution_chain
+from backtesting.scenario_toolkit import list_scenario_pack_templates
 from config import (
     BACKTEST_OUTPUT_DIR,
     CONFIG_DIR,
@@ -80,6 +81,9 @@ class ResearchWorkflowConfig:
     prior_strategy_keys: list[str] | None
     walk_forward_split_policy: str
     stress_controls: dict[str, object]
+    scenario_packs: list[str]
+    stress_profile: str
+    run_mode: str
     benchmark_selection: list[str]
 
 
@@ -88,6 +92,35 @@ DEFAULT_OPTIMIZATION_OBJECTIVES = '[{"name":"sharpe","sense":"maximize"},{"name"
 DEFAULT_OPTIMIZATION_OBJECTIVE_WEIGHTS = '{}'
 DEFAULT_OPTIMIZATION_OVERFITTING_PENALTY = '{}'
 
+STRESS_PROFILES: dict[str, dict[str, float]] = {
+    "Mild": {
+        "historical_window_fraction": 0.15,
+        "historical_replay_window_bars": 12,
+        "synthetic_jump_magnitude": 0.01,
+        "synthetic_jump_interval": 10,
+        "synthetic_vol_cluster_multiplier": 1.2,
+        "overlay_spread_multiplier": 1.5,
+        "overlay_liquidity_multiplier": 0.7,
+    },
+    "Base": {
+        "historical_window_fraction": 0.20,
+        "historical_replay_window_bars": 20,
+        "synthetic_jump_magnitude": 0.02,
+        "synthetic_jump_interval": 7,
+        "synthetic_vol_cluster_multiplier": 1.6,
+        "overlay_spread_multiplier": 2.5,
+        "overlay_liquidity_multiplier": 0.4,
+    },
+    "Severe": {
+        "historical_window_fraction": 0.30,
+        "historical_replay_window_bars": 36,
+        "synthetic_jump_magnitude": 0.035,
+        "synthetic_jump_interval": 4,
+        "synthetic_vol_cluster_multiplier": 2.2,
+        "overlay_spread_multiplier": 4.0,
+        "overlay_liquidity_multiplier": 0.25,
+    },
+}
 
 DEFAULT_RESEARCH_WORKFLOW_PRESETS: dict[str, Any] = {
     "default_preset": "balanced_baseline",
@@ -168,6 +201,7 @@ class ResearchLabPage(ttk.Frame):
         self._workflow_presets = self._load_workflow_presets()
         self._wizard_comments: list[dict[str, str]] = []
         self._wizard_history: list[dict[str, str]] = []
+        self._pending_run_mode = "full_chain"
 
 
         ttk.Label(self, text="Research Lab", font=("Arial", 18, "bold")).pack(pady=(12, 8))
@@ -234,6 +268,11 @@ class ResearchLabPage(ttk.Frame):
             action_label="Run Intake Pipeline",
             action=self.run_hypothesis_pipeline,
         )
+
+        action_row = ttk.Frame(self)
+        action_row.pack(fill="x", padx=40, pady=(6, 4))
+        ttk.Button(action_row, text="Run stress only", command=self.run_stress_only).pack(side="left")
+        ttk.Button(action_row, text="Run full chain", command=self.run_full_chain).pack(side="left", padx=(8, 0))
 
         self._build_workflow_controls()
         self._build_wizard_mode()
@@ -1268,6 +1307,8 @@ class ResearchLabPage(ttk.Frame):
         self.stress_synthetic_vol_cluster_multiplier_var = tk.StringVar(value="1.6")
         self.stress_overlay_spread_multiplier_var = tk.StringVar(value="2.5")
         self.stress_overlay_liquidity_multiplier_var = tk.StringVar(value="0.4")
+        self.selected_stress_profile_var = tk.StringVar(value="Base")
+        self._scenario_pack_options = tuple(list_scenario_pack_templates())
         self.rl_max_net_gamma_var = tk.StringVar(value="1.25")
         self.rl_max_abs_vega_bucket_var = tk.StringVar(value="7500")
         self.rl_max_abs_delta_underlying_var = tk.StringVar(value="1800")
@@ -1560,6 +1601,34 @@ class ResearchLabPage(ttk.Frame):
         ttk.Entry(stress_row4, textvariable=self.stress_overlay_liquidity_multiplier_var, width=8).pack(side="left")
         self._advanced_workflow_widgets.extend(stress_row4.winfo_children())
         add_help(row, help_text["stress_overlay"])
+
+        row += 1
+        ttk.Label(controls, text="Scenario packs").grid(row=row, column=0, sticky="nw", padx=8, pady=5)
+        scenario_row = ttk.Frame(controls)
+        scenario_row.grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        scenario_row.columnconfigure(0, weight=1)
+        self.scenario_pack_listbox = tk.Listbox(scenario_row, selectmode="multiple", exportselection=False, height=4)
+        self.scenario_pack_listbox.grid(row=0, column=0, sticky="ew")
+        for option in self._scenario_pack_options:
+            self.scenario_pack_listbox.insert("end", option)
+
+        row += 1
+        ttk.Label(controls, text="Stress profile").grid(row=row, column=0, sticky="w", padx=8, pady=5)
+        stress_profile_row = ttk.Frame(controls)
+        stress_profile_row.grid(row=row, column=1, sticky="w", padx=8, pady=5)
+        for profile_name in ("Mild", "Base", "Severe"):
+            ttk.Button(stress_profile_row, text=profile_name, command=lambda p=profile_name: self._apply_stress_profile(p)).pack(side="left", padx=(0, 6))
+
+        row += 1
+        self.stress_selection_summary_var = tk.StringVar(value="Stress run summary will include packs/profile.")
+        ttk.Label(controls, textvariable=self.stress_selection_summary_var, foreground="#2a4f7a", justify="left", wraplength=780).grid(
+            row=row,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            padx=8,
+            pady=(0, 4),
+        )
 
         row += 1
         ttk.Label(controls, text="Options Risk Limits").grid(row=row, column=0, sticky="nw", padx=8, pady=5)
@@ -1967,6 +2036,8 @@ class ResearchLabPage(ttk.Frame):
         if context is None:
             return
         context["universe_filters"] = self._build_universe_filters()
+        context["run_mode"] = run_mode
+        self._pending_run_mode = run_mode
         wizard_tickers = [item.strip() for item in self.wizard_data_universe_var.get().split(",") if item.strip()]
         parsed_start = parse_date(self.wizard_period_start_var.get().strip())
         parsed_end = parse_date(self.wizard_period_end_var.get().strip())
@@ -2183,11 +2254,13 @@ class ResearchLabPage(ttk.Frame):
         self._wizard_refresh_nav_state()
         self._append_output(f"Wizard session imported from {source}.")
 
-    def _start_worker(self, target: Callable[[dict[str, Any], ResearchWorkflowConfig], str], label: str) -> None:
+    def _start_worker(self, target: Callable[[dict[str, Any], ResearchWorkflowConfig], str], label: str, *, run_mode: str = "full_chain") -> None:
         context = self._build_common_context()
         if context is None:
             return
         context["universe_filters"] = self._build_universe_filters()
+        context["run_mode"] = run_mode
+        self._pending_run_mode = run_mode
         config = self._build_workflow_config()
         if config is None:
             return
@@ -2226,6 +2299,19 @@ class ResearchLabPage(ttk.Frame):
 
         widget.bind("<Enter>", show_tooltip)
         widget.bind("<Leave>", hide_tooltip)
+
+    def _apply_stress_profile(self, profile_name: str) -> None:
+        profile = STRESS_PROFILES.get(profile_name)
+        if not profile:
+            return
+        self.selected_stress_profile_var.set(profile_name)
+        self.stress_historical_window_fraction_var.set(f"{float(profile['historical_window_fraction']):.2f}")
+        self.stress_historical_replay_window_bars_var.set(str(int(profile['historical_replay_window_bars'])))
+        self.stress_synthetic_jump_magnitude_var.set(f"{float(profile['synthetic_jump_magnitude']):.3f}")
+        self.stress_synthetic_jump_interval_var.set(str(int(profile['synthetic_jump_interval'])))
+        self.stress_synthetic_vol_cluster_multiplier_var.set(f"{float(profile['synthetic_vol_cluster_multiplier']):.2f}")
+        self.stress_overlay_spread_multiplier_var.set(f"{float(profile['overlay_spread_multiplier']):.2f}")
+        self.stress_overlay_liquidity_multiplier_var.set(f"{float(profile['overlay_liquidity_multiplier']):.2f}")
 
     def _apply_easy_mode_defaults(self) -> None:
         self.optimization_sampler_var.set("tpe")
@@ -2890,6 +2976,12 @@ class ResearchLabPage(ttk.Frame):
     def run_stress_tests(self) -> None:
         self._start_worker(self._run_stress_workflow, "Stress/scenario tests")
 
+    def run_stress_only(self) -> None:
+        self._start_worker(self._run_stress_workflow, "Stress/scenario tests (stress only)", run_mode="stress_only")
+
+    def run_full_chain(self) -> None:
+        self._start_worker(self._run_stress_workflow, "Stress/scenario tests (full chain)", run_mode="full_chain")
+
     def run_hypothesis_pipeline(self) -> None:
         self._start_worker(self._run_hypothesis_pipeline_workflow, "Hypothesis intake pipeline")
 
@@ -3097,6 +3189,8 @@ class ResearchLabPage(ttk.Frame):
             return None
         prior_strategy_keys = [item.strip() for item in self.wf_prior_strategy_keys_var.get().split(",") if item.strip()]
 
+        scenario_packs = self._selected_listbox_values(self.scenario_pack_listbox)
+        stress_profile = self.selected_stress_profile_var.get().strip() or "Base"
         stress_controls = {
             "enable_historical_replay_regimes": bool(self.stress_enable_historical_replay_var.get()),
             "historical_window_fraction": float(parse_float(self.stress_historical_window_fraction_var.get()) or 0.20),
@@ -3106,7 +3200,14 @@ class ResearchLabPage(ttk.Frame):
             "synthetic_vol_cluster_multiplier": float(parse_float(self.stress_synthetic_vol_cluster_multiplier_var.get()) or 1.6),
             "overlay_spread_multiplier": float(parse_float(self.stress_overlay_spread_multiplier_var.get()) or 2.5),
             "overlay_liquidity_multiplier": float(parse_float(self.stress_overlay_liquidity_multiplier_var.get()) or 0.4),
+            "selected_profile": stress_profile,
         }
+        self.stress_selection_summary_var.set(
+            "Stress config → profile: "
+            + stress_profile
+            + ", scenario packs: "
+            + (", ".join(scenario_packs) if scenario_packs else "none")
+        )
 
         return ResearchWorkflowConfig(
             preset_name=self.workflow_preset_var.get().strip(),
@@ -3143,6 +3244,9 @@ class ResearchLabPage(ttk.Frame):
             prior_strategy_keys=prior_strategy_keys or None,
             walk_forward_split_policy=split_policy,
             stress_controls=stress_controls,
+            scenario_packs=scenario_packs,
+            stress_profile=stress_profile,
+            run_mode=str(getattr(self, "_pending_run_mode", "full_chain")),
             benchmark_selection=benchmark_selection,
         )
 
@@ -3242,7 +3346,12 @@ class ResearchLabPage(ttk.Frame):
         )
 
     def _run_stress_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
-        return run_multi_signal_backtest(
+        controls = dict(config.stress_controls)
+        run_mode = str(context.get("run_mode", config.run_mode or "full_chain"))
+        controls["run_mode"] = run_mode
+        if run_mode == "stress_only":
+            controls["stress_only"] = True
+        output = run_multi_signal_backtest(
             tickers=list(context["tickers"]),
             start_date=context["start_date"],
             end_date=context["end_date"],
@@ -3263,11 +3372,13 @@ class ResearchLabPage(ttk.Frame):
                 "workflow_preset": config.preset_name,
                 "universe_filters": dict(context.get("universe_filters", {})),
             },
-            stress_controls=dict(config.stress_controls),
+            stress_controls=controls,
+            scenario_packs=list(config.scenario_packs),
             benchmarks=list(config.benchmark_selection),
             cancellation_token=cancellation_token,
             run_namespace=str(context.get("run_namespace", "")).strip() or None,
         )
+        return output + "\nApplied stress profile: " + config.stress_profile + " | Scenario packs: " + (", ".join(config.scenario_packs) if config.scenario_packs else "none") + " | Run mode: " + run_mode
 
     def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
         self._research_lab_dir.mkdir(parents=True, exist_ok=True)

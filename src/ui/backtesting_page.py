@@ -16,6 +16,7 @@ from backtesting.cache_runner import (
     run_time_series_momentum_backtest,
     run_walk_forward_backtest,
 )
+from backtesting.scenario_toolkit import list_scenario_pack_templates
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PRESETS, DEFAULT_BACKTEST_SETTINGS
 from ui.backtesting_insights import (
     build_guardrails,
@@ -43,6 +44,36 @@ from utils.parsing import normalize_cache_root, parse_date, parse_float
 STRATEGIES = ["momentum", "xsmom"]
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization", "hrp", "herc"]
+
+STRESS_PROFILES: dict[str, dict[str, float]] = {
+    "Mild": {
+        "historical_window_fraction": 0.15,
+        "historical_replay_window_bars": 12,
+        "synthetic_jump_magnitude": 0.01,
+        "synthetic_jump_interval": 10,
+        "synthetic_vol_cluster_multiplier": 1.2,
+        "overlay_spread_multiplier": 1.5,
+        "overlay_liquidity_multiplier": 0.7,
+    },
+    "Base": {
+        "historical_window_fraction": 0.20,
+        "historical_replay_window_bars": 20,
+        "synthetic_jump_magnitude": 0.02,
+        "synthetic_jump_interval": 7,
+        "synthetic_vol_cluster_multiplier": 1.6,
+        "overlay_spread_multiplier": 2.5,
+        "overlay_liquidity_multiplier": 0.4,
+    },
+    "Severe": {
+        "historical_window_fraction": 0.30,
+        "historical_replay_window_bars": 36,
+        "synthetic_jump_magnitude": 0.035,
+        "synthetic_jump_interval": 4,
+        "synthetic_vol_cluster_multiplier": 2.2,
+        "overlay_spread_multiplier": 4.0,
+        "overlay_liquidity_multiplier": 0.25,
+    },
+}
 
 DEFAULT_OPTIMIZER_SEARCH_SPACE = '{"combo_index":{"type":"discrete","values":[0]}}'
 DEFAULT_OPTIMIZER_OBJECTIVES = '[{"name":"sharpe","sense":"maximize"},{"name":"turnover_total","sense":"minimize"},{"name":"max_drawdown","sense":"maximize"}]'
@@ -248,6 +279,33 @@ class BacktestingPage(ttk.Frame):
         ttk.Entry(stress_row4, textvariable=self.stress_overlay_spread_multiplier_var, width=8).pack(side="left")
         ttk.Label(stress_row4, text=" / ").pack(side="left")
         ttk.Entry(stress_row4, textvariable=self.stress_overlay_liquidity_multiplier_var, width=8).pack(side="left")
+
+        row += 1
+        ttk.Label(strategy_frame, text="Scenario packs").grid(row=row, column=0, sticky="nw", padx=8, pady=6)
+        self.scenario_pack_listbox = tk.Listbox(strategy_frame, selectmode="multiple", exportselection=False, height=4)
+        self.scenario_pack_listbox.grid(row=row, column=1, sticky="ew", padx=8, pady=6)
+        self._scenario_pack_options = tuple(list_scenario_pack_templates())
+        for option in self._scenario_pack_options:
+            self.scenario_pack_listbox.insert("end", option)
+
+        row += 1
+        ttk.Label(strategy_frame, text="Stress profile").grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        profile_row = ttk.Frame(strategy_frame)
+        profile_row.grid(row=row, column=1, sticky="w", padx=8, pady=6)
+        self.selected_stress_profile_var = tk.StringVar(value="Base")
+        for profile_name in ("Mild", "Base", "Severe"):
+            ttk.Button(profile_row, text=profile_name, command=lambda p=profile_name: self._apply_stress_profile(p)).pack(side="left", padx=(0, 6))
+
+        row += 1
+        self.run_selection_summary_var = tk.StringVar(value="Run summary will include selected scenario packs and stress profile.")
+        ttk.Label(strategy_frame, textvariable=self.run_selection_summary_var, foreground="#2a4f7a", justify="left", wraplength=620).grid(
+            row=row,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            padx=8,
+            pady=(0, 6),
+        )
 
         row += 1
         ttk.Label(strategy_frame, text="Starting Capital").grid(row=row, column=0, sticky="w", padx=8, pady=6)
@@ -803,16 +861,20 @@ class BacktestingPage(ttk.Frame):
         button_row.columnconfigure(1, weight=1)
         button_row.columnconfigure(2, weight=1)
         button_row.columnconfigure(3, weight=1)
+        button_row.columnconfigure(4, weight=1)
 
         ttk.Button(button_row, text="Save Parameters", command=self.save_settings).grid(row=0, column=0, padx=10, pady=4)
-        self.run_button = ttk.Button(button_row, text="Run Backtest", command=self.run_backtest)
-        self.run_button.grid(row=0, column=1, padx=10, pady=4)
-        ttk.Button(button_row, text="Export Prompt Pack", command=self.export_prompt_pack).grid(row=0, column=2, padx=10, pady=4)
+        self.run_stress_only_button = ttk.Button(button_row, text="Run stress only", command=self.run_stress_only)
+        self.run_stress_only_button.grid(row=0, column=1, padx=10, pady=4)
+        self.run_full_chain_button = ttk.Button(button_row, text="Run full chain", command=self.run_full_chain)
+        self.run_full_chain_button.grid(row=0, column=2, padx=10, pady=4)
+        self.run_button = self.run_full_chain_button
+        ttk.Button(button_row, text="Export Prompt Pack", command=self.export_prompt_pack).grid(row=0, column=3, padx=10, pady=4)
         ttk.Button(
             button_row,
             text="Back to Main Menu",
             command=lambda: controller.show_frame("MainMenu"),
-        ).grid(row=0, column=3, padx=10, pady=4)
+        ).grid(row=0, column=4, padx=10, pady=4)
 
         self._register_advanced_widgets()
         self._bind_validation_watchers()
@@ -2403,7 +2465,7 @@ class BacktestingPage(ttk.Frame):
         messages.extend(self._stale_preset_messages)
         self._validation_messages = messages
         self.validation_hint_var.set("\n".join(messages))
-        self.run_button.config(state="disabled" if disable_run else "normal")
+        self._set_run_controls_state("disabled" if disable_run else "normal")
         return disable_run
 
     def _refresh_template_choices(self) -> None:
@@ -2491,6 +2553,10 @@ class BacktestingPage(ttk.Frame):
         self.stress_synthetic_vol_cluster_multiplier_var.set(str(settings.get("stress_synthetic_vol_cluster_multiplier", "1.6")))
         self.stress_overlay_spread_multiplier_var.set(str(settings.get("stress_overlay_spread_multiplier", "2.5")))
         self.stress_overlay_liquidity_multiplier_var.set(str(settings.get("stress_overlay_liquidity_multiplier", "0.4")))
+        selected_packs = [item.strip() for item in str(settings.get("selected_scenario_packs", "")).split(",") if item.strip()]
+        self._set_listbox_selection(self.scenario_pack_listbox, selected_packs, valid_options=self._scenario_pack_options)
+        saved_profile = str(settings.get("selected_stress_profile", "Base"))
+        self.selected_stress_profile_var.set(saved_profile if saved_profile in STRESS_PROFILES else "Base")
         self.starting_capital_var.set(str(settings.get("starting_capital", "100000")))
         self.bet_sizing_mode_var.set(str(settings.get("bet_sizing_mode", "half_kelly")))
         self.custom_bet_pct_var.set(str(settings.get("custom_bet_pct", "10")))
@@ -2713,6 +2779,8 @@ class BacktestingPage(ttk.Frame):
             "stress_synthetic_vol_cluster_multiplier": self.stress_synthetic_vol_cluster_multiplier_var.get().strip() or "1.6",
             "stress_overlay_spread_multiplier": self.stress_overlay_spread_multiplier_var.get().strip() or "2.5",
             "stress_overlay_liquidity_multiplier": self.stress_overlay_liquidity_multiplier_var.get().strip() or "0.4",
+            "selected_scenario_packs": ",".join(self._selected_listbox_values(self.scenario_pack_listbox)),
+            "selected_stress_profile": self.selected_stress_profile_var.get().strip() or "Base",
             "starting_capital": str(starting_capital),
             "bet_sizing_mode": self.bet_sizing_mode_var.get().strip() or "half_kelly",
             "custom_bet_pct": str(custom_bet_pct),
@@ -2809,7 +2877,13 @@ class BacktestingPage(ttk.Frame):
             messagebox.showinfo("Saved", "Backtesting parameters saved.")
         return True
 
-    def run_backtest(self) -> None:
+    def run_stress_only(self) -> None:
+        self.run_backtest(run_mode="stress_only")
+
+    def run_full_chain(self) -> None:
+        self.run_backtest(run_mode="full_chain")
+
+    def run_backtest(self, run_mode: str = "full_chain") -> None:
         if self._update_validation_hint():
             messagebox.showinfo("Validation warning", "Resolve validation hints before running the backtest.")
             return
@@ -2887,6 +2961,8 @@ class BacktestingPage(ttk.Frame):
             "latency_ms": int(parse_float(self.execution_latency_ms_var.get()) or 0),
             "drift_bps_per_bar": float(parse_float(self.execution_impact_bps_var.get()) or 1.0),
         }
+        selected_scenario_packs = self._selected_listbox_values(self.scenario_pack_listbox)
+        selected_profile = self.selected_stress_profile_var.get().strip() or "Base"
         stress_controls = {
             "enable_historical_replay_regimes": bool(self.stress_enable_historical_replay_var.get()),
             "historical_window_fraction": float(parse_float(self.stress_historical_window_fraction_var.get()) or 0.20),
@@ -2896,7 +2972,17 @@ class BacktestingPage(ttk.Frame):
             "synthetic_vol_cluster_multiplier": float(parse_float(self.stress_synthetic_vol_cluster_multiplier_var.get()) or 1.6),
             "overlay_spread_multiplier": float(parse_float(self.stress_overlay_spread_multiplier_var.get()) or 2.5),
             "overlay_liquidity_multiplier": float(parse_float(self.stress_overlay_liquidity_multiplier_var.get()) or 0.4),
+            "selected_profile": selected_profile,
+            "run_mode": run_mode,
         }
+        self.run_selection_summary_var.set(
+            "Run config → mode: "
+            + run_mode
+            + ", stress profile: "
+            + selected_profile
+            + ", scenario packs: "
+            + (", ".join(selected_scenario_packs) if selected_scenario_packs else "none")
+        )
 
         governance_payload = {
             "hypothesis_id": self.gov_hypothesis_id_var.get().strip(),
@@ -3100,6 +3186,8 @@ class BacktestingPage(ttk.Frame):
                     cv_seed,
                     governance_payload,
                     stress_controls,
+                    selected_scenario_packs,
+                    run_mode,
                 )
                 status_line = f"Running walk-forward with {len(selected_entries) * len(selected_exits)} candidates...\n"
             else:
@@ -3123,8 +3211,10 @@ class BacktestingPage(ttk.Frame):
                     portfolio_cfg,
                     governance_payload,
                     stress_controls,
+                    selected_scenario_packs,
+                    run_mode,
                 )
-                status_line = f"Running {len(selected_entries) * len(selected_exits)} momentum entry/exit combinations...\n"
+                status_line = f"Running {len(selected_entries) * len(selected_exits)} momentum entry/exit combinations ({run_mode})...\n"
         else:
             xsmom_valid = self._validate_xsmom_inputs()
             if xsmom_valid is None:
@@ -3156,7 +3246,7 @@ class BacktestingPage(ttk.Frame):
             )
             status_line = "Running cross-sectional momentum backtest...\n"
 
-        self.run_button.config(state="disabled")
+        self._set_run_controls_state("disabled")
         self.logs_text.delete("1.0", tk.END)
         self.logs_text.insert("1.0", status_line)
         self.section_notebook.select(5)
@@ -3477,6 +3567,8 @@ class BacktestingPage(ttk.Frame):
         cv_seed: int,
         governance_payload: dict[str, object],
         stress_controls: dict[str, object],
+        scenario_packs: list[str],
+        run_mode: str,
     ) -> None:
         try:
             entry_grid = {signal: [{}] for signal in entry_signals}
@@ -3542,8 +3634,14 @@ class BacktestingPage(ttk.Frame):
         portfolio_cfg: dict[str, object],
         governance_payload: dict[str, object],
         stress_controls: dict[str, object],
+        scenario_packs: list[str],
+        run_mode: str,
     ) -> None:
         try:
+            controls = dict(stress_controls)
+            controls["run_mode"] = run_mode
+            if run_mode == "stress_only":
+                controls["stress_only"] = True
             output_text = run_multi_signal_backtest(
                 tickers=tickers,
                 start_date=start_date,
@@ -3562,8 +3660,10 @@ class BacktestingPage(ttk.Frame):
                 exit_signals=exit_signals,
                 **portfolio_cfg,
                 governance_metadata=dict(governance_payload),
-                stress_controls=dict(stress_controls),
+                stress_controls=controls,
+                scenario_packs=list(scenario_packs),
             )
+            output_text += "\nApplied stress profile: " + str(stress_controls.get("selected_profile", "Base")) + " | Scenario packs: " + (", ".join(scenario_packs) if scenario_packs else "none") + " | Run mode: " + run_mode
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
         self.after(0, lambda: self._finish_backtest_run(output_text))
@@ -3633,9 +3733,41 @@ class BacktestingPage(ttk.Frame):
             output_text = f"Backtest failed: {exc}"
         self.after(0, lambda: self._finish_backtest_run(output_text))
 
+    def _set_run_controls_state(self, state: str) -> None:
+        if hasattr(self, "run_stress_only_button"):
+            self.run_stress_only_button.config(state=state)
+        if hasattr(self, "run_full_chain_button"):
+            self.run_full_chain_button.config(state=state)
+        elif hasattr(self, "run_button"):
+            self.run_button.config(state=state)
+
+    def _selected_listbox_values(self, listbox: tk.Listbox) -> list[str]:
+        return [str(listbox.get(index)) for index in listbox.curselection()]
+
+    def _set_listbox_selection(self, listbox: tk.Listbox, values: list[str], *, valid_options: tuple[str, ...]) -> None:
+        filtered = [item for item in values if item in valid_options]
+        options = [str(listbox.get(index)) for index in range(listbox.size())]
+        listbox.selection_clear(0, "end")
+        for item in filtered:
+            if item in options:
+                listbox.selection_set(options.index(item))
+
+    def _apply_stress_profile(self, profile_name: str) -> None:
+        profile = STRESS_PROFILES.get(profile_name)
+        if not profile:
+            return
+        self.selected_stress_profile_var.set(profile_name)
+        self.stress_historical_window_fraction_var.set(f"{float(profile['historical_window_fraction']):.2f}")
+        self.stress_historical_replay_window_bars_var.set(str(int(profile['historical_replay_window_bars'])))
+        self.stress_synthetic_jump_magnitude_var.set(f"{float(profile['synthetic_jump_magnitude']):.3f}")
+        self.stress_synthetic_jump_interval_var.set(str(int(profile['synthetic_jump_interval'])))
+        self.stress_synthetic_vol_cluster_multiplier_var.set(f"{float(profile['synthetic_vol_cluster_multiplier']):.2f}")
+        self.stress_overlay_spread_multiplier_var.set(f"{float(profile['overlay_spread_multiplier']):.2f}")
+        self.stress_overlay_liquidity_multiplier_var.set(f"{float(profile['overlay_liquidity_multiplier']):.2f}")
+
     def _finish_backtest_run(self, output_text: str) -> None:
         self._consume_run_outputs(output_text)
-        self.run_button.config(state="normal")
+        self._set_run_controls_state("normal")
 
     def _resolve_supported_csv_setting(
         self,
