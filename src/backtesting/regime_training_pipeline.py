@@ -285,15 +285,22 @@ class RegistryBackedRegimeTrainingAdapter:
                     ),
                     encoding="utf-8",
                 )
+                descriptor = get_model_descriptor(leg.model_type, champion_model_id)
+                capability_tags = descriptor.capability_tags if descriptor is not None else frozenset()
+                architecture_payload = leg.architecture_spec if isinstance(leg.architecture_spec, dict) else None
+                diagnostics_payload = {
+                    "leg_name": leg.name,
+                    "model_id": champion_model_id,
+                    "oos_metrics": metrics,
+                    "controls": {k: float(v) for k, v in leg.controls.items()},
+                    "candidate_leaderboard": leaderboard,
+                }
+                if architecture_payload is not None and capability_tags.intersection({"supports_architecture_spec", "needs_architecture_spec"}):
+                    diagnostics_payload["architecture_spec"] = architecture_payload
+
                 diagnostics_path.write_text(
                     json.dumps(
-                        {
-                            "leg_name": leg.name,
-                            "model_id": champion_model_id,
-                            "oos_metrics": metrics,
-                            "controls": {k: float(v) for k, v in leg.controls.items()},
-                            "candidate_leaderboard": leaderboard,
-                        },
+                        diagnostics_payload,
                         indent=2,
                         sort_keys=True,
                     ),
@@ -964,7 +971,11 @@ def validate_model_specific_specs(request: RegimeTrainingRequest) -> list[str]:
             _validate_optional_spec_object(leg.event_process_spec, field_path=f"legs[{idx}].event_process_spec")
         )
 
-        if "needs_architecture_spec" in capability_tags:
+        if isinstance(leg.architecture_spec, dict):
+            errors.extend(
+                _validate_architecture_spec(leg.architecture_spec, field_path=f"legs[{idx}].architecture_spec")
+            )
+        elif "needs_architecture_spec" in capability_tags:
             errors.extend(
                 _validate_architecture_spec(leg.architecture_spec, field_path=f"legs[{idx}].architecture_spec")
             )
@@ -979,6 +990,21 @@ def validate_model_specific_specs(request: RegimeTrainingRequest) -> list[str]:
     return errors
 
 
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
 def _validate_optional_spec_object(payload: dict[str, Any] | None, *, field_path: str) -> list[str]:
     if payload is None:
         return []
@@ -990,10 +1016,77 @@ def _validate_optional_spec_object(payload: dict[str, Any] | None, *, field_path
 def _validate_architecture_spec(payload: dict[str, Any] | None, *, field_path: str) -> list[str]:
     if not isinstance(payload, dict):
         return [f"{field_path} is required for ANN/neural model legs"]
+
+    errors: list[str] = []
+    schema_version = payload.get("schema_version")
+    if schema_version is not None and _coerce_int(schema_version, 0) < 1:
+        errors.append(f"{field_path}.schema_version must be >= 1")
+
     layers = payload.get("layers")
     if not isinstance(layers, list) or not layers:
-        return [f"{field_path}.layers must be a non-empty list"]
-    return []
+        errors.append(f"{field_path}.layers must be a non-empty list")
+    else:
+        allowed_layer_types = {"Dense", "Dropout", "Norm", "Activation"}
+        for idx, layer in enumerate(layers):
+            if not isinstance(layer, dict):
+                errors.append(f"{field_path}.layers[{idx}] must be an object")
+                continue
+            layer_type = str(layer.get("type", "")).strip()
+            if layer_type not in allowed_layer_types:
+                errors.append(
+                    f"{field_path}.layers[{idx}].type must be one of {sorted(allowed_layer_types)}"
+                )
+                continue
+            if layer_type == "Dense":
+                units = layer.get("units")
+                if _coerce_int(units, 0) <= 0:
+                    errors.append(f"{field_path}.layers[{idx}].units must be > 0")
+                if not str(layer.get("activation", "")).strip():
+                    errors.append(f"{field_path}.layers[{idx}].activation is required")
+            if layer_type == "Dropout":
+                rate = _coerce_float(layer.get("rate", -1.0), -1.0)
+                if rate < 0.0 or rate >= 1.0:
+                    errors.append(f"{field_path}.layers[{idx}].rate must be within [0, 1)")
+            if layer_type == "Norm" and not str(layer.get("norm", "")).strip():
+                errors.append(f"{field_path}.layers[{idx}].norm is required")
+            if layer_type == "Activation" and not str(layer.get("name", "")).strip():
+                errors.append(f"{field_path}.layers[{idx}].name is required")
+
+    optimizer = payload.get("optimizer")
+    if not isinstance(optimizer, dict):
+        errors.append(f"{field_path}.optimizer must be an object")
+    else:
+        if not str(optimizer.get("name", "")).strip():
+            errors.append(f"{field_path}.optimizer.name is required")
+        if _coerce_float(optimizer.get("learning_rate", 0.0), 0.0) <= 0.0:
+            errors.append(f"{field_path}.optimizer.learning_rate must be > 0")
+
+    loss = payload.get("loss")
+    if not isinstance(loss, dict) or not str(loss.get("name", "")).strip():
+        errors.append(f"{field_path}.loss.name is required")
+
+    scheduler = payload.get("scheduler")
+    if not isinstance(scheduler, dict) or not str(scheduler.get("name", "")).strip():
+        errors.append(f"{field_path}.scheduler.name is required")
+
+    training = payload.get("training")
+    if not isinstance(training, dict):
+        errors.append(f"{field_path}.training must be an object")
+    else:
+        if _coerce_int(training.get("batch_size", 0), 0) <= 0:
+            errors.append(f"{field_path}.training.batch_size must be > 0")
+        if _coerce_int(training.get("epochs", 0), 0) <= 0:
+            errors.append(f"{field_path}.training.epochs must be > 0")
+        early = training.get("early_stopping")
+        if not isinstance(early, dict):
+            errors.append(f"{field_path}.training.early_stopping must be an object")
+        else:
+            if not isinstance(early.get("enabled"), bool):
+                errors.append(f"{field_path}.training.early_stopping.enabled must be boolean")
+            if _coerce_int(early.get("patience", 0), 0) <= 0:
+                errors.append(f"{field_path}.training.early_stopping.patience must be > 0")
+
+    return errors
 
 
 def _validate_calibration_spec(payload: dict[str, Any] | None, *, field_path: str) -> list[str]:

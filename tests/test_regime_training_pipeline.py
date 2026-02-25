@@ -194,7 +194,7 @@ def test_pipeline_validation_accepts_complete_model_specific_specs(tmp_path):
                 model_type="cross_asset_macro_conditioned",
                 controls={"model_confidence_min": 0.6},
                 model_id="macro_regime_conditioned",
-                architecture_spec={"layers": [{"units": 16, "activation": "relu"}]},
+                architecture_spec={"schema_version": 1, "layers": [{"type": "Dense", "units": 16, "activation": "relu"}], "optimizer": {"name": "adam", "learning_rate": 0.001}, "loss": {"name": "binary_cross_entropy"}, "scheduler": {"name": "none"}, "training": {"batch_size": 16, "epochs": 8, "early_stopping": {"enabled": True, "patience": 3}}},
             ),
             RegimeLegTrainingConfig(
                 name="Vol Surface",
@@ -441,3 +441,69 @@ def test_pipeline_phase2_families_compatibility_with_default_adapter(tmp_path):
     assert result.metrics["legs_trained"] == 2.0
     assert "Cross-Asset Macro" in result.metadata["champion_by_leg"]
     assert "Meta Ensemble" in result.metadata["champion_by_leg"]
+
+
+def test_pipeline_validation_rejects_invalid_architecture_schema(tmp_path):
+    req = _request(
+        tmp_path,
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Cross Asset Macro",
+                model_type="cross_asset_macro_conditioned",
+                controls={"model_confidence_min": 0.6},
+                model_id="macro_regime_conditioned",
+                architecture_spec={
+                    "schema_version": 1,
+                    "layers": [{"type": "Dense", "units": 0, "activation": "relu"}],
+                    "optimizer": {"name": "adam", "learning_rate": 0.0},
+                    "loss": {"name": "binary_cross_entropy"},
+                    "scheduler": {"name": "none"},
+                    "training": {
+                        "batch_size": 0,
+                        "epochs": 0,
+                        "early_stopping": {"enabled": True, "patience": 0},
+                    },
+                },
+            ),
+        ),
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    assert result.status == "failed"
+    assert any("architecture_spec.layers[0].units" in err for err in result.errors)
+    assert any("architecture_spec.optimizer.learning_rate" in err for err in result.errors)
+    assert any("architecture_spec.training.batch_size" in err for err in result.errors)
+
+
+def test_pipeline_consumes_architecture_spec_for_supported_models(tmp_path):
+    req = _request(
+        tmp_path,
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Cross Asset Macro",
+                model_type="cross_asset_macro_conditioned",
+                controls={"model_confidence_min": 0.6},
+                model_id="macro_regime_conditioned",
+                architecture_spec={
+                    "schema_version": 1,
+                    "layers": [{"type": "Dense", "units": 16, "activation": "relu"}],
+                    "optimizer": {"name": "adam", "learning_rate": 0.001},
+                    "loss": {"name": "binary_cross_entropy"},
+                    "scheduler": {"name": "none"},
+                    "training": {
+                        "batch_size": 16,
+                        "epochs": 8,
+                        "early_stopping": {"enabled": True, "patience": 3},
+                    },
+                },
+            ),
+        ),
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    assert result.status == "success"
+    diagnostics_key = next(key for key in result.artifact_paths if key.endswith("_diagnostics"))
+    diagnostics_payload = json.loads(Path(result.artifact_paths[diagnostics_key]).read_text(encoding="utf-8"))
+    assert diagnostics_payload["architecture_spec"]["optimizer"]["name"] == "adam"

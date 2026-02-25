@@ -19,6 +19,7 @@ from data_access.cache_audit import audit_universe_history
 from backtesting.regime_export_service import export_regime_training_bundle
 from models.regime_catalog import ModelDescriptor, list_models_for_leg
 from ui.regime_mapping import to_regime_leg_spec
+from ui.neural_network_designer_page import NeuralNetworkDesignerPage
 from config import (
     DEFAULT_REGIME_CONFIDENCE_THRESHOLDS,
     DEFAULT_REGIME_GLOBAL_RISK_LIMITS,
@@ -587,6 +588,7 @@ class CreateRegimePage(ttk.Frame):
         self.hyperparameter_vars: dict[str, tk.Variable] = {}
         self._model_selection_by_label: dict[str, ModelDescriptor] = {}
         self._is_training = False
+        self._nn_designer_window: NeuralNetworkDesignerPage | None = None
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -637,6 +639,7 @@ class CreateRegimePage(ttk.Frame):
             "architecture_spec": None,
             "calibration_spec": None,
             "event_process_spec": None,
+            "nn_custom_presets": {},
         }
 
     def _default_model_config_for_leg_type(self, leg_type: str) -> tuple[str, dict[str, Any]]:
@@ -724,6 +727,7 @@ class CreateRegimePage(ttk.Frame):
             "architecture_spec": leg.get("architecture_spec"),
             "calibration_spec": leg.get("calibration_spec"),
             "event_process_spec": leg.get("event_process_spec"),
+            "nn_custom_presets": leg.get("nn_custom_presets", {}),
         }
 
     def _allowed_models_for_leg(self, leg: dict[str, object]) -> list[ModelDescriptor]:
@@ -955,6 +959,12 @@ class CreateRegimePage(ttk.Frame):
         )
         self.model_combo.grid(row=0, column=1, sticky="w", padx=4)
         self.model_combo.bind("<<ComboboxSelected>>", self._on_leg_model_selected)
+
+        nn_row = ttk.Frame(selector_section)
+        nn_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Button(nn_row, text="Open neural network designer", command=self._open_neural_network_designer).pack(side="left")
+        architecture_state = "configured" if isinstance(leg.get("architecture_spec"), dict) else "not set"
+        ttk.Label(nn_row, text=f"Architecture: {architecture_state}").pack(side="left", padx=(8, 0))
 
         self.hyperparameter_vars = {}
         hyperparameter_section = ttk.LabelFrame(self.form_container, text="Model hyperparameters", padding=6)
@@ -1293,6 +1303,30 @@ class CreateRegimePage(ttk.Frame):
             risk_limits=risk_limits,
             legs=tuple(legs),
             training_data_settings=training_data_settings,
+        )
+
+    def _open_neural_network_designer(self) -> None:
+        leg = self._selected_leg()
+        if self._nn_designer_window is not None and self._nn_designer_window.winfo_exists():
+            self._nn_designer_window.focus_set()
+            return
+
+        custom_presets = leg.get("nn_custom_presets", {})
+        if not isinstance(custom_presets, dict):
+            custom_presets = {}
+
+        def _save(spec: dict[str, Any]) -> None:
+            leg["architecture_spec"] = dict(spec)
+            if self._nn_designer_window is not None:
+                leg["nn_custom_presets"] = self._nn_designer_window.custom_presets
+            self._persist_editor_state()
+            self._load_selected_leg_into_form()
+
+        self._nn_designer_window = NeuralNetworkDesignerPage(
+            self,
+            initial_spec=leg.get("architecture_spec") if isinstance(leg.get("architecture_spec"), dict) else None,
+            on_save=_save,
+            custom_presets=custom_presets,
         )
 
     def _last_successful_training_run(self) -> dict[str, object] | None:
