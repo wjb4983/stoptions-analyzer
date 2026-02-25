@@ -404,8 +404,12 @@ class CreateRegimePage(ttk.Frame):
             "name": f"{leg_type} leg",
             "model_type": leg_type,
             "controls": controls,
+            "model_id": selected_model_id,
             "selected_model_id": selected_model_id,
             "hyperparameters": hyperparameters,
+            "architecture_spec": None,
+            "calibration_spec": None,
+            "event_process_spec": None,
         }
 
     def _default_model_config_for_leg_type(self, leg_type: str) -> tuple[str, dict[str, Any]]:
@@ -449,12 +453,21 @@ class CreateRegimePage(ttk.Frame):
                         leg["controls"][key] = float(value)
                     except (TypeError, ValueError):
                         pass
+        model_id = raw_leg.get("model_id")
+        if isinstance(model_id, str):
+            leg["model_id"] = model_id
         selected_model_id = raw_leg.get("selected_model_id")
         if isinstance(selected_model_id, str):
             leg["selected_model_id"] = selected_model_id
+        if not isinstance(leg.get("model_id"), str) or not str(leg.get("model_id", "")).strip():
+            leg["model_id"] = str(leg.get("selected_model_id", ""))
         hyperparameters = raw_leg.get("hyperparameters")
         if isinstance(hyperparameters, dict):
             leg["hyperparameters"] = dict(hyperparameters)
+        for optional_key in ("architecture_spec", "calibration_spec", "event_process_spec"):
+            raw_value = raw_leg.get(optional_key)
+            if raw_value is None or isinstance(raw_value, dict):
+                leg[optional_key] = raw_value
         self._ensure_leg_model_defaults(leg)
         return leg
 
@@ -478,8 +491,12 @@ class CreateRegimePage(ttk.Frame):
             "name": str(leg.get("name", "Unnamed leg")),
             "model_type": str(leg.get("model_type", "Trend Following")),
             "controls": dict(leg.get("controls", {})),
+            "model_id": str(leg.get("model_id", leg.get("selected_model_id", ""))),
             "selected_model_id": str(leg.get("selected_model_id", "")),
             "hyperparameters": dict(leg.get("hyperparameters", {})),
+            "architecture_spec": leg.get("architecture_spec"),
+            "calibration_spec": leg.get("calibration_spec"),
+            "event_process_spec": leg.get("event_process_spec"),
         }
 
     def _allowed_models_for_leg(self, leg: dict[str, object]) -> list[ModelDescriptor]:
@@ -497,6 +514,7 @@ class CreateRegimePage(ttk.Frame):
         if selected not in descriptor_by_model:
             selected = descriptors[0].model_name
             leg["selected_model_id"] = selected
+        leg["model_id"] = selected
         selected_descriptor = descriptor_by_model[selected]
         current_hyperparams = leg.get("hyperparameters")
         if not isinstance(current_hyperparams, dict):
@@ -660,6 +678,7 @@ class CreateRegimePage(ttk.Frame):
         }
         selected_model_id, hyperparameters = self._default_model_config_for_leg_type(leg_type)
         leg["selected_model_id"] = selected_model_id
+        leg["model_id"] = selected_model_id
         leg["hyperparameters"] = hyperparameters
         self._persist_editor_state()
         self._refresh_legs_list()
@@ -758,6 +777,7 @@ class CreateRegimePage(ttk.Frame):
         if selected_descriptor is None:
             return
         leg["selected_model_id"] = selected_descriptor.model_name
+        leg["model_id"] = selected_descriptor.model_name
         leg["hyperparameters"] = dict(selected_descriptor.hyperparameter_template)
         self._persist_editor_state()
         self._load_selected_leg_into_form()
@@ -1015,8 +1035,12 @@ class CreateRegimePage(ttk.Frame):
                     name=str(leg.get("name", "Unnamed leg")),
                     model_type=mapped_leg.leg_spec.leg_family,
                     controls={**cast_controls, **mapped_controls},
+                    model_id=selected_model_id,
                     selected_model_id=selected_model_id,
                     hyperparameters=hyperparameters,
+                    architecture_spec=leg.get("architecture_spec") if isinstance(leg.get("architecture_spec"), dict) else None,
+                    calibration_spec=leg.get("calibration_spec") if isinstance(leg.get("calibration_spec"), dict) else None,
+                    event_process_spec=leg.get("event_process_spec") if isinstance(leg.get("event_process_spec"), dict) else None,
                 )
             )
 
@@ -1026,6 +1050,7 @@ class CreateRegimePage(ttk.Frame):
         }
 
         return RegimeTrainingRequest(
+            schema_version=2,
             regime_id=regime_id,
             regime_name=regime_label,
             model_choice=str(getattr(self, "training_mode", "auto_model_search")),

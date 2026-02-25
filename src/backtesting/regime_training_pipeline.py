@@ -21,12 +21,24 @@ class RegimeLegTrainingConfig:
     name: str
     model_type: str
     controls: dict[str, float]
+    model_id: str = ""
     selected_model_id: str = ""
     hyperparameters: dict[str, Any] = field(default_factory=dict)
+    architecture_spec: dict[str, Any] | None = None
+    calibration_spec: dict[str, Any] | None = None
+    event_process_spec: dict[str, Any] | None = None
+
+    @property
+    def resolved_model_id(self) -> str:
+        model_id = self.model_id.strip()
+        if model_id:
+            return model_id
+        return self.selected_model_id.strip()
 
 
 @dataclass(frozen=True)
 class RegimeTrainingRequest:
+    schema_version: int
     regime_id: str
     regime_name: str
     legs: tuple[RegimeLegTrainingConfig, ...]
@@ -279,7 +291,7 @@ class RegistryBackedRegimeTrainingAdapter:
             raise ValueError(f"No catalog entries configured for leg type '{leg.model_type}'")
 
         mode = request.model_choice.strip().lower()
-        selected_model_id = leg.selected_model_id.strip().lower()
+        selected_model_id = leg.resolved_model_id.lower()
         allowed = {item.model_name for item in descriptors}
 
         if mode in {"single_model", "auto_model_search", "", "auto"}:
@@ -330,6 +342,8 @@ def _deterministic_run_id(request: RegimeTrainingRequest) -> str:
 
 def validate_regime_spec(request: RegimeTrainingRequest) -> list[str]:
     errors: list[str] = []
+    if int(request.schema_version) < 2:
+        errors.append("schema_version must be >= 2")
     if not request.regime_id.strip():
         errors.append("regime_id is required")
     if not request.regime_name.strip():
@@ -344,6 +358,8 @@ def validate_regime_spec(request: RegimeTrainingRequest) -> list[str]:
             errors.append(f"legs[{idx}].name is required")
         if not leg.model_type.strip():
             errors.append(f"legs[{idx}].model_type is required")
+        if not isinstance(leg.hyperparameters, dict):
+            errors.append(f"legs[{idx}].hyperparameters must be an object")
 
     retrain_days = request.training_window.get("retrain_frequency_days")
     if retrain_days is not None and int(retrain_days) <= 0:
@@ -353,6 +369,88 @@ def validate_regime_spec(request: RegimeTrainingRequest) -> list[str]:
         if float(value) < 0:
             errors.append(f"risk_limits.{key} must be >= 0")
 
+    errors.extend(validate_model_specific_specs(request))
+    return errors
+
+
+def validate_model_specific_specs(request: RegimeTrainingRequest) -> list[str]:
+    errors: list[str] = []
+    for idx, leg in enumerate(request.legs):
+        model_id = leg.resolved_model_id.lower()
+
+        errors.extend(
+            _validate_optional_spec_object(leg.architecture_spec, field_path=f"legs[{idx}].architecture_spec")
+        )
+        errors.extend(_validate_optional_spec_object(leg.calibration_spec, field_path=f"legs[{idx}].calibration_spec"))
+        errors.extend(
+            _validate_optional_spec_object(leg.event_process_spec, field_path=f"legs[{idx}].event_process_spec")
+        )
+
+        if _requires_architecture_spec(model_id):
+            errors.extend(
+                _validate_architecture_spec(leg.architecture_spec, field_path=f"legs[{idx}].architecture_spec")
+            )
+        if _requires_calibration_spec(model_id):
+            errors.extend(
+                _validate_calibration_spec(leg.calibration_spec, field_path=f"legs[{idx}].calibration_spec")
+            )
+        if _requires_event_process_spec(model_id):
+            errors.extend(
+                _validate_event_process_spec(leg.event_process_spec, field_path=f"legs[{idx}].event_process_spec")
+            )
+    return errors
+
+
+def _validate_optional_spec_object(payload: dict[str, Any] | None, *, field_path: str) -> list[str]:
+    if payload is None:
+        return []
+    if isinstance(payload, dict):
+        return []
+    return [f"{field_path} must be an object when provided"]
+
+
+def _requires_architecture_spec(model_id: str) -> bool:
+    return any(token in model_id for token in ("ann", "neural", "transformer", "mlp"))
+
+
+def _requires_calibration_spec(model_id: str) -> bool:
+    return any(token in model_id for token in ("local_vol", "heston", "sabr", "vol_surface", "black_scholes"))
+
+
+def _requires_event_process_spec(model_id: str) -> bool:
+    return any(token in model_id for token in ("hawkes", "jump", "intensity"))
+
+
+def _validate_architecture_spec(payload: dict[str, Any] | None, *, field_path: str) -> list[str]:
+    if not isinstance(payload, dict):
+        return [f"{field_path} is required for ANN/neural model legs"]
+    layers = payload.get("layers")
+    if not isinstance(layers, list) or not layers:
+        return [f"{field_path}.layers must be a non-empty list"]
+    return []
+
+
+def _validate_calibration_spec(payload: dict[str, Any] | None, *, field_path: str) -> list[str]:
+    if not isinstance(payload, dict):
+        return [f"{field_path} is required for volatility/surface calibration models"]
+    errors: list[str] = []
+    if not str(payload.get("model", "")).strip():
+        errors.append(f"{field_path}.model is required")
+    parameters = payload.get("parameters")
+    if not isinstance(parameters, dict):
+        errors.append(f"{field_path}.parameters must be an object")
+    return errors
+
+
+def _validate_event_process_spec(payload: dict[str, Any] | None, *, field_path: str) -> list[str]:
+    if not isinstance(payload, dict):
+        return [f"{field_path} is required for Hawkes/jump-intensity models"]
+    errors: list[str] = []
+    if not str(payload.get("process_type", "")).strip():
+        errors.append(f"{field_path}.process_type is required")
+    parameters = payload.get("parameters")
+    if not isinstance(parameters, dict):
+        errors.append(f"{field_path}.parameters must be an object")
     return errors
 
 

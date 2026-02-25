@@ -49,6 +49,7 @@ class _StableAdapter:
 
 def _request(tmp_path, *, legs: tuple[RegimeLegTrainingConfig, ...]) -> RegimeTrainingRequest:
     return RegimeTrainingRequest(
+        schema_version=2,
         regime_id="risk_on",
         regime_name="Risk On",
         legs=legs,
@@ -121,6 +122,7 @@ def test_pipeline_adapter_failure_returns_machine_readable_error(tmp_path):
 
 def test_pipeline_default_adapter_runs_registry_backed_training(tmp_path):
     req = RegimeTrainingRequest(
+        schema_version=2,
         regime_id="risk_off",
         regime_name="Risk Off",
         legs=(
@@ -141,3 +143,62 @@ def test_pipeline_default_adapter_runs_registry_backed_training(tmp_path):
     assert result.status == "success"
     assert result.metrics["legs_trained"] == 1.0
     assert any(key.endswith("_model_weights") for key in result.artifact_paths)
+
+
+def test_pipeline_validation_rejects_incomplete_model_specific_specs(tmp_path):
+    req = _request(
+        tmp_path,
+        legs=(
+            RegimeLegTrainingConfig(
+                name="Vol Surface",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.6},
+                model_id="heston_surface_model",
+            ),
+            RegimeLegTrainingConfig(
+                name="Event Intensity",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.6},
+                model_id="hawkes_jump_intensity",
+            ),
+        ),
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    assert result.status == "failed"
+    assert any("legs[0].calibration_spec" in err for err in result.errors)
+    assert any("legs[1].event_process_spec" in err for err in result.errors)
+
+
+def test_pipeline_validation_accepts_complete_model_specific_specs(tmp_path):
+    req = _request(
+        tmp_path,
+        legs=(
+            RegimeLegTrainingConfig(
+                name="ANN",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.6},
+                model_id="ann_classifier",
+                architecture_spec={"layers": [{"units": 16, "activation": "relu"}]},
+            ),
+            RegimeLegTrainingConfig(
+                name="Vol Surface",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.6},
+                model_id="heston_surface_model",
+                calibration_spec={"model": "heston", "parameters": {"kappa": 1.2}},
+            ),
+            RegimeLegTrainingConfig(
+                name="Event Intensity",
+                model_type="regime_change_detection",
+                controls={"model_confidence_min": 0.6},
+                model_id="hawkes_jump_intensity",
+                event_process_spec={"process_type": "hawkes", "parameters": {"alpha": 0.3}},
+            ),
+        ),
+    )
+
+    result = execute_regime_training_pipeline(req)
+
+    assert result.status == "success"
