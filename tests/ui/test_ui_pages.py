@@ -631,6 +631,12 @@ def test_create_regime_leg_type_switching_updates_controls():
     assert float(leg["controls"]["lookback_days"]) == 30
     assert float(leg["controls"]["entry_zscore"]) == 2.0
 
+    page._apply_leg_type("Regime Change")
+    leg = page._selected_leg()
+    assert leg["model_type"] == "Regime Change"
+    assert float(leg["controls"]["lookback_days"]) == 60
+    assert float(leg["controls"]["detection_threshold"]) == 1.6
+
 
 def test_create_regime_unknown_leg_mapping_blocks_training() -> None:
     page = _build_create_regime_logic_page()
@@ -650,6 +656,17 @@ def test_create_regime_invalid_knob_combinations_are_blocked():
     ok, message = page._can_train_export()
     assert not ok
     assert "Entry z-score" in message
+
+
+def test_create_regime_change_invalid_knob_combinations_are_blocked():
+    page = _build_create_regime_logic_page()
+    page._apply_leg_type("Regime Change")
+    leg = page._selected_leg()
+    leg["controls"]["detection_threshold"] = 0.7
+
+    ok, message = page._can_train_export()
+    assert not ok
+    assert "Detection threshold is too permissive" in message
 
 
 @pytest.mark.parametrize(
