@@ -1018,3 +1018,143 @@ def test_create_regime_training_failure_shows_hard_error_for_insufficient_real_h
     assert errors
     assert errors[-1][0] == "Training blocked: insufficient real history"
     assert "Synthetic fallback is disabled" in errors[-1][1]
+
+class MultiSelectListbox:
+    def __init__(self, items: list[str]):
+        self.items = list(items)
+        self._selection: set[int] = set()
+        self.state = "normal"
+
+    def get(self, idx: int):
+        return self.items[idx]
+
+    def size(self):
+        return len(self.items)
+
+    def curselection(self):
+        return tuple(sorted(self._selection))
+
+    def selection_set(self, idx: int):
+        self._selection.add(idx)
+
+    def selection_clear(self, *_args):
+        self._selection.clear()
+
+    def configure(self, **kwargs):
+        if "state" in kwargs:
+            self.state = kwargs["state"]
+
+
+class FakeCombo:
+    def __init__(self):
+        self.values = []
+
+    def configure(self, **kwargs):
+        if "values" in kwargs:
+            self.values = list(kwargs["values"])
+
+    def cget(self, key: str):
+        if key == "values":
+            return tuple(self.values)
+        raise KeyError(key)
+
+
+def test_backtesting_trained_regime_dropdown_population_and_hydration(tmp_path):
+    training_manifest = tmp_path / "run" / "manifest.json"
+    training_manifest.parent.mkdir(parents=True, exist_ok=True)
+    training_manifest.write_text(
+        json.dumps(
+            {
+                "run_id": "run-ui",
+                "request": {
+                    "regime_name": "UI Risk",
+                    "model_choice": "auto_model_search",
+                    "training_window": {"lookback_days": 77, "retrain_frequency_days": 4},
+                    "risk_limits": {"max_gross_exposure": 1.2, "max_net_exposure": 0.4},
+                    "training_data_settings": {"scenario_settings": [{"name": "panic_crash"}]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    page = backtesting_page.BacktestingPage.__new__(backtesting_page.BacktestingPage)
+    page.controller = FakeController(AppState(regime_training_runs=[{"run_id": "run-ui", "artifact_path": str(training_manifest), "summary": "UI Risk"}]))
+    page.trained_regime_combo = FakeCombo()
+    page.trained_regime_var = Var("")
+    page.strategy_var = Var("momentum")
+    page.lookback_days_var = Var("90")
+    page.skip_days_var = Var("5")
+    page.portfolio_max_gross_var = Var("1.0")
+    page.portfolio_min_net_var = Var("-1.0")
+    page.portfolio_max_net_var = Var("1.0")
+    page.portfolio_max_symbol_var = Var("0.25")
+    page.portfolio_max_sector_var = Var("0.60")
+    page.gov_min_stability_var = Var("0.55")
+    page.gov_expected_signal_agreement_var = Var("1.0")
+    page.gov_max_signal_agreement_drift_var = Var("0.10")
+    page.stress_enable_historical_replay_var = Var(False)
+    page.scenario_pack_listbox = MultiSelectListbox(["panic_crash", "bull_low_vol"])
+    page._scenario_pack_options = ("panic_crash", "bull_low_vol")
+    page.regime_provenance_var = Var("")
+    page.regime_diff_var = Var("")
+    page.regime_lock_var = Var(True)
+    page._regime_locked_fields = True
+    page._active_regime_contract = None
+    page._regime_loaded_values = {}
+    page._regime_loading_defaults = False
+    page.strategy_combo = FakeWidget()
+    page.lookback_days_entry = FakeWidget()
+    page.skip_days_entry = FakeWidget()
+    page.portfolio_max_gross_entry = FakeWidget()
+    page.portfolio_min_net_entry = FakeWidget()
+    page.portfolio_max_net_entry = FakeWidget()
+    page.portfolio_max_symbol_entry = FakeWidget()
+    page.portfolio_max_sector_entry = FakeWidget()
+    page.gov_min_stability_entry = FakeWidget()
+    page.gov_expected_signal_agreement_entry = FakeWidget()
+    page.gov_max_signal_agreement_drift_entry = FakeWidget()
+
+    page._refresh_trained_regime_choices()
+    assert any("training run" in label for label in page.trained_regime_combo.values)
+
+    selected_label = next(label for label in page.trained_regime_combo.values if "training run" in label)
+    page.trained_regime_var.set(selected_label)
+    page._on_trained_regime_selected()
+
+    assert page.lookback_days_var.get() == "77"
+    assert page.skip_days_var.get() == "4"
+    assert page.portfolio_max_gross_var.get() == "1.20"
+    assert "Loaded from regime UI Risk" in page.regime_provenance_var.get()
+
+
+def test_backtesting_trained_regime_invalid_bundle_shows_error(monkeypatch, tmp_path):
+    bundle_manifest = tmp_path / "exports" / "bad" / "bundle_manifest.json"
+    bundle_manifest.parent.mkdir(parents=True, exist_ok=True)
+    bundle_manifest.write_text('{"bundle_id":"bad","bundle_version":"9.0","contents":{}}', encoding="utf-8")
+
+    errors = []
+    monkeypatch.setattr(backtesting_page.messagebox, "showerror", lambda title, msg: errors.append((title, msg)))
+
+    page = backtesting_page.BacktestingPage.__new__(backtesting_page.BacktestingPage)
+    page.trained_regime_var = Var("bad bundle")
+    page._regime_option_lookup = {
+        "bad bundle": backtesting_page.RegimeBacktestOption(
+            option_id="bundle:bad",
+            label="bad bundle",
+            source="bundle",
+            manifest_path=str(bundle_manifest),
+        )
+    }
+    page.regime_provenance_var = Var("")
+    page.regime_diff_var = Var("")
+    page.regime_lock_var = Var(False)
+    page._regime_locked_fields = False
+    page._active_regime_contract = None
+    page._regime_loaded_values = {}
+    page._apply_regime_lock_state = lambda: None
+
+    page._on_trained_regime_selected()
+
+    assert errors
+    assert "compatibility" in errors[-1][0].lower()
