@@ -1268,6 +1268,11 @@ class ResearchLabPage(ttk.Frame):
         self.stress_synthetic_vol_cluster_multiplier_var = tk.StringVar(value="1.6")
         self.stress_overlay_spread_multiplier_var = tk.StringVar(value="2.5")
         self.stress_overlay_liquidity_multiplier_var = tk.StringVar(value="0.4")
+        self.rl_max_net_gamma_var = tk.StringVar(value="1.25")
+        self.rl_max_abs_vega_bucket_var = tk.StringVar(value="7500")
+        self.rl_max_abs_delta_underlying_var = tk.StringVar(value="1800")
+        self.rl_max_participation_rate_var = tk.StringVar(value="0.25")
+        self._risk_limit_updating = False
 
         profile_options = tuple(self._rubric_templates["profiles"].keys())
         default_profile = str(self._rubric_templates.get("default_profile") or profile_options[0]) if profile_options else "intraday_alpha"
@@ -1304,6 +1309,7 @@ class ResearchLabPage(ttk.Frame):
             "stress_hist": "Replay window fraction and bars per replayed segment.",
             "stress_jump": "Synthetic jump magnitude, jump interval, and volatility clustering multiplier.",
             "stress_overlay": "Spread and liquidity multipliers for adverse execution overlays.",
+            "options_risk": "Portfolio-level options and participation constraints passed through workflow context.",
         }
 
         def add_help(row: int, text: str) -> None:
@@ -1554,6 +1560,26 @@ class ResearchLabPage(ttk.Frame):
         ttk.Entry(stress_row4, textvariable=self.stress_overlay_liquidity_multiplier_var, width=8).pack(side="left")
         self._advanced_workflow_widgets.extend(stress_row4.winfo_children())
         add_help(row, help_text["stress_overlay"])
+
+        row += 1
+        ttk.Label(controls, text="Options Risk Limits").grid(row=row, column=0, sticky="nw", padx=8, pady=5)
+        risk_card = ttk.LabelFrame(controls, text="Options Risk Limits")
+        risk_card.grid(row=row, column=1, sticky="ew", padx=8, pady=5)
+        risk_card.columnconfigure(1, weight=1)
+
+        self._build_research_risk_limit_row(risk_card, 0, "Max Net Gamma", self.rl_max_net_gamma_var, 0.0, 5.0, 0.05)
+        self._build_research_risk_limit_row(risk_card, 1, "Max Abs Vega Bucket", self.rl_max_abs_vega_bucket_var, 0.0, 50000.0, 250.0)
+        self._build_research_risk_limit_row(risk_card, 2, "Max Abs Delta / Underlying", self.rl_max_abs_delta_underlying_var, 0.0, 10000.0, 50.0)
+        self._build_research_risk_limit_row(risk_card, 3, "Max Participation / Capacity", self.rl_max_participation_rate_var, 0.0, 1.0, 0.01)
+
+        risk_preset_row = ttk.Frame(risk_card)
+        risk_preset_row.grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 6))
+        ttk.Label(risk_preset_row, text="Quick presets:").pack(side="left")
+        ttk.Button(risk_preset_row, text="Conservative", command=lambda: self._apply_research_risk_limit_preset("conservative")).pack(side="left", padx=(6, 0))
+        ttk.Button(risk_preset_row, text="Balanced", command=lambda: self._apply_research_risk_limit_preset("balanced")).pack(side="left", padx=(6, 0))
+        ttk.Button(risk_preset_row, text="Aggressive", command=lambda: self._apply_research_risk_limit_preset("aggressive")).pack(side="left", padx=(6, 0))
+        self._advanced_workflow_widgets.extend(risk_card.winfo_children())
+        add_help(row, help_text["options_risk"])
 
         row += 1
         ttk.Label(controls, text="Hypothesis rubric profile").grid(row=row, column=0, sticky="w", padx=8, pady=5)
@@ -2482,6 +2508,70 @@ class ResearchLabPage(ttk.Frame):
             issues.append("Walk-forward split policy selection is invalid.")
         return issues
 
+    def _build_research_risk_limit_row(
+        self,
+        parent: ttk.Frame,
+        row: int,
+        label: str,
+        variable: tk.StringVar,
+        min_value: float,
+        max_value: float,
+        resolution: float,
+    ) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=6, pady=4)
+        slider = tk.Scale(parent, from_=min_value, to=max_value, resolution=resolution, orient="horizontal", showvalue=False)
+        slider.grid(row=row, column=1, sticky="ew", padx=6, pady=4)
+        entry = ttk.Entry(parent, textvariable=variable, width=12)
+        entry.grid(row=row, column=2, sticky="w", padx=6, pady=4)
+
+        parsed = parse_float(variable.get())
+        if parsed is not None:
+            slider.set(max(min_value, min(max_value, float(parsed))))
+
+        def _on_slider(_value: str) -> None:
+            if self._risk_limit_updating:
+                return
+            self._risk_limit_updating = True
+            try:
+                value = float(slider.get())
+                if max_value <= 1.0:
+                    variable.set(f"{value:.2f}")
+                elif max_value <= 10.0:
+                    variable.set(f"{value:.3f}".rstrip("0").rstrip("."))
+                else:
+                    variable.set(f"{value:.1f}".rstrip("0").rstrip("."))
+            finally:
+                self._risk_limit_updating = False
+
+        def _on_entry(*_args: object) -> None:
+            if self._risk_limit_updating:
+                return
+            parsed_value = parse_float(variable.get())
+            if parsed_value is None:
+                return
+            self._risk_limit_updating = True
+            try:
+                slider.set(max(min_value, min(max_value, float(parsed_value))))
+            finally:
+                self._risk_limit_updating = False
+
+        slider.configure(command=_on_slider)
+        variable.trace_add("write", _on_entry)
+
+    def _apply_research_risk_limit_preset(self, preset_name: str) -> None:
+        presets = {
+            "conservative": ("0.50", "2500", "600", "0.10"),
+            "balanced": ("1.25", "7500", "1800", "0.25"),
+            "aggressive": ("2.50", "15000", "3500", "0.45"),
+        }
+        preset = presets.get(preset_name)
+        if preset is None:
+            return
+        self.rl_max_net_gamma_var.set(preset[0])
+        self.rl_max_abs_vega_bucket_var.set(preset[1])
+        self.rl_max_abs_delta_underlying_var.set(preset[2])
+        self.rl_max_participation_rate_var.set(preset[3])
+
     def _build_common_context(self) -> dict[str, Any] | None:
         tickers = list(self.controller.state.tickers)
         if not tickers:
@@ -2513,6 +2603,10 @@ class ResearchLabPage(ttk.Frame):
             "lookback": lookback,
             "skip": skip,
             "costs_bps": costs_bps,
+            "portfolio_max_net_gamma": float(parse_float(self.rl_max_net_gamma_var.get()) or 1.25),
+            "portfolio_max_abs_vega_bucket": float(parse_float(self.rl_max_abs_vega_bucket_var.get()) or 7500.0),
+            "portfolio_max_abs_delta_per_underlying": float(parse_float(self.rl_max_abs_delta_underlying_var.get()) or 1800.0),
+            "max_participation_rate": float(parse_float(self.rl_max_participation_rate_var.get()) or 0.25),
             "universe_filters": self._build_universe_filters(),
             "rubric_profile": self.hypothesis_rubric_profile_var.get().strip() or "intraday_alpha",
             "hypothesis_novelty": float(parse_float(self.hypothesis_novelty_var.get()) or 3.0),
@@ -3063,6 +3157,10 @@ class ResearchLabPage(ttk.Frame):
             "lookback_days": [int(context["lookback"])],
             "skip_days": [int(context["skip"])],
             "costs_bps": [float(context["costs_bps"])],
+            "portfolio_max_net_gamma": [float(context.get("portfolio_max_net_gamma", 1.25))],
+            "portfolio_max_abs_vega_bucket": [float(context.get("portfolio_max_abs_vega_bucket", 7500.0))],
+            "portfolio_max_abs_delta_per_underlying": [float(context.get("portfolio_max_abs_delta_per_underlying", 1800.0))],
+            "max_participation_rate": [float(context.get("max_participation_rate", 0.25))],
             "universe_filters": [dict(context.get("universe_filters", {}))],
         }
         return entry_grid, exit_grid, core_grid
@@ -3153,6 +3251,10 @@ class ResearchLabPage(ttk.Frame):
             skip_days=int(context["skip"]),
             costs_bps=float(context["costs_bps"]),
             timeframe=str(DEFAULT_BACKTEST_SETTINGS.get("timeframe", "1m")),
+            portfolio_max_net_gamma=float(context.get("portfolio_max_net_gamma", 1.25)),
+            portfolio_max_abs_vega_bucket=float(context.get("portfolio_max_abs_vega_bucket", 7500.0)),
+            portfolio_max_abs_delta_per_underlying=float(context.get("portfolio_max_abs_delta_per_underlying", 1800.0)),
+            max_participation_rate=float(context.get("max_participation_rate", 0.25)),
             entry_signals=list(config.entry_signals),
             exit_signals=list(config.exit_signals),
             governance_metadata={

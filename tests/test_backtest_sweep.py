@@ -214,6 +214,10 @@ def test_run_multi_signal_backtest_applies_conservative_runtime_params(monkeypat
         costs_bps=5.0,
         entry_signals=["ts_momentum", "ma_trend"],
         exit_signals=["momentum_flip"],
+        portfolio_max_net_gamma=1.25,
+        portfolio_max_abs_vega_bucket=7500.0,
+        portfolio_max_abs_delta_per_underlying=1800.0,
+        max_participation_rate=0.25,
     )
 
     assert captured
@@ -222,6 +226,10 @@ def test_run_multi_signal_backtest_applies_conservative_runtime_params(monkeypat
     ts_call = next(call for call in captured if call["entry_signal"] == "ts_momentum")
     assert ts_call["entry_signal_params"]["long_only"] is True
     assert float(ts_call["entry_signal_params"]["min_abs_return"]) == 0.01
+    assert float(ts_call["portfolio_max_net_gamma"]) == 1.25
+    assert float(ts_call["portfolio_max_abs_vega_bucket"]) == 7500.0
+    assert float(ts_call["portfolio_max_abs_delta_per_underlying"]) == 1800.0
+    assert float(ts_call["max_participation_rate"]) == 0.25
 
 
 def test_run_multi_signal_backtest_forwards_scenario_packs(monkeypatch, tmp_path) -> None:
