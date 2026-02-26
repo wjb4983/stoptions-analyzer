@@ -614,6 +614,29 @@ QUICK_PRESETS: list[dict[str, object]] = [
 ]
 
 
+def _format_profile_provenance_line(profile: ModelProfile | None) -> str:
+    if profile is None:
+        return "Why this model? Select a concrete profile to view provenance context."
+    provenance = profile.provenance if isinstance(profile.provenance, dict) else {}
+    task_fit = str(provenance.get("task_fit", "")).strip()
+    paper = str(provenance.get("paper_title", "")).strip()
+    assumptions = str(provenance.get("market_assumptions", "")).strip()
+    citation = str(provenance.get("citation_key_or_url", "")).strip()
+
+    reasons: list[str] = []
+    if task_fit:
+        reasons.append(task_fit)
+    if paper:
+        reasons.append(f"inspired by {paper}")
+    if assumptions:
+        reasons.append(f"assumes {assumptions}")
+    if citation:
+        reasons.append(f"ref: {citation}")
+    if not reasons:
+        return "Why this model? Uses the selected profile defaults; no provenance metadata provided."
+    return "Why this model? " + " · ".join(reasons)
+
+
 class CreateRegimePage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
         super().__init__(parent)
@@ -827,7 +850,7 @@ class CreateRegimePage(ttk.Frame):
         hyperparameters = raw_leg.get("hyperparameters")
         if isinstance(hyperparameters, dict):
             leg["hyperparameters"] = dict(hyperparameters)
-        for optional_key in ("architecture_spec", "calibration_spec", "event_process_spec"):
+        for optional_key in ("architecture_spec", "calibration_spec", "event_process_spec", "profile_provenance"):
             raw_value = raw_leg.get(optional_key)
             if raw_value is None or isinstance(raw_value, dict):
                 leg[optional_key] = raw_value
@@ -862,6 +885,7 @@ class CreateRegimePage(ttk.Frame):
             "architecture_spec": leg.get("architecture_spec"),
             "calibration_spec": leg.get("calibration_spec"),
             "event_process_spec": leg.get("event_process_spec"),
+            "profile_provenance": leg.get("profile_provenance"),
             "artifact_reference": leg.get("artifact_reference"),
             "nn_custom_presets": leg.get("nn_custom_presets", {}),
         }
@@ -1365,11 +1389,21 @@ class CreateRegimePage(ttk.Frame):
             leg_index=self.selected_leg_index,
         )
         selected_profile_model_id = self._preview_selected_model_id(leg)
+        self.profile_why_model_var = tk.StringVar(value=_format_profile_provenance_line(self._model_selection_by_label.get(self.selected_model_var.get())))
+        ttk.Label(selector_section, text="Why this model?").grid(row=2, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(
+            selector_section,
+            textvariable=self.profile_why_model_var,
+            justify="left",
+            wraplength=520,
+            foreground="#4d4d4d",
+        ).grid(row=2, column=1, sticky="w", padx=4, pady=(6, 0))
+
         self.profile_override_status_var = tk.StringVar()
         self.profile_override_warning_var = tk.StringVar()
-        ttk.Label(selector_section, text="Profile override status").grid(row=2, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(selector_section, text="Profile override status").grid(row=3, column=0, sticky="nw", pady=(6, 0))
         override_status_frame = ttk.Frame(selector_section)
-        override_status_frame.grid(row=2, column=1, sticky="w", padx=4, pady=(6, 0))
+        override_status_frame.grid(row=3, column=1, sticky="w", padx=4, pady=(6, 0))
         ttk.Label(
             override_status_frame,
             textvariable=self.profile_override_status_var,
@@ -1390,7 +1424,7 @@ class CreateRegimePage(ttk.Frame):
         )
 
         nn_row = ttk.Frame(selector_section)
-        nn_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        nn_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Button(nn_row, text="Open neural network designer", command=self._open_neural_network_designer).pack(side="left")
         architecture_state = "configured" if isinstance(leg.get("architecture_spec"), dict) else "not set"
         ttk.Label(nn_row, text=f"Architecture: {architecture_state}").pack(side="left", padx=(8, 0))
@@ -1404,7 +1438,7 @@ class CreateRegimePage(ttk.Frame):
         }
 
         chips_row = ttk.Frame(selector_section)
-        chips_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        chips_row.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
         for idx, spec_key in enumerate(("architecture_spec", "calibration_spec", "event_process_spec")):
             requirement = spec_requirements[spec_key]
             configured = isinstance(leg.get(spec_key), dict)
@@ -1819,7 +1853,11 @@ class CreateRegimePage(ttk.Frame):
         leg = self._selected_leg()
         selected_profile = self._model_selection_by_label.get(self.selected_model_var.get())
         if selected_profile is None:
+            if hasattr(self, "profile_why_model_var"):
+                self.profile_why_model_var.set(_format_profile_provenance_line(None))
             return
+        if hasattr(self, "profile_why_model_var"):
+            self.profile_why_model_var.set(_format_profile_provenance_line(selected_profile))
         leg["selected_profile_id"] = selected_profile.profile_id
         leg["profile_source"] = selected_profile.source
         leg["selected_model_id"] = selected_profile.base_model_id
@@ -1828,6 +1866,7 @@ class CreateRegimePage(ttk.Frame):
         leg["architecture_spec"] = dict(selected_profile.architecture_spec) if isinstance(selected_profile.architecture_spec, dict) else None
         leg["calibration_spec"] = dict(selected_profile.calibration_spec) if isinstance(selected_profile.calibration_spec, dict) else None
         leg["event_process_spec"] = dict(selected_profile.event_process_spec) if isinstance(selected_profile.event_process_spec, dict) else None
+        leg["profile_provenance"] = dict(selected_profile.provenance) if isinstance(selected_profile.provenance, dict) else None
         leg["artifact_reference"] = (
             {
                 "run_id": selected_profile.artifact_reference.run_id,

@@ -29,6 +29,7 @@ class ModelProfile:
     calibration_spec: dict[str, Any] | None = None
     event_process_spec: dict[str, Any] | None = None
     artifact_reference: ArtifactReference | None = None
+    provenance: dict[str, str] | None = None
 
     @property
     def resolved_model_id(self) -> str:
@@ -99,6 +100,12 @@ def _preset_profiles_for_leg(leg_family: str, presets: dict[str, object]) -> lis
                 architecture_spec=_optional_dict(payload.get("architecture_spec")),
                 calibration_spec=_optional_dict(payload.get("calibration_spec")),
                 event_process_spec=_optional_dict(payload.get("event_process_spec")),
+                provenance=_optional_str_dict(payload.get("provenance"), allowed_keys=(
+                    "paper_title",
+                    "citation_key_or_url",
+                    "task_fit",
+                    "market_assumptions",
+                )),
             )
         )
     return profiles
@@ -156,6 +163,18 @@ def _optional_dict(value: object) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     return dict(value)
+
+
+def _optional_str_dict(value: object, *, allowed_keys: tuple[str, ...]) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, str] = {}
+    for key in allowed_keys:
+        raw = value.get(key)
+        text = str(raw).strip() if raw is not None else ""
+        if text:
+            result[key] = text
+    return result or None
 
 
 def _load_run_manifest(run: dict[str, object]) -> dict[str, object] | None:

@@ -22,6 +22,7 @@ _LAYER_TYPES = [
     "PolicyHead",
     "ValueHead",
 ]
+_PROVENANCE_FIELDS = ("paper_title", "citation_key_or_url", "task_fit", "market_assumptions")
 
 
 class LayerEditorRow(ttk.Frame):
@@ -165,7 +166,48 @@ def _normalize_metadata(payload: dict[str, Any] | None) -> dict[str, Any]:
     }
     if not str(item.get("updated_at", "")).strip():
         item["updated_at"] = datetime.now(timezone.utc).isoformat()
+    item["provenance"] = _normalize_provenance(item.get("provenance") if isinstance(item.get("provenance"), dict) else item)
     return item
+
+
+def _normalize_provenance(payload: dict[str, Any] | None) -> dict[str, str]:
+    source = payload if isinstance(payload, dict) else {}
+    normalized: dict[str, str] = {}
+    for field in _PROVENANCE_FIELDS:
+        value = str(source.get(field, "")).strip()
+        if value:
+            normalized[field] = value
+    return normalized
+
+
+def _extract_preset_entries(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return {}
+    presets = payload.get("presets", {})
+    if not isinstance(presets, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for key, value in presets.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        result[key] = {
+            "spec": normalize_architecture_spec(value),
+            "provenance": _normalize_provenance(value),
+        }
+    return result
+
+
+def _format_provenance_text(provenance: dict[str, Any] | None) -> str:
+    payload = _normalize_provenance(provenance if isinstance(provenance, dict) else None)
+    if not payload:
+        return "No provenance metadata for this preset yet."
+    labels = {
+        "paper_title": "Paper",
+        "citation_key_or_url": "Citation",
+        "task_fit": "Task fit",
+        "market_assumptions": "Market assumptions",
+    }
+    return "\n".join(f"• {labels[field]}: {payload[field]}" for field in _PROVENANCE_FIELDS if field in payload)
 
 
 def normalize_architecture_spec(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -282,24 +324,32 @@ def load_nn_presets() -> dict[str, dict[str, Any]]:
         payload = json.loads(NN_PRESETS_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
-    presets = payload.get("presets", {}) if isinstance(payload, dict) else {}
-    if not isinstance(presets, dict):
+    return {key: dict(item.get("spec", {})) for key, item in _extract_preset_entries(payload).items()}
+
+
+def load_nn_preset_entries() -> dict[str, dict[str, Any]]:
+    if not NN_PRESETS_PATH.exists():
         return {}
-    return {
-        str(key): normalize_architecture_spec(value)
-        for key, value in presets.items()
-        if isinstance(key, str) and isinstance(value, dict)
-    }
+    try:
+        payload = json.loads(NN_PRESETS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return _extract_preset_entries(payload)
 
 
 def save_nn_presets(
     presets: dict[str, dict[str, Any]],
     *,
+    built_in_provenance: dict[str, dict[str, Any]] | None = None,
     custom_presets: dict[str, dict[str, Any]] | None = None,
 ) -> None:
+    provenance_map = {str(name): _normalize_provenance(item) for name, item in (built_in_provenance or {}).items() if isinstance(name, str)}
     payload: dict[str, Any] = {
         "default_preset": next(iter(presets), ""),
-        "presets": {name: normalize_architecture_spec(spec) for name, spec in presets.items()},
+        "presets": {
+            name: {**normalize_architecture_spec(spec), **provenance_map.get(name, {})}
+            for name, spec in presets.items()
+        },
     }
     if custom_presets:
         payload["custom_presets"] = {
@@ -460,7 +510,8 @@ class NeuralNetworkDesignerPage(tk.Toplevel):
         self.transient(parent)
 
         self._on_save = on_save
-        self._built_in_presets = load_nn_presets()
+        self._built_in_preset_entries = load_nn_preset_entries()
+        self._built_in_presets = {key: dict(item.get("spec", {})) for key, item in self._built_in_preset_entries.items()}
         self._persisted_custom_entries = _extract_custom_preset_entries(
             json.loads(NN_PRESETS_PATH.read_text(encoding="utf-8")) if NN_PRESETS_PATH.exists() else {}
         )
@@ -487,6 +538,7 @@ class NeuralNetworkDesignerPage(tk.Toplevel):
 
         self.compat_leg_tags_var = tk.StringVar(value="")
         self.compat_model_families_var = tk.StringVar(value="")
+        self.provenance_text_var = tk.StringVar(value="No preset selected.")
         self.layer_editor: LayerEditorRow | None = None
 
         self._build_layout()
@@ -514,6 +566,14 @@ class NeuralNetworkDesignerPage(tk.Toplevel):
         ttk.Entry(preset_meta, textvariable=self.compat_leg_tags_var, width=30).grid(row=0, column=1, sticky="w", padx=4)
         ttk.Label(preset_meta, text="Compat model families (csv)").grid(row=0, column=2, sticky="w")
         ttk.Entry(preset_meta, textvariable=self.compat_model_families_var, width=36).grid(row=0, column=3, sticky="w", padx=4)
+        ttk.Label(preset_meta, text="Preset provenance").grid(row=1, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(
+            preset_meta,
+            textvariable=self.provenance_text_var,
+            justify="left",
+            wraplength=760,
+            foreground="#4d4d4d",
+        ).grid(row=1, column=1, columnspan=3, sticky="w", padx=4, pady=(6, 0))
 
         mid = ttk.Panedwindow(root, orient="horizontal")
         mid.pack(fill="both", expand=True, pady=6)
@@ -748,21 +808,26 @@ class NeuralNetworkDesignerPage(tk.Toplevel):
         label = self.preset_var.get()
         if label.startswith("<built-in> "):
             key = label.replace("<built-in> ", "", 1)
-            preset = self._built_in_presets.get(key)
+            item = self._built_in_preset_entries.get(key)
+            preset = item.get("spec") if isinstance(item, dict) else None
             metadata = None
+            provenance = item.get("provenance") if isinstance(item, dict) else None
         elif label.startswith("<custom> "):
             key = label.replace("<custom> ", "", 1)
             item = self._custom_preset_entries.get(key)
             preset = item.get("spec") if isinstance(item, dict) else None
             metadata = item.get("metadata") if isinstance(item, dict) else None
+            provenance = (metadata or {}).get("provenance") if isinstance(metadata, dict) else None
         else:
             preset = None
             metadata = None
+            provenance = None
         if preset is None:
             return
         self._spec = normalize_architecture_spec(preset)
         self.compat_leg_tags_var.set(", ".join((metadata or {}).get("compatibility", {}).get("leg_tags", [])))
         self.compat_model_families_var.set(", ".join((metadata or {}).get("compatibility", {}).get("model_families", [])))
+        self.provenance_text_var.set(_format_provenance_text(provenance))
         self._selected_layer_index = 0
         self._refresh_layers_table()
         self.layer_tree.selection_set("0")
@@ -782,7 +847,14 @@ class NeuralNetworkDesignerPage(tk.Toplevel):
             }
         )
         self._custom_preset_entries[name] = {"spec": self._effective_spec(), "metadata": metadata}
-        save_nn_presets(self._built_in_presets, custom_presets=self._custom_preset_entries)
+        save_nn_presets(
+            self._built_in_presets,
+            built_in_provenance={
+                name: item.get("provenance", {}) if isinstance(item, dict) else {}
+                for name, item in self._built_in_preset_entries.items()
+            },
+            custom_presets=self._custom_preset_entries,
+        )
         self._refresh_preset_options()
         messagebox.showinfo("Preset saved", f"Saved custom preset '{name}'.")
 
@@ -794,9 +866,17 @@ class NeuralNetworkDesignerPage(tk.Toplevel):
         key = label.replace("<custom> ", "", 1)
         if key in self._custom_preset_entries:
             del self._custom_preset_entries[key]
-            save_nn_presets(self._built_in_presets, custom_presets=self._custom_preset_entries)
+            save_nn_presets(
+                self._built_in_presets,
+                built_in_provenance={
+                    name: item.get("provenance", {}) if isinstance(item, dict) else {}
+                    for name, item in self._built_in_preset_entries.items()
+                },
+                custom_presets=self._custom_preset_entries,
+            )
             self._refresh_preset_options()
             self.preset_var.set("")
+            self.provenance_text_var.set("No preset selected.")
 
     def _save_as_model_profile(self) -> None:
         name = simpledialog.askstring("Model profile", "Model profile name:", parent=self)
