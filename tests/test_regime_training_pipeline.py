@@ -345,9 +345,31 @@ def test_resolve_return_sample_budget_uses_user_max_ram_setting():
     max_samples, metadata = _resolve_return_sample_budget({"max_ram_usage_gb": 1.5})
 
     assert max_samples is not None
-    assert max_samples == int((1.5 * (1024**3)) // 8)
+    assert max_samples == 2_000_000
     assert metadata["memory_budget_source"] == "user:max_ram_usage_gb"
     assert metadata["max_total_return_samples"] == max_samples
+
+
+def test_resolve_return_sample_budget_prefers_explicit_sample_cap():
+    max_samples, metadata = _resolve_return_sample_budget(
+        {"max_total_return_samples": "12345", "max_ram_usage_gb": 64, "ram_utilization_fraction": 0.9}
+    )
+
+    assert max_samples == 12345
+    assert metadata["memory_budget_source"] == "user:max_total_return_samples"
+    assert metadata["max_total_return_samples"] == 12345
+
+
+def test_resolve_return_sample_budget_auto_mode_is_hard_capped(monkeypatch):
+    monkeypatch.setattr(
+        "backtesting.regime_training_pipeline._detect_available_ram_bytes",
+        lambda: int(256 * (1024**3)),
+    )
+
+    max_samples, metadata = _resolve_return_sample_budget({"ram_utilization_fraction": 1.0})
+
+    assert max_samples == 2_000_000
+    assert metadata["auto_max_return_samples_hard_cap"] == 2_000_000
 
 
 

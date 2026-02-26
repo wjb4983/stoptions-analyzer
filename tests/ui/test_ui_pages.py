@@ -853,6 +853,7 @@ def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch
     assert request.training_data_settings["min_bars_per_year"] == 1
     assert request.training_data_settings["max_ram_usage_gb"] is None
     assert request.training_data_settings["ram_utilization_fraction"] == pytest.approx(0.65)
+    assert request.training_data_settings["max_total_return_samples"] is None
 
     preview = page._build_training_execution_preview()
     assert "Training data RAM budget: auto (65% of available RAM)" in preview
@@ -1033,12 +1034,17 @@ def test_create_regime_request_coerces_ram_training_data_settings():
     controller.state.regime_definitions["baseline"]["training_data_settings"] = {
         "max_ram_usage_gb": "2.5",
         "ram_utilization_fraction": "1.8",
+        "max_total_return_samples": "250000",
     }
 
     request = page._build_regime_training_request()
 
     assert request.training_data_settings["max_ram_usage_gb"] == pytest.approx(2.5)
     assert request.training_data_settings["ram_utilization_fraction"] == pytest.approx(1.0)
+    assert request.training_data_settings["max_total_return_samples"] == 250000
+
+    preview = page._build_training_execution_preview()
+    assert "Training data RAM budget: manual sample cap (250,000 returns)" in preview
 
 
 def test_create_regime_training_failure_shows_hard_error_for_insufficient_real_history(monkeypatch):

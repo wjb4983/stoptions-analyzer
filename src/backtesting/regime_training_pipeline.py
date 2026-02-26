@@ -28,6 +28,8 @@ DEFAULT_REGIME_TRAINING_OUTPUT_DIR = Path("data/regime_training_runs")
 _FLOAT64_BYTES = 8
 _DEFAULT_RAM_BUDGET_UTILIZATION = 0.65
 _MIN_RAM_BUDGET_BYTES = 16 * 1024 * 1024
+_EFFECTIVE_BYTES_PER_RETURN_SAMPLE = 64
+_AUTO_MAX_RETURN_SAMPLES_HARD_CAP = 2_000_000
 
 
 @dataclass(frozen=True)
@@ -914,6 +916,19 @@ def _detect_available_ram_bytes() -> int | None:
 
 
 def _resolve_return_sample_budget(settings: dict[str, Any]) -> tuple[int | None, dict[str, Any]]:
+    explicit_sample_cap = settings.get("max_total_return_samples")
+    if explicit_sample_cap not in (None, ""):
+        try:
+            cap = max(1, int(float(explicit_sample_cap)))
+            return cap, {
+                "memory_budget_source": "user:max_total_return_samples",
+                "memory_budget_bytes": None,
+                "max_total_return_samples": int(cap),
+                "ram_utilization_fraction": float(settings.get("ram_utilization_fraction", _DEFAULT_RAM_BUDGET_UTILIZATION)),
+            }
+        except (TypeError, ValueError):
+            pass
+
     configured_gb = settings.get("max_ram_usage_gb")
     utilization = float(settings.get("ram_utilization_fraction", _DEFAULT_RAM_BUDGET_UTILIZATION))
     utilization = max(0.05, min(1.0, utilization))
@@ -939,11 +954,14 @@ def _resolve_return_sample_budget(settings: dict[str, Any]) -> tuple[int | None,
         return None, metadata
 
     budget_bytes = max(_MIN_RAM_BUDGET_BYTES, int(budget_bytes))
-    max_samples = max(1, budget_bytes // _FLOAT64_BYTES)
+    max_samples_by_bytes = max(1, budget_bytes // _EFFECTIVE_BYTES_PER_RETURN_SAMPLE)
+    max_samples = min(max_samples_by_bytes, _AUTO_MAX_RETURN_SAMPLES_HARD_CAP)
     metadata.update(
         {
             "memory_budget_source": source,
             "memory_budget_bytes": int(budget_bytes),
+            "effective_bytes_per_return_sample": int(_EFFECTIVE_BYTES_PER_RETURN_SAMPLE),
+            "auto_max_return_samples_hard_cap": int(_AUTO_MAX_RETURN_SAMPLES_HARD_CAP),
             "max_total_return_samples": int(max_samples),
         }
     )

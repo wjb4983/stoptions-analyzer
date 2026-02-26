@@ -159,6 +159,7 @@ DEFAULT_REGIME_TRAINING_DATA_SETTINGS = {
     "min_bars_per_year": 1,
     "max_ram_usage_gb": None,
     "ram_utilization_fraction": 0.65,
+    "max_total_return_samples": None,
     "scenario_settings": [
         {
             "name": "panic_crash",
