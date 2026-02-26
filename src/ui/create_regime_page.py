@@ -702,7 +702,32 @@ class CreateRegimePage(ttk.Frame):
             lambda event, inner_canvas=canvas, inner_window=window_id: inner_canvas.itemconfigure(inner_window, width=event.width),
         )
 
+        setattr(section, "_scroll_units_command", canvas.yview_scroll)
+        self._bind_mousewheel_recursive(canvas, canvas.yview_scroll)
+        self._bind_mousewheel_recursive(section, canvas.yview_scroll)
+
         return section
+
+    def _bind_mousewheel_recursive(self, widget: tk.Widget, scroll_command: object) -> None:
+        def _on_mousewheel(event: object) -> str:
+            delta = int(getattr(event, "delta", 0) or 0)
+            num = getattr(event, "num", None)
+            if num == 4:
+                scroll_command(-1, "units")
+                return "break"
+            if num == 5:
+                scroll_command(1, "units")
+                return "break"
+            if delta:
+                scroll_command(int(-delta / 120), "units")
+                return "break"
+            return "break"
+
+        widget.bind("<MouseWheel>", _on_mousewheel)
+        widget.bind("<Button-4>", _on_mousewheel)
+        widget.bind("<Button-5>", _on_mousewheel)
+        for child in widget.winfo_children():
+            self._bind_mousewheel_recursive(child, scroll_command)
 
     def _build_default_leg(self, leg_type: str) -> dict[str, object]:
         controls = {}
@@ -1052,8 +1077,13 @@ class CreateRegimePage(ttk.Frame):
         pros_cons_scrollbar = ttk.Scrollbar(pros_cons_frame, orient="vertical", command=self.pros_cons_text.yview)
         pros_cons_scrollbar.grid(row=0, column=1, sticky="ns")
         self.pros_cons_text.configure(state="disabled", yscrollcommand=pros_cons_scrollbar.set)
+        self._bind_mousewheel_recursive(self.pros_cons_text, self.pros_cons_text.yview_scroll)
         pros_cons_frame.columnconfigure(0, weight=1)
         pros_cons_frame.rowconfigure(0, weight=1)
+
+        validation_scroll = getattr(self.validation_form_container, "_scroll_units_command", None)
+        if validation_scroll is not None:
+            self._bind_mousewheel_recursive(self.validation_form_container, validation_scroll)
 
     def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
         tooltip_window: tk.Toplevel | None = None
@@ -1154,6 +1184,7 @@ class CreateRegimePage(ttk.Frame):
         preview_scrollbar = ttk.Scrollbar(preview_frame, orient="vertical", command=self.training_preview_text.yview)
         preview_scrollbar.grid(row=0, column=1, sticky="ns")
         self.training_preview_text.configure(state="disabled", yscrollcommand=preview_scrollbar.set)
+        self._bind_mousewheel_recursive(self.training_preview_text, self.training_preview_text.yview_scroll)
         preview_frame.columnconfigure(0, weight=1)
         preview_frame.rowconfigure(0, weight=1)
 
@@ -1165,6 +1196,7 @@ class CreateRegimePage(ttk.Frame):
         logs_scrollbar = ttk.Scrollbar(logs_frame, orient="vertical", command=self.run_logs.yview)
         logs_scrollbar.grid(row=0, column=1, sticky="ns")
         self.run_logs.configure(yscrollcommand=logs_scrollbar.set)
+        self._bind_mousewheel_recursive(self.run_logs, self.run_logs.yview_scroll)
         logs_frame.columnconfigure(0, weight=1)
         logs_frame.rowconfigure(0, weight=1)
 
@@ -1432,6 +1464,13 @@ class CreateRegimePage(ttk.Frame):
         if not self._initial_focus_set:
             self.model_combo.focus_set()
             self._initial_focus_set = True
+
+        basics_scroll = getattr(self.basics_form_container, "_scroll_units_command", None)
+        if basics_scroll is not None:
+            self._bind_mousewheel_recursive(self.basics_form_container, basics_scroll)
+        advanced_scroll = getattr(self.advanced_form_container, "_scroll_units_command", None)
+        if advanced_scroll is not None:
+            self._bind_mousewheel_recursive(self.advanced_form_container, advanced_scroll)
 
         self._update_validation_and_actions()
 
