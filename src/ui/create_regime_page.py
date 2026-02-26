@@ -18,6 +18,7 @@ from backtesting.cache_runner import run_backtest_cache
 from data_access.cache_audit import audit_universe_history
 from backtesting.regime_export_service import export_regime_training_bundle
 from models.regime_catalog import ModelDescriptor, get_model_descriptor, list_models_for_leg
+from models.model_profiles import ModelProfile, build_model_profile_registry
 from ui.calibration_spec_designer_page import CalibrationSpecDesignerPage
 from ui.event_process_designer_page import EventProcessDesignerPage
 from ui.regime_mapping import to_regime_leg_spec
