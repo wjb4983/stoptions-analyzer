@@ -1157,6 +1157,12 @@ class CreateRegimePage(ttk.Frame):
         training_mode_frame = ttk.Frame(action_row)
         training_mode_frame.pack(side="left", padx=(12, 8))
         ttk.Label(training_mode_frame, text="Training mode").pack(side="left")
+        training_mode_hint = ttk.Label(training_mode_frame, text="ⓘ", foreground="#4b6584")
+        training_mode_hint.pack(side="left", padx=(4, 0))
+        self._attach_tooltip(
+            training_mode_hint,
+            "Execution intent precedence: training_mode > training_profile fixed overrides > dropdown selected profile.",
+        )
         self.training_mode_var = tk.StringVar(value=TRAINING_MODE_CHOICES.get(self.training_mode, "Auto-model-search"))
         self.training_mode_combo = ttk.Combobox(
             training_mode_frame,
@@ -1401,6 +1407,25 @@ class CreateRegimePage(ttk.Frame):
         else:
             ttk.Label(configure_row, text="No required model-specific spec configuration.").grid(row=0, column=0, sticky="w")
 
+        execution_intent_section = ttk.LabelFrame(selector_section, text="Execution intent", padding=8)
+        execution_intent_section.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        execution_intent_section.columnconfigure(0, weight=1)
+        self.execution_intent_var = tk.StringVar()
+        ttk.Label(
+            execution_intent_section,
+            textvariable=self.execution_intent_var,
+            justify="left",
+            wraplength=520,
+        ).grid(row=0, column=0, sticky="w")
+        self.execution_intent_hint_var = tk.StringVar()
+        self.execution_intent_hint_label = ttk.Label(
+            execution_intent_section,
+            textvariable=self.execution_intent_hint_var,
+            justify="left",
+            wraplength=520,
+        )
+        self.execution_intent_hint_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+
         self.leg_control_vars = {}
         schema = LEG_CONTROL_GROUPS[str(leg["model_type"])]
         controls = leg["controls"]
@@ -1535,6 +1560,52 @@ class CreateRegimePage(ttk.Frame):
             return "empty object"
         return f"configured ({', '.join(keys[:6])}{'…' if len(keys) > 6 else ''})"
 
+    def _execution_intent_for_leg(self, leg: dict[str, object], *, leg_index: int) -> dict[str, object]:
+        mode = str(getattr(self, "training_mode", "auto_model_search")).strip().lower()
+        profile = self._training_profile_payload()
+        leg_name = str(leg.get("name", f"Leg {leg_index + 1}"))
+        try:
+            mapped = to_regime_leg_spec(leg)
+            leg_family = mapped.leg_spec.leg_family
+        except ValueError:
+            leg_family = str(leg.get("model_type", "")).strip()
+
+        allowed_model_ids = [descriptor.model_name for descriptor in list_models_for_leg(leg_family)]
+        selected_profile_model_id = self._preview_selected_model_id(leg)
+        profile_effects = self._profile_effects_for_leg(profile, leg_name=leg_name, leg_family=leg_family, leg_index=leg_index)
+
+        effective_selection_input = profile_effects["fixed_model"] or selected_profile_model_id
+        candidate_ids = self._preview_candidate_model_ids(mode, effective_selection_input, allowed_model_ids)
+        effective_execution_model_id = self._preview_select_model_id(mode, effective_selection_input, allowed_model_ids)
+        champion_not_guaranteed = mode in {"auto_model_search", "auto", "ensemble"}
+        return {
+            "mode": mode,
+            "selected_profile_model_id": selected_profile_model_id,
+            "effective_execution_model_id": effective_execution_model_id,
+            "candidate_ids": candidate_ids,
+            "champion_not_guaranteed": champion_not_guaranteed,
+        }
+
+    @staticmethod
+    def _execution_intent_summary(intent: dict[str, object]) -> str:
+        mode = str(intent.get("mode", "auto_model_search"))
+        selected_profile_model_id = str(intent.get("selected_profile_model_id", ""))
+        effective_execution_model_id = str(intent.get("effective_execution_model_id", ""))
+        candidate_ids = [str(item) for item in intent.get("candidate_ids", []) if str(item)]
+
+        if mode in {"single_model", "", "placeholder", "dev", "test"}:
+            final_model = effective_execution_model_id or selected_profile_model_id or "none"
+            return f"Will train only: {final_model}"
+        if mode in {"auto_model_search", "auto"}:
+            evaluated = ", ".join(candidate_ids) if candidate_ids else "none"
+            initial = selected_profile_model_id or effective_execution_model_id or "none"
+            return f"Will evaluate: {evaluated}; initial selected profile: {initial}"
+        if mode == "ensemble":
+            gate_model = effective_execution_model_id or "fallback"
+            return f"Will use ensemble gate model: {gate_model} (or fallback)"
+        final_model = effective_execution_model_id or selected_profile_model_id or "none"
+        return f"Will train only: {final_model}"
+
     def _training_profile_payload(self) -> dict[str, object]:
         definition = self._active_regime_definition()
         payload = definition.get("training_profile")
@@ -1610,10 +1681,9 @@ class CreateRegimePage(ttk.Frame):
             allowed_model_ids = [descriptor.model_name for descriptor in list_models_for_leg(leg_family)]
             selected_model_id = self._preview_selected_model_id(leg)
             profile_effects = self._profile_effects_for_leg(profile, leg_name=leg_name, leg_family=leg_family, leg_index=idx - 1)
-
-            effective_selected = profile_effects["fixed_model"] or selected_model_id
-            candidate_ids = self._preview_candidate_model_ids(mode, effective_selected, allowed_model_ids)
-            selected_for_execution = self._preview_select_model_id(mode, effective_selected, allowed_model_ids)
+            intent = self._execution_intent_for_leg(leg, leg_index=idx - 1)
+            candidate_ids = intent["candidate_ids"]
+            selected_for_execution = str(intent["effective_execution_model_id"])
 
             lines.append("")
             lines.append(f"Leg {idx}: {leg_name} [{leg_family}]")
@@ -1653,6 +1723,24 @@ class CreateRegimePage(ttk.Frame):
         self._training_preview_warnings = warnings
         return "\n".join(lines)
 
+    def _update_execution_intent_summary(self) -> None:
+        if not hasattr(self, "execution_intent_var"):
+            return
+        leg = self._selected_leg()
+        intent = self._execution_intent_for_leg(leg, leg_index=self.selected_leg_index)
+        self.execution_intent_var.set(self._execution_intent_summary(intent))
+
+        if not hasattr(self, "execution_intent_hint_var"):
+            return
+        if intent["champion_not_guaranteed"]:
+            self.execution_intent_hint_var.set("Hint: selected dropdown model seeds execution but may not be the final champion.")
+            if hasattr(self, "execution_intent_hint_label"):
+                self.execution_intent_hint_label.configure(foreground="#b12704")
+        else:
+            self.execution_intent_hint_var.set("Locked intent: selected dropdown model is the execution model.")
+            if hasattr(self, "execution_intent_hint_label"):
+                self.execution_intent_hint_label.configure(foreground="#1b8f3a")
+
     def _update_training_execution_preview(self) -> None:
         if not hasattr(self, "training_preview_text"):
             return
@@ -1661,6 +1749,7 @@ class CreateRegimePage(ttk.Frame):
         self.training_preview_text.delete("1.0", tk.END)
         self.training_preview_text.insert("1.0", preview_text)
         self.training_preview_text.configure(state="disabled")
+        self._update_execution_intent_summary()
 
     def _on_leg_model_selected(self, _event=None) -> None:
         leg = self._selected_leg()
