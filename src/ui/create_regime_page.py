@@ -567,6 +567,51 @@ TRAINING_MODE_CHOICES = {
     "auto_model_search": "Auto-model-search",
 }
 
+QUICK_PRESETS: list[dict[str, object]] = [
+    {
+        "name": "Balanced",
+        "description": "Steady defaults for broad market conditions.",
+        "controls": {
+            "lookback_days": 63,
+            "entry_zscore": 1.4,
+            "max_position_pct": 0.06,
+            "max_drawdown_stop": 0.1,
+            "turnover_limit": 0.3,
+            "slippage_bps": 8,
+            "model_confidence_min": 0.65,
+            "regime_stability_min": 0.55,
+        },
+    },
+    {
+        "name": "Fast React",
+        "description": "Higher sensitivity and turnover for tactical workflows.",
+        "controls": {
+            "lookback_days": 30,
+            "entry_zscore": 1.1,
+            "max_position_pct": 0.05,
+            "max_drawdown_stop": 0.09,
+            "turnover_limit": 0.5,
+            "slippage_bps": 12,
+            "model_confidence_min": 0.6,
+            "regime_stability_min": 0.5,
+        },
+    },
+    {
+        "name": "Defensive",
+        "description": "Lower risk and stricter confidence for stress periods.",
+        "controls": {
+            "lookback_days": 90,
+            "entry_zscore": 1.8,
+            "max_position_pct": 0.04,
+            "max_drawdown_stop": 0.08,
+            "turnover_limit": 0.2,
+            "slippage_bps": 7,
+            "model_confidence_min": 0.75,
+            "regime_stability_min": 0.65,
+        },
+    },
+]
+
 
 class CreateRegimePage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
@@ -593,6 +638,7 @@ class CreateRegimePage(ttk.Frame):
         self._nn_designer_window: NeuralNetworkDesignerPage | None = None
         self._calibration_designer_window: CalibrationSpecDesignerPage | None = None
         self._event_process_designer_window: EventProcessDesignerPage | None = None
+        self._initial_focus_set = False
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -606,11 +652,9 @@ class CreateRegimePage(ttk.Frame):
         self.main_pane.add(top_pane, weight=5)
 
         self.legs_panel = ttk.Frame(top_pane, padding=8)
-        self.config_panel = ttk.Frame(top_pane, padding=8)
-        self.summary_panel = ttk.Frame(top_pane, padding=8)
+        self.config_panel = ttk.Frame(top_pane, padding=12)
         top_pane.add(self.legs_panel, weight=2)
-        top_pane.add(self.config_panel, weight=4)
-        top_pane.add(self.summary_panel, weight=3)
+        top_pane.add(self.config_panel, weight=7)
 
         self.bottom_panel = ttk.Frame(self.main_pane, padding=8)
         self.main_pane.add(self.bottom_panel, weight=2)
@@ -762,7 +806,10 @@ class CreateRegimePage(ttk.Frame):
         return requirements
 
     def _required_spec_blockers(self, leg: dict[str, object]) -> list[str]:
-        descriptor = self._selected_model_descriptor(leg)
+        try:
+            descriptor = self._selected_model_descriptor(leg)
+        except ValueError:
+            return []
         requirements = self._spec_requirements_for_descriptor(descriptor)
         label_map = {
             "architecture_spec": "Architecture spec",
@@ -812,6 +859,24 @@ class CreateRegimePage(ttk.Frame):
         header = ttk.Frame(self.config_panel)
         header.pack(fill="x")
         ttk.Label(header, text="Selected leg configuration", font=("Arial", 12, "bold")).pack(anchor="w")
+        ttk.Label(
+            header,
+            text="Tune essentials first, then move into advanced controls when needed.",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(2, 8))
+
+        preset_row = ttk.Frame(header)
+        preset_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(preset_row, text="Quick presets").pack(side="left", padx=(0, 8))
+        for preset in QUICK_PRESETS:
+            button = ttk.Button(
+                preset_row,
+                text=str(preset["name"]),
+                command=lambda payload=preset: self._apply_quick_preset(payload),
+                takefocus=True,
+            )
+            button.pack(side="left", padx=(0, 6))
+            self._attach_tooltip(button, str(preset["description"]))
 
         self.leg_type_var = tk.StringVar(value="Trend Following")
         self.leg_type_combo = ttk.Combobox(
@@ -819,15 +884,34 @@ class CreateRegimePage(ttk.Frame):
             textvariable=self.leg_type_var,
             values=list(LEG_CONTROL_GROUPS),
             state="readonly",
+            width=24,
+            takefocus=True,
         )
-        self.leg_type_combo.pack(anchor="w", pady=(6, 0))
+        self.leg_type_combo.pack(anchor="w", pady=(0, 0))
         self.leg_type_combo.bind("<<ComboboxSelected>>", self._on_leg_type_selected)
 
-        self.form_container = ttk.Frame(self.config_panel)
-        self.form_container.pack(fill="both", expand=True, pady=(8, 0))
+        self.form_notebook = ttk.Notebook(self.config_panel, takefocus=True)
+        self.form_notebook.pack(fill="both", expand=True, pady=(10, 0))
+
+        self.basics_tab = ttk.Frame(self.form_notebook, padding=8)
+        self.advanced_tab = ttk.Frame(self.form_notebook, padding=8)
+        self.validation_tab = ttk.Frame(self.form_notebook, padding=8)
+        self.form_notebook.add(self.basics_tab, text="Basics")
+        self.form_notebook.add(self.advanced_tab, text="Advanced")
+        self.form_notebook.add(self.validation_tab, text="Validation & summary")
+
+        self.basics_form_container = ttk.Frame(self.basics_tab)
+        self.basics_form_container.pack(fill="both", expand=True)
+        self.advanced_form_container = ttk.Frame(self.advanced_tab)
+        self.advanced_form_container.pack(fill="both", expand=True)
 
     def _build_summary_panel(self) -> None:
-        ttk.Label(self.summary_panel, text="Risk summary + strategy fit", font=("Arial", 12, "bold")).pack(anchor="w")
+        ttk.Label(self.validation_tab, text="Validation summary", font=("Arial", 12, "bold")).pack(anchor="w")
+        ttk.Label(
+            self.validation_tab,
+            text="Use badges and recommendations to verify readiness before running training.",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(2, 8))
 
         self.validation_badge_vars = {
             "data_sufficiency": tk.StringVar(),
@@ -836,7 +920,7 @@ class CreateRegimePage(ttk.Frame):
         }
         self.validation_badges: dict[str, ttk.Label] = {}
 
-        badge_frame = ttk.Frame(self.summary_panel)
+        badge_frame = ttk.Frame(self.validation_tab)
         badge_frame.pack(fill="x", pady=(6, 8))
         for idx, (key, var) in enumerate(self.validation_badge_vars.items()):
             label = ttk.Label(badge_frame, textvariable=var)
@@ -844,11 +928,75 @@ class CreateRegimePage(ttk.Frame):
             self.validation_badges[key] = label
 
         self.risk_summary_var = tk.StringVar()
-        ttk.Label(self.summary_panel, textvariable=self.risk_summary_var, justify="left", wraplength=320).pack(fill="x", pady=(4, 8))
+        ttk.Label(self.validation_tab, textvariable=self.risk_summary_var, justify="left", wraplength=560).pack(fill="x", pady=(4, 8))
 
-        self.pros_cons_text = tk.Text(self.summary_panel, height=13, wrap="word")
+        self.pros_cons_text = tk.Text(self.validation_tab, height=14, wrap="word")
         self.pros_cons_text.pack(fill="both", expand=True)
         self.pros_cons_text.configure(state="disabled")
+
+    def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
+        tooltip_window: tk.Toplevel | None = None
+
+        def show_tooltip(_event: object) -> None:
+            nonlocal tooltip_window
+            if tooltip_window is not None:
+                return
+            tooltip_window = tk.Toplevel(self)
+            tooltip_window.wm_overrideredirect(True)
+            x = widget.winfo_rootx() + 14
+            y = widget.winfo_rooty() + 14
+            tooltip_window.wm_geometry(f"+{x}+{y}")
+            tk.Label(
+                tooltip_window,
+                text=text,
+                bg="#fffbe8",
+                relief="solid",
+                borderwidth=1,
+                padx=6,
+                pady=4,
+                wraplength=360,
+                justify="left",
+            ).pack()
+
+        def hide_tooltip(_event: object) -> None:
+            nonlocal tooltip_window
+            if tooltip_window is not None:
+                tooltip_window.destroy()
+                tooltip_window = None
+
+        widget.bind("<Enter>", show_tooltip)
+        widget.bind("<Leave>", hide_tooltip)
+
+    def _build_control_row(
+        self,
+        section: ttk.LabelFrame,
+        *,
+        row: int,
+        control: dict[str, object],
+        value: object,
+        width: int,
+    ) -> None:
+        ttk.Label(section, text=str(control["label"])).grid(row=row, column=0, sticky="w", padx=(0, 6), pady=2)
+        var = tk.StringVar(value=str(value))
+        entry = ttk.Entry(section, textvariable=var, width=width, takefocus=True)
+        entry.grid(row=row, column=1, sticky="w", padx=(0, 4), pady=2)
+        info = ttk.Label(section, text="ⓘ", foreground="#4b6584")
+        info.grid(row=row, column=2, sticky="w", pady=2)
+        self._attach_tooltip(info, str(control["tooltip"]))
+        entry.bind("<FocusOut>", lambda _e, key=str(control["key"]): self._on_control_edited(key))
+        self.leg_control_vars[str(control["key"])] = var
+
+    def _apply_quick_preset(self, preset: dict[str, object]) -> None:
+        leg = self._selected_leg()
+        controls = leg.get("controls")
+        if not isinstance(controls, dict):
+            controls = {}
+            leg["controls"] = controls
+        preset_controls = preset.get("controls")
+        if isinstance(preset_controls, dict):
+            controls.update(preset_controls)
+        self._persist_editor_state()
+        self._load_selected_leg_into_form()
 
     def _build_bottom_panel(self) -> None:
         action_row = ttk.Frame(self.bottom_panel)
@@ -963,17 +1111,24 @@ class CreateRegimePage(ttk.Frame):
             self.leg_type_var.set(str(leg["model_type"]))
         if hasattr(self, "training_mode_var"):
             self.training_mode_var.set(TRAINING_MODE_CHOICES.get(self.training_mode, "Auto-model-search"))
-        if not hasattr(self, "form_container"):
+        if not hasattr(self, "basics_form_container"):
             self._update_validation_and_actions()
             return
 
-        for widget in self.form_container.winfo_children():
+        for widget in self.basics_form_container.winfo_children():
+            widget.destroy()
+        for widget in self.advanced_form_container.winfo_children():
             widget.destroy()
 
-        selector_section = ttk.LabelFrame(self.form_container, text="Model selection", padding=6)
-        selector_section.pack(fill="x", pady=3)
+        selector_section = ttk.LabelFrame(self.basics_form_container, text="Model & profile", padding=8)
+        selector_section.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            selector_section,
+            text="Pick the leg model and required specs.",
+            foreground="#555555",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
-        ttk.Label(selector_section, text="Model").grid(row=0, column=0, sticky="w")
+        ttk.Label(selector_section, text="Model").grid(row=1, column=0, sticky="w")
         model_descriptors = self._allowed_models_for_leg(leg)
         self._model_selection_by_label = {
             f"{descriptor.display_name} ({descriptor.model_name})": descriptor
@@ -996,13 +1151,14 @@ class CreateRegimePage(ttk.Frame):
             textvariable=self.selected_model_var,
             values=list(self._model_selection_by_label.keys()),
             state="readonly",
-            width=42,
+            width=36,
+            takefocus=True,
         )
-        self.model_combo.grid(row=0, column=1, sticky="w", padx=4)
+        self.model_combo.grid(row=1, column=1, sticky="w", padx=4)
         self.model_combo.bind("<<ComboboxSelected>>", self._on_leg_model_selected)
 
         nn_row = ttk.Frame(selector_section)
-        nn_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        nn_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Button(nn_row, text="Open neural network designer", command=self._open_neural_network_designer).pack(side="left")
         architecture_state = "configured" if isinstance(leg.get("architecture_spec"), dict) else "not set"
         ttk.Label(nn_row, text=f"Architecture: {architecture_state}").pack(side="left", padx=(8, 0))
@@ -1016,7 +1172,7 @@ class CreateRegimePage(ttk.Frame):
         }
 
         chips_row = ttk.Frame(selector_section)
-        chips_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        chips_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         for idx, spec_key in enumerate(("architecture_spec", "calibration_spec", "event_process_spec")):
             requirement = spec_requirements[spec_key]
             configured = isinstance(leg.get(spec_key), dict)
@@ -1037,7 +1193,7 @@ class CreateRegimePage(ttk.Frame):
             ).grid(row=0, column=idx, sticky="w", padx=(0, 12))
 
         configure_row = ttk.Frame(selector_section)
-        configure_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        configure_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
         required_actions: list[tuple[str, object]] = []
         if spec_requirements["architecture_spec"] == "required":
             required_actions.append(("Configure architecture…", self._open_neural_network_designer))
@@ -1052,36 +1208,69 @@ class CreateRegimePage(ttk.Frame):
         else:
             ttk.Label(configure_row, text="No required model-specific spec configuration.").grid(row=0, column=0, sticky="w")
 
-        self.hyperparameter_vars = {}
-        hyperparameter_section = ttk.LabelFrame(self.form_container, text="Model hyperparameters", padding=6)
-        hyperparameter_section.pack(fill="x", pady=3)
-        hyperparameters = leg.get("hyperparameters", {})
-        if isinstance(hyperparameters, dict) and hyperparameters:
-            for row, key in enumerate(sorted(hyperparameters)):
-                ttk.Label(hyperparameter_section, text=key).grid(row=row, column=0, sticky="w")
-                var = tk.StringVar(value=str(hyperparameters[key]))
-                entry = ttk.Entry(hyperparameter_section, textvariable=var, width=20)
-                entry.grid(row=row, column=1, sticky="w", padx=4)
-                entry.bind("<FocusOut>", lambda _e, hyper_key=key: self._on_hyperparameter_edited(hyper_key))
-                self.hyperparameter_vars[key] = var
-        else:
-            ttk.Label(hyperparameter_section, text="No editable hyperparameters for selected model.").grid(row=0, column=0, sticky="w")
-
         self.leg_control_vars = {}
         schema = LEG_CONTROL_GROUPS[str(leg["model_type"])]
         controls = leg["controls"]
 
-        for group_key, group_controls in schema.items():
-            section = ttk.LabelFrame(self.form_container, text=GROUP_TITLES[group_key], padding=6)
-            section.pack(fill="x", pady=3)
-            for row, control in enumerate(group_controls):
-                ttk.Label(section, text=control["label"]).grid(row=row, column=0, sticky="w")
-                var = tk.StringVar(value=str(controls.get(control["key"], control["default"])))
-                entry = ttk.Entry(section, textvariable=var, width=12)
+        high_impact_groups = ("signal_parameters", "sizing_risk_caps")
+        for group_key in high_impact_groups:
+            group_controls = schema.get(group_key, [])
+            section = ttk.LabelFrame(self.basics_form_container, text=GROUP_TITLES[group_key], padding=8)
+            section.pack(fill="x", pady=(0, 8))
+            ttk.Label(
+                section,
+                text="High-impact knobs used most often.",
+                foreground="#555555",
+            ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+            for row, control in enumerate(group_controls, start=1):
+                self._build_control_row(
+                    section,
+                    row=row,
+                    control=control,
+                    value=controls.get(control["key"], control["default"]),
+                    width=10,
+                )
+
+        self.hyperparameter_vars = {}
+        hyperparameter_section = ttk.LabelFrame(self.advanced_form_container, text="Model hyperparameters", padding=8)
+        hyperparameter_section.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            hyperparameter_section,
+            text="Low-level optimizer and model tuning controls.",
+            foreground="#555555",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        hyperparameters = leg.get("hyperparameters", {})
+        if isinstance(hyperparameters, dict) and hyperparameters:
+            for row, key in enumerate(sorted(hyperparameters), start=1):
+                ttk.Label(hyperparameter_section, text=key).grid(row=row, column=0, sticky="w")
+                var = tk.StringVar(value=str(hyperparameters[key]))
+                entry = ttk.Entry(hyperparameter_section, textvariable=var, width=14, takefocus=True)
                 entry.grid(row=row, column=1, sticky="w", padx=4)
-                ttk.Label(section, text=control["tooltip"], wraplength=360).grid(row=row, column=2, sticky="w")
-                entry.bind("<FocusOut>", lambda _e, key=control["key"]: self._on_control_edited(key))
-                self.leg_control_vars[control["key"]] = var
+                entry.bind("<FocusOut>", lambda _e, hyper_key=key: self._on_hyperparameter_edited(hyper_key))
+                self.hyperparameter_vars[key] = var
+        else:
+            ttk.Label(hyperparameter_section, text="No editable hyperparameters for selected model.").grid(row=1, column=0, sticky="w")
+
+        for group_key, group_controls in schema.items():
+            if group_key in high_impact_groups:
+                continue
+            section = ttk.LabelFrame(self.advanced_form_container, text=GROUP_TITLES[group_key], padding=8)
+            section.pack(fill="x", pady=(0, 8))
+            ttk.Label(section, text="Advanced controls.", foreground="#555555").grid(
+                row=0, column=0, columnspan=3, sticky="w", pady=(0, 4)
+            )
+            for row, control in enumerate(group_controls, start=1):
+                self._build_control_row(
+                    section,
+                    row=row,
+                    control=control,
+                    value=controls.get(control["key"], control["default"]),
+                    width=10,
+                )
+
+        if not self._initial_focus_set:
+            self.model_combo.focus_set()
+            self._initial_focus_set = True
 
         self._update_validation_and_actions()
 
