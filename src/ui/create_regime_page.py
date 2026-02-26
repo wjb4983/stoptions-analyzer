@@ -643,32 +643,12 @@ class CreateRegimePage(ttk.Frame):
         self._initial_focus_set = False
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
 
-        self.page_container = ttk.Frame(self)
-        self.page_container.grid(row=0, column=0, sticky="nsew")
-        self.page_container.columnconfigure(0, weight=1)
-        self.page_container.rowconfigure(0, weight=1)
+        ttk.Label(self, text="Create Regime", font=("Arial", 18, "bold")).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 6))
 
-        self.page_canvas = tk.Canvas(self.page_container, highlightthickness=0)
-        self.page_canvas.grid(row=0, column=0, sticky="nsew")
-        self.page_scrollbar = ttk.Scrollbar(self.page_container, orient="vertical", command=self.page_canvas.yview)
-        self.page_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.page_canvas.configure(yscrollcommand=self.page_scrollbar.set)
-
-        self.page_content = ttk.Frame(self.page_canvas)
-        self._page_canvas_window = self.page_canvas.create_window((0, 0), window=self.page_content, anchor="nw")
-        self.page_content.bind("<Configure>", self._on_page_content_configure)
-        self.page_canvas.bind("<Configure>", self._on_page_canvas_configure)
-        self.page_canvas.bind("<Enter>", lambda _event: self._bind_page_mousewheel())
-        self.page_canvas.bind("<Leave>", lambda _event: self._unbind_page_mousewheel())
-
-        ttk.Label(self.page_content, text="Create Regime", font=("Arial", 18, "bold")).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 6))
-
-        self.main_pane = ttk.Panedwindow(self.page_content, orient=tk.VERTICAL)
+        self.main_pane = ttk.Panedwindow(self, orient=tk.VERTICAL)
         self.main_pane.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 10))
-        self.page_content.columnconfigure(0, weight=1)
-        self.page_content.rowconfigure(1, weight=1)
 
         top_pane = ttk.Panedwindow(self.main_pane, orient=tk.HORIZONTAL)
         self.main_pane.add(top_pane, weight=5)
@@ -723,36 +703,6 @@ class CreateRegimePage(ttk.Frame):
         )
 
         return section
-
-    def _on_page_content_configure(self, _event: object) -> None:
-        self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))
-
-    def _on_page_canvas_configure(self, event: object) -> None:
-        width = getattr(event, "width", None)
-        if width is not None:
-            self.page_canvas.itemconfigure(self._page_canvas_window, width=width)
-
-    def _bind_page_mousewheel(self) -> None:
-        self.page_canvas.bind_all("<MouseWheel>", self._on_page_mousewheel)
-        self.page_canvas.bind_all("<Button-4>", self._on_page_mousewheel)
-        self.page_canvas.bind_all("<Button-5>", self._on_page_mousewheel)
-
-    def _unbind_page_mousewheel(self) -> None:
-        self.page_canvas.unbind_all("<MouseWheel>")
-        self.page_canvas.unbind_all("<Button-4>")
-        self.page_canvas.unbind_all("<Button-5>")
-
-    def _on_page_mousewheel(self, event: object) -> None:
-        delta = getattr(event, "delta", 0)
-        num = getattr(event, "num", None)
-        if num == 4:
-            self.page_canvas.yview_scroll(-1, "units")
-            return
-        if num == 5:
-            self.page_canvas.yview_scroll(1, "units")
-            return
-        if delta:
-            self.page_canvas.yview_scroll(int(-delta / 120), "units")
 
     def _build_default_leg(self, leg_type: str) -> dict[str, object]:
         controls = {}
