@@ -1309,7 +1309,6 @@ class CreateRegimePage(ttk.Frame):
                 chips_row,
                 text=f"{spec_labels[spec_key]}: {state_text}",
                 foreground=fg_color,
-                background=chip_background,
             ).grid(row=0, column=idx, sticky="w", padx=(0, 12))
 
         configure_row = ttk.Frame(selector_section)
