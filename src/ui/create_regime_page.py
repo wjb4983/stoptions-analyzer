@@ -17,8 +17,9 @@ from backtesting.regime_training_pipeline import (
 from backtesting.cache_runner import run_backtest_cache
 from data_access.cache_audit import audit_universe_history
 from backtesting.regime_export_service import export_regime_training_bundle
-from models.model_profiles import ModelProfile, build_model_profile_registry
-from models.regime_catalog import list_models_for_leg
+from models.regime_catalog import ModelDescriptor, get_model_descriptor, list_models_for_leg
+from ui.calibration_spec_designer_page import CalibrationSpecDesignerPage
+from ui.event_process_designer_page import EventProcessDesignerPage
 from ui.regime_mapping import to_regime_leg_spec
 from ui.neural_network_designer_page import NeuralNetworkDesignerPage
 from config import (
@@ -566,6 +567,51 @@ TRAINING_MODE_CHOICES = {
     "auto_model_search": "Auto-model-search",
 }
 
+QUICK_PRESETS: list[dict[str, object]] = [
+    {
+        "name": "Balanced",
+        "description": "Steady defaults for broad market conditions.",
+        "controls": {
+            "lookback_days": 63,
+            "entry_zscore": 1.4,
+            "max_position_pct": 0.06,
+            "max_drawdown_stop": 0.1,
+            "turnover_limit": 0.3,
+            "slippage_bps": 8,
+            "model_confidence_min": 0.65,
+            "regime_stability_min": 0.55,
+        },
+    },
+    {
+        "name": "Fast React",
+        "description": "Higher sensitivity and turnover for tactical workflows.",
+        "controls": {
+            "lookback_days": 30,
+            "entry_zscore": 1.1,
+            "max_position_pct": 0.05,
+            "max_drawdown_stop": 0.09,
+            "turnover_limit": 0.5,
+            "slippage_bps": 12,
+            "model_confidence_min": 0.6,
+            "regime_stability_min": 0.5,
+        },
+    },
+    {
+        "name": "Defensive",
+        "description": "Lower risk and stricter confidence for stress periods.",
+        "controls": {
+            "lookback_days": 90,
+            "entry_zscore": 1.8,
+            "max_position_pct": 0.04,
+            "max_drawdown_stop": 0.08,
+            "turnover_limit": 0.2,
+            "slippage_bps": 7,
+            "model_confidence_min": 0.75,
+            "regime_stability_min": 0.65,
+        },
+    },
+]
+
 
 class CreateRegimePage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
@@ -590,6 +636,9 @@ class CreateRegimePage(ttk.Frame):
         self._model_selection_by_label: dict[str, ModelProfile | None] = {}
         self._is_training = False
         self._nn_designer_window: NeuralNetworkDesignerPage | None = None
+        self._calibration_designer_window: CalibrationSpecDesignerPage | None = None
+        self._event_process_designer_window: EventProcessDesignerPage | None = None
+        self._training_preview_warnings: list[str] = []
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -603,11 +652,9 @@ class CreateRegimePage(ttk.Frame):
         self.main_pane.add(top_pane, weight=5)
 
         self.legs_panel = ttk.Frame(top_pane, padding=8)
-        self.config_panel = ttk.Frame(top_pane, padding=8)
-        self.summary_panel = ttk.Frame(top_pane, padding=8)
+        self.config_panel = ttk.Frame(top_pane, padding=12)
         top_pane.add(self.legs_panel, weight=2)
-        top_pane.add(self.config_panel, weight=4)
-        top_pane.add(self.summary_panel, weight=3)
+        top_pane.add(self.config_panel, weight=7)
 
         self.bottom_panel = ttk.Frame(self.main_pane, padding=8)
         self.main_pane.add(self.bottom_panel, weight=2)
@@ -622,6 +669,15 @@ class CreateRegimePage(ttk.Frame):
         self._refresh_legs_list()
         self._load_selected_leg_into_form()
         self._update_validation_and_actions()
+
+    def _theme_background_color(self) -> str:
+        """Return a Tk-compatible background color for labels embedded in ttk frames."""
+        style = ttk.Style()
+        background = style.lookup("TFrame", "background")
+        if background:
+            return str(background)
+        parent_bg = self.master.cget("bg") if self.master is not None else ""
+        return str(parent_bg or "#f0f0f0")
 
     def _build_default_leg(self, leg_type: str) -> dict[str, object]:
         controls = {}
@@ -775,6 +831,46 @@ class CreateRegimePage(ttk.Frame):
     def _profiles_for_leg(self, leg: dict[str, object]) -> tuple[ModelProfile, ...]:
         return self._profile_registry_for_leg(leg).profiles
 
+    def _selected_model_descriptor(self, leg: dict[str, object]) -> ModelDescriptor | None:
+        selected_model_id = str(leg.get("selected_model_id", "")).strip()
+        if not selected_model_id:
+            return None
+        mapped_leg = to_regime_leg_spec(leg)
+        return get_model_descriptor(mapped_leg.leg_spec.leg_family, selected_model_id)
+
+    @staticmethod
+    def _spec_requirements_for_descriptor(descriptor: ModelDescriptor | None) -> dict[str, str]:
+        requirements = {
+            "architecture_spec": "unsupported",
+            "calibration_spec": "unsupported",
+            "event_process_spec": "unsupported",
+        }
+        if descriptor is None:
+            return requirements
+
+        tags = descriptor.capability_tags
+        requirements["architecture_spec"] = "required" if "needs_architecture_spec" in tags else "optional" if "supports_architecture_spec" in tags else "unsupported"
+        requirements["calibration_spec"] = "required" if "needs_calibration_spec" in tags else "optional" if "supports_calibration_spec" in tags else "unsupported"
+        requirements["event_process_spec"] = "required" if "needs_event_process_spec" in tags else "optional" if "supports_event_process_spec" in tags else "unsupported"
+        return requirements
+
+    def _required_spec_blockers(self, leg: dict[str, object]) -> list[str]:
+        try:
+            descriptor = self._selected_model_descriptor(leg)
+        except ValueError:
+            return []
+        requirements = self._spec_requirements_for_descriptor(descriptor)
+        label_map = {
+            "architecture_spec": "Architecture spec",
+            "calibration_spec": "Calibration spec",
+            "event_process_spec": "Event process spec",
+        }
+        blockers: list[str] = []
+        for key, requirement in requirements.items():
+            if requirement == "required" and not isinstance(leg.get(key), dict):
+                blockers.append(label_map[key])
+        return blockers
+
     def _ensure_leg_model_defaults(self, leg: dict[str, object]) -> None:
         profiles = self._profiles_for_leg(leg)
         if not profiles:
@@ -838,6 +934,24 @@ class CreateRegimePage(ttk.Frame):
         header = ttk.Frame(self.config_panel)
         header.pack(fill="x")
         ttk.Label(header, text="Selected leg configuration", font=("Arial", 12, "bold")).pack(anchor="w")
+        ttk.Label(
+            header,
+            text="Tune essentials first, then move into advanced controls when needed.",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(2, 8))
+
+        preset_row = ttk.Frame(header)
+        preset_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(preset_row, text="Quick presets").pack(side="left", padx=(0, 8))
+        for preset in QUICK_PRESETS:
+            button = ttk.Button(
+                preset_row,
+                text=str(preset["name"]),
+                command=lambda payload=preset: self._apply_quick_preset(payload),
+                takefocus=True,
+            )
+            button.pack(side="left", padx=(0, 6))
+            self._attach_tooltip(button, str(preset["description"]))
 
         self.leg_type_var = tk.StringVar(value="Trend Following")
         self.leg_type_combo = ttk.Combobox(
@@ -845,15 +959,34 @@ class CreateRegimePage(ttk.Frame):
             textvariable=self.leg_type_var,
             values=list(LEG_CONTROL_GROUPS),
             state="readonly",
+            width=24,
+            takefocus=True,
         )
-        self.leg_type_combo.pack(anchor="w", pady=(6, 0))
+        self.leg_type_combo.pack(anchor="w", pady=(0, 0))
         self.leg_type_combo.bind("<<ComboboxSelected>>", self._on_leg_type_selected)
 
-        self.form_container = ttk.Frame(self.config_panel)
-        self.form_container.pack(fill="both", expand=True, pady=(8, 0))
+        self.form_notebook = ttk.Notebook(self.config_panel, takefocus=True)
+        self.form_notebook.pack(fill="both", expand=True, pady=(10, 0))
+
+        self.basics_tab = ttk.Frame(self.form_notebook, padding=8)
+        self.advanced_tab = ttk.Frame(self.form_notebook, padding=8)
+        self.validation_tab = ttk.Frame(self.form_notebook, padding=8)
+        self.form_notebook.add(self.basics_tab, text="Basics")
+        self.form_notebook.add(self.advanced_tab, text="Advanced")
+        self.form_notebook.add(self.validation_tab, text="Validation & summary")
+
+        self.basics_form_container = ttk.Frame(self.basics_tab)
+        self.basics_form_container.pack(fill="both", expand=True)
+        self.advanced_form_container = ttk.Frame(self.advanced_tab)
+        self.advanced_form_container.pack(fill="both", expand=True)
 
     def _build_summary_panel(self) -> None:
-        ttk.Label(self.summary_panel, text="Risk summary + strategy fit", font=("Arial", 12, "bold")).pack(anchor="w")
+        ttk.Label(self.validation_tab, text="Validation summary", font=("Arial", 12, "bold")).pack(anchor="w")
+        ttk.Label(
+            self.validation_tab,
+            text="Use badges and recommendations to verify readiness before running training.",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(2, 8))
 
         self.validation_badge_vars = {
             "data_sufficiency": tk.StringVar(),
@@ -862,7 +995,7 @@ class CreateRegimePage(ttk.Frame):
         }
         self.validation_badges: dict[str, ttk.Label] = {}
 
-        badge_frame = ttk.Frame(self.summary_panel)
+        badge_frame = ttk.Frame(self.validation_tab)
         badge_frame.pack(fill="x", pady=(6, 8))
         for idx, (key, var) in enumerate(self.validation_badge_vars.items()):
             label = ttk.Label(badge_frame, textvariable=var)
@@ -870,11 +1003,75 @@ class CreateRegimePage(ttk.Frame):
             self.validation_badges[key] = label
 
         self.risk_summary_var = tk.StringVar()
-        ttk.Label(self.summary_panel, textvariable=self.risk_summary_var, justify="left", wraplength=320).pack(fill="x", pady=(4, 8))
+        ttk.Label(self.validation_tab, textvariable=self.risk_summary_var, justify="left", wraplength=560).pack(fill="x", pady=(4, 8))
 
-        self.pros_cons_text = tk.Text(self.summary_panel, height=13, wrap="word")
+        self.pros_cons_text = tk.Text(self.validation_tab, height=14, wrap="word")
         self.pros_cons_text.pack(fill="both", expand=True)
         self.pros_cons_text.configure(state="disabled")
+
+    def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
+        tooltip_window: tk.Toplevel | None = None
+
+        def show_tooltip(_event: object) -> None:
+            nonlocal tooltip_window
+            if tooltip_window is not None:
+                return
+            tooltip_window = tk.Toplevel(self)
+            tooltip_window.wm_overrideredirect(True)
+            x = widget.winfo_rootx() + 14
+            y = widget.winfo_rooty() + 14
+            tooltip_window.wm_geometry(f"+{x}+{y}")
+            tk.Label(
+                tooltip_window,
+                text=text,
+                bg="#fffbe8",
+                relief="solid",
+                borderwidth=1,
+                padx=6,
+                pady=4,
+                wraplength=360,
+                justify="left",
+            ).pack()
+
+        def hide_tooltip(_event: object) -> None:
+            nonlocal tooltip_window
+            if tooltip_window is not None:
+                tooltip_window.destroy()
+                tooltip_window = None
+
+        widget.bind("<Enter>", show_tooltip)
+        widget.bind("<Leave>", hide_tooltip)
+
+    def _build_control_row(
+        self,
+        section: ttk.LabelFrame,
+        *,
+        row: int,
+        control: dict[str, object],
+        value: object,
+        width: int,
+    ) -> None:
+        ttk.Label(section, text=str(control["label"])).grid(row=row, column=0, sticky="w", padx=(0, 6), pady=2)
+        var = tk.StringVar(value=str(value))
+        entry = ttk.Entry(section, textvariable=var, width=width, takefocus=True)
+        entry.grid(row=row, column=1, sticky="w", padx=(0, 4), pady=2)
+        info = ttk.Label(section, text="ⓘ", foreground="#4b6584")
+        info.grid(row=row, column=2, sticky="w", pady=2)
+        self._attach_tooltip(info, str(control["tooltip"]))
+        entry.bind("<FocusOut>", lambda _e, key=str(control["key"]): self._on_control_edited(key))
+        self.leg_control_vars[str(control["key"])] = var
+
+    def _apply_quick_preset(self, preset: dict[str, object]) -> None:
+        leg = self._selected_leg()
+        controls = leg.get("controls")
+        if not isinstance(controls, dict):
+            controls = {}
+            leg["controls"] = controls
+        preset_controls = preset.get("controls")
+        if isinstance(preset_controls, dict):
+            controls.update(preset_controls)
+        self._persist_editor_state()
+        self._load_selected_leg_into_form()
 
     def _build_bottom_panel(self) -> None:
         action_row = ttk.Frame(self.bottom_panel)
@@ -902,6 +1099,11 @@ class CreateRegimePage(ttk.Frame):
 
         self.validation_message_var = tk.StringVar()
         ttk.Label(self.bottom_panel, textvariable=self.validation_message_var, wraplength=760).pack(anchor="w", pady=(6, 4))
+
+        ttk.Label(self.bottom_panel, text="Training execution preview", font=("Arial", 10, "bold")).pack(anchor="w", pady=(4, 2))
+        self.training_preview_text = tk.Text(self.bottom_panel, height=9, wrap="word")
+        self.training_preview_text.pack(fill="x", expand=False, pady=(0, 6))
+        self.training_preview_text.configure(state="disabled")
 
         ttk.Label(self.bottom_panel, text="Run logs", font=("Arial", 10, "bold")).pack(anchor="w")
         self.run_logs = tk.Text(self.bottom_panel, height=7, wrap="word")
@@ -992,15 +1194,22 @@ class CreateRegimePage(ttk.Frame):
             self.leg_type_var.set(str(leg["model_type"]))
         if hasattr(self, "training_mode_var"):
             self.training_mode_var.set(TRAINING_MODE_CHOICES.get(self.training_mode, "Auto-model-search"))
-        if not hasattr(self, "form_container"):
+        if not hasattr(self, "basics_form_container"):
             self._update_validation_and_actions()
             return
 
-        for widget in self.form_container.winfo_children():
+        for widget in self.basics_form_container.winfo_children():
+            widget.destroy()
+        for widget in self.advanced_form_container.winfo_children():
             widget.destroy()
 
-        selector_section = ttk.LabelFrame(self.form_container, text="Model selection", padding=6)
-        selector_section.pack(fill="x", pady=3)
+        selector_section = ttk.LabelFrame(self.basics_form_container, text="Model & profile", padding=8)
+        selector_section.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            selector_section,
+            text="Pick the leg model and required specs.",
+            foreground="#555555",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
         ttk.Label(selector_section, text="Model profile").grid(row=0, column=0, sticky="w")
         profile_registry = self._profile_registry_for_leg(leg)
@@ -1048,45 +1257,123 @@ class CreateRegimePage(ttk.Frame):
             state="readonly",
             width=52,
         )
-        self.model_combo.grid(row=0, column=1, sticky="w", padx=4)
+        self.model_combo.grid(row=1, column=1, sticky="w", padx=4)
         self.model_combo.bind("<<ComboboxSelected>>", self._on_leg_model_selected)
 
         nn_row = ttk.Frame(selector_section)
-        nn_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        nn_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Button(nn_row, text="Open neural network designer", command=self._open_neural_network_designer).pack(side="left")
         architecture_state = "configured" if isinstance(leg.get("architecture_spec"), dict) else "not set"
         ttk.Label(nn_row, text=f"Architecture: {architecture_state}").pack(side="left", padx=(8, 0))
 
-        self.hyperparameter_vars = {}
-        hyperparameter_section = ttk.LabelFrame(self.form_container, text="Model hyperparameters", padding=6)
-        hyperparameter_section.pack(fill="x", pady=3)
-        hyperparameters = leg.get("hyperparameters", {})
-        if isinstance(hyperparameters, dict) and hyperparameters:
-            for row, key in enumerate(sorted(hyperparameters)):
-                ttk.Label(hyperparameter_section, text=key).grid(row=row, column=0, sticky="w")
-                var = tk.StringVar(value=str(hyperparameters[key]))
-                entry = ttk.Entry(hyperparameter_section, textvariable=var, width=20)
-                entry.grid(row=row, column=1, sticky="w", padx=4)
-                entry.bind("<FocusOut>", lambda _e, hyper_key=key: self._on_hyperparameter_edited(hyper_key))
-                self.hyperparameter_vars[key] = var
+        selected_descriptor = self._model_selection_by_label.get(self.selected_model_var.get())
+        spec_requirements = self._spec_requirements_for_descriptor(selected_descriptor)
+        spec_labels = {
+            "architecture_spec": "Architecture spec",
+            "calibration_spec": "Calibration spec",
+            "event_process_spec": "Event process spec",
+        }
+
+        chips_row = ttk.Frame(selector_section)
+        chips_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        for idx, spec_key in enumerate(("architecture_spec", "calibration_spec", "event_process_spec")):
+            requirement = spec_requirements[spec_key]
+            configured = isinstance(leg.get(spec_key), dict)
+            if requirement == "required":
+                state_text = "required · configured" if configured else "required · missing"
+                fg_color = "#1b8f3a" if configured else "#b12704"
+            elif requirement == "optional":
+                state_text = "optional · configured" if configured else "optional · not set"
+                fg_color = "#1b8f3a" if configured else "#6a6a6a"
+            else:
+                state_text = "not required"
+                fg_color = "#6a6a6a"
+            tk.Label(
+                chips_row,
+                text=f"{spec_labels[spec_key]}: {state_text}",
+                foreground=fg_color,
+                background=chip_background,
+            ).grid(row=0, column=idx, sticky="w", padx=(0, 12))
+
+        configure_row = ttk.Frame(selector_section)
+        configure_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        required_actions: list[tuple[str, object]] = []
+        if spec_requirements["architecture_spec"] == "required":
+            required_actions.append(("Configure architecture…", self._open_neural_network_designer))
+        if spec_requirements["calibration_spec"] == "required":
+            required_actions.append(("Configure calibration…", self._open_calibration_spec_designer))
+        if spec_requirements["event_process_spec"] == "required":
+            required_actions.append(("Configure event process…", self._open_event_process_designer))
+
+        if required_actions:
+            for idx, (label, callback) in enumerate(required_actions):
+                ttk.Button(configure_row, text=label, command=callback).grid(row=0, column=idx, sticky="w", padx=(0, 6))
         else:
-            ttk.Label(hyperparameter_section, text="No editable hyperparameters for selected model.").grid(row=0, column=0, sticky="w")
+            ttk.Label(configure_row, text="No required model-specific spec configuration.").grid(row=0, column=0, sticky="w")
 
         self.leg_control_vars = {}
         schema = LEG_CONTROL_GROUPS[str(leg["model_type"])]
         controls = leg["controls"]
 
-        for group_key, group_controls in schema.items():
-            section = ttk.LabelFrame(self.form_container, text=GROUP_TITLES[group_key], padding=6)
-            section.pack(fill="x", pady=3)
-            for row, control in enumerate(group_controls):
-                ttk.Label(section, text=control["label"]).grid(row=row, column=0, sticky="w")
-                var = tk.StringVar(value=str(controls.get(control["key"], control["default"])))
-                entry = ttk.Entry(section, textvariable=var, width=12)
+        high_impact_groups = ("signal_parameters", "sizing_risk_caps")
+        for group_key in high_impact_groups:
+            group_controls = schema.get(group_key, [])
+            section = ttk.LabelFrame(self.basics_form_container, text=GROUP_TITLES[group_key], padding=8)
+            section.pack(fill="x", pady=(0, 8))
+            ttk.Label(
+                section,
+                text="High-impact knobs used most often.",
+                foreground="#555555",
+            ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+            for row, control in enumerate(group_controls, start=1):
+                self._build_control_row(
+                    section,
+                    row=row,
+                    control=control,
+                    value=controls.get(control["key"], control["default"]),
+                    width=10,
+                )
+
+        self.hyperparameter_vars = {}
+        hyperparameter_section = ttk.LabelFrame(self.advanced_form_container, text="Model hyperparameters", padding=8)
+        hyperparameter_section.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            hyperparameter_section,
+            text="Low-level optimizer and model tuning controls.",
+            foreground="#555555",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        hyperparameters = leg.get("hyperparameters", {})
+        if isinstance(hyperparameters, dict) and hyperparameters:
+            for row, key in enumerate(sorted(hyperparameters), start=1):
+                ttk.Label(hyperparameter_section, text=key).grid(row=row, column=0, sticky="w")
+                var = tk.StringVar(value=str(hyperparameters[key]))
+                entry = ttk.Entry(hyperparameter_section, textvariable=var, width=14, takefocus=True)
                 entry.grid(row=row, column=1, sticky="w", padx=4)
-                ttk.Label(section, text=control["tooltip"], wraplength=360).grid(row=row, column=2, sticky="w")
-                entry.bind("<FocusOut>", lambda _e, key=control["key"]: self._on_control_edited(key))
-                self.leg_control_vars[control["key"]] = var
+                entry.bind("<FocusOut>", lambda _e, hyper_key=key: self._on_hyperparameter_edited(hyper_key))
+                self.hyperparameter_vars[key] = var
+        else:
+            ttk.Label(hyperparameter_section, text="No editable hyperparameters for selected model.").grid(row=1, column=0, sticky="w")
+
+        for group_key, group_controls in schema.items():
+            if group_key in high_impact_groups:
+                continue
+            section = ttk.LabelFrame(self.advanced_form_container, text=GROUP_TITLES[group_key], padding=8)
+            section.pack(fill="x", pady=(0, 8))
+            ttk.Label(section, text="Advanced controls.", foreground="#555555").grid(
+                row=0, column=0, columnspan=3, sticky="w", pady=(0, 4)
+            )
+            for row, control in enumerate(group_controls, start=1):
+                self._build_control_row(
+                    section,
+                    row=row,
+                    control=control,
+                    value=controls.get(control["key"], control["default"]),
+                    width=10,
+                )
+
+        if not self._initial_focus_set:
+            self.model_combo.focus_set()
+            self._initial_focus_set = True
 
         self._update_validation_and_actions()
 
@@ -1098,6 +1385,185 @@ class CreateRegimePage(ttk.Frame):
                 break
         self._persist_editor_state()
         self._update_validation_and_actions()
+
+    @staticmethod
+    def _preview_selected_model_id(leg: dict[str, object]) -> str:
+        model_id = str(leg.get("model_id", "")).strip().lower()
+        if model_id:
+            return model_id
+        return str(leg.get("selected_model_id", "")).strip().lower()
+
+    @staticmethod
+    def _preview_select_model_id(mode: str, selected_model_id: str, allowed_model_ids: list[str]) -> str:
+        if not allowed_model_ids:
+            return ""
+
+        if mode in {"single_model", "auto_model_search", "", "auto"}:
+            if selected_model_id and selected_model_id in allowed_model_ids:
+                return selected_model_id
+            return allowed_model_ids[0]
+
+        if mode == "ensemble":
+            if "meta_label_classifier" in allowed_model_ids:
+                return "meta_label_classifier"
+            return allowed_model_ids[0]
+
+        if mode in allowed_model_ids:
+            return mode
+
+        return allowed_model_ids[0]
+
+    @staticmethod
+    def _preview_candidate_model_ids(mode: str, selected_model_id: str, allowed_model_ids: list[str]) -> list[str]:
+        if not allowed_model_ids:
+            return []
+        if mode in {"auto_model_search", "auto"}:
+            return list(allowed_model_ids)
+        if mode in {"single_model", "", "placeholder", "dev", "test"}:
+            if selected_model_id and selected_model_id in allowed_model_ids:
+                return [selected_model_id]
+            return [allowed_model_ids[0]]
+        if mode == "ensemble":
+            return ["meta_label_classifier"] if "meta_label_classifier" in allowed_model_ids else [allowed_model_ids[0]]
+        if mode in allowed_model_ids:
+            return [mode]
+        return [allowed_model_ids[0]]
+
+    @staticmethod
+    def _preview_spec_payload_status(payload: object) -> str:
+        if not isinstance(payload, dict):
+            return "none"
+        keys = sorted(str(key) for key in payload.keys())
+        if not keys:
+            return "empty object"
+        return f"configured ({', '.join(keys[:6])}{'…' if len(keys) > 6 else ''})"
+
+    def _training_profile_payload(self) -> dict[str, object]:
+        definition = self._active_regime_definition()
+        payload = definition.get("training_profile")
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _profile_value_for_leg(mapping: object, *, leg_name: str, leg_family: str, leg_index: int) -> object:
+        if not isinstance(mapping, dict):
+            return None
+        for key in (leg_name, leg_family, str(leg_index), "default"):
+            if key in mapping:
+                return mapping.get(key)
+        return None
+
+    def _profile_effects_for_leg(self, profile: dict[str, object], *, leg_name: str, leg_family: str, leg_index: int) -> dict[str, Any]:
+        fixed_model = self._profile_value_for_leg(
+            profile.get("fixed_model_by_leg", profile.get("fixed_models")),
+            leg_name=leg_name,
+            leg_family=leg_family,
+            leg_index=leg_index,
+        )
+        if not isinstance(fixed_model, str):
+            fixed_model = profile.get("fixed_model_id") if isinstance(profile.get("fixed_model_id"), str) else None
+
+        auto_seed = self._profile_value_for_leg(
+            profile.get("auto_search_seed_model_ids_by_leg", profile.get("auto_search_seed_models")),
+            leg_name=leg_name,
+            leg_family=leg_family,
+            leg_index=leg_index,
+        )
+        if auto_seed is None:
+            auto_seed = profile.get("auto_search_seed_model_ids")
+
+        ensemble_members = self._profile_value_for_leg(
+            profile.get("ensemble_member_model_ids_by_leg", profile.get("ensemble_members")),
+            leg_name=leg_name,
+            leg_family=leg_family,
+            leg_index=leg_index,
+        )
+        if ensemble_members is None:
+            ensemble_members = profile.get("ensemble_member_model_ids")
+
+        return {
+            "fixed_model": fixed_model.strip().lower() if isinstance(fixed_model, str) and fixed_model.strip() else None,
+            "auto_seed_models": [str(item).strip().lower() for item in auto_seed] if isinstance(auto_seed, list) else [],
+            "ensemble_members": [str(item).strip().lower() for item in ensemble_members] if isinstance(ensemble_members, list) else [],
+        }
+
+    def _build_training_execution_preview(self) -> str:
+        mode = str(getattr(self, "training_mode", "auto_model_search")).strip().lower()
+        profile = self._training_profile_payload()
+        profile_label = str(self._active_regime_definition().get("label", "Active profile"))
+        warnings: list[str] = []
+        lines = [
+            f"Profile: {profile_label}",
+            f"Training mode: {mode or 'auto_model_search'}",
+        ]
+
+        if not self.regime_legs:
+            lines.append("No legs configured.")
+            self._training_preview_warnings = warnings
+            return "\n".join(lines)
+
+        for idx, leg in enumerate(self.regime_legs, start=1):
+            try:
+                mapped = to_regime_leg_spec(leg)
+            except ValueError as exc:
+                lines.append("")
+                lines.append(f"Leg {idx}: mapping error ({exc})")
+                continue
+            leg_family = mapped.leg_spec.leg_family
+            leg_name = str(leg.get("name", f"Leg {idx}"))
+            allowed_model_ids = [descriptor.model_name for descriptor in list_models_for_leg(leg_family)]
+            selected_model_id = self._preview_selected_model_id(leg)
+            profile_effects = self._profile_effects_for_leg(profile, leg_name=leg_name, leg_family=leg_family, leg_index=idx - 1)
+
+            effective_selected = profile_effects["fixed_model"] or selected_model_id
+            candidate_ids = self._preview_candidate_model_ids(mode, effective_selected, allowed_model_ids)
+            selected_for_execution = self._preview_select_model_id(mode, effective_selected, allowed_model_ids)
+
+            lines.append("")
+            lines.append(f"Leg {idx}: {leg_name} [{leg_family}]")
+            lines.append(f"  • Candidate model ids: {', '.join(candidate_ids) if candidate_ids else 'none'}")
+            lines.append(f"  • Locked/effective model selection: {selected_for_execution or 'none'}")
+            lines.append(
+                "  • Profile contributions: "
+                + (
+                    f"fixed model={profile_effects['fixed_model']}"
+                    if profile_effects["fixed_model"]
+                    else "fixed model=none"
+                )
+                + f"; auto-search seeds={', '.join(profile_effects['auto_seed_models']) if profile_effects['auto_seed_models'] else 'none'}"
+                + f"; ensemble members={', '.join(profile_effects['ensemble_members']) if profile_effects['ensemble_members'] else 'none'}"
+            )
+            lines.append(
+                "  • Spec payloads: "
+                + f"architecture={self._preview_spec_payload_status(leg.get('architecture_spec'))}, "
+                + f"calibration={self._preview_spec_payload_status(leg.get('calibration_spec'))}, "
+                + f"event={self._preview_spec_payload_status(leg.get('event_process_spec'))}"
+            )
+
+            if mode in {"auto_model_search", "auto"} and selected_model_id and not profile_effects["fixed_model"]:
+                warnings.append(
+                    f"{leg_name}: selected model '{selected_model_id}' is not locked in auto-model-search; all candidates are evaluated."
+                )
+            if mode == "ensemble" and profile_effects["ensemble_members"] and "meta_label_classifier" not in candidate_ids:
+                warnings.append(
+                    f"{leg_name}: profile ensemble members are listed, but pipeline may fallback to first catalog model when meta_label_classifier is unavailable."
+                )
+
+        if warnings:
+            lines.append("")
+            lines.append("Warnings:")
+            for warning in warnings:
+                lines.append(f"  - {warning}")
+        self._training_preview_warnings = warnings
+        return "\n".join(lines)
+
+    def _update_training_execution_preview(self) -> None:
+        if not hasattr(self, "training_preview_text"):
+            return
+        preview_text = self._build_training_execution_preview()
+        self.training_preview_text.configure(state="normal")
+        self.training_preview_text.delete("1.0", tk.END)
+        self.training_preview_text.insert("1.0", preview_text)
+        self.training_preview_text.configure(state="disabled")
 
     def _on_leg_model_selected(self, _event=None) -> None:
         leg = self._selected_leg()
@@ -1274,6 +1740,11 @@ class CreateRegimePage(ttk.Frame):
             return False, invalid
 
         try:
+            blockers = self._required_spec_blockers(leg)
+            if blockers:
+                missing = ", ".join(blockers)
+                return False, f"Selected model requires missing specs: {missing}."
+
             for ui_leg in self.regime_legs:
                 to_regime_leg_spec(ui_leg)
         except ValueError as exc:
@@ -1289,6 +1760,7 @@ class CreateRegimePage(ttk.Frame):
     def _update_validation_and_actions(self) -> None:
         leg = self._selected_leg()
         statuses = self._validation_snapshot(leg)
+        self._update_training_execution_preview()
 
         if hasattr(self, "risk_summary_var"):
             controls = leg["controls"]
@@ -1313,6 +1785,11 @@ class CreateRegimePage(ttk.Frame):
                 self.validation_badges[key].configure(foreground=STATUS_COLORS[status])
 
         can_run, message = self._can_train_export()
+        blockers = self._required_spec_blockers(leg)
+        if blockers:
+            blocker_text = ", ".join(blockers)
+            message = f"Blocked: selected model requires {blocker_text}. Use Configure actions in Model selection."
+            can_run = False
         if self._is_training:
             can_run = False
             message = "Training currently running..."
@@ -1321,7 +1798,14 @@ class CreateRegimePage(ttk.Frame):
         if hasattr(self, "export_button"):
             self.export_button.configure(state=("normal" if can_run else "disabled"))
         if hasattr(self, "validation_message_var"):
-            self.validation_message_var.set(message)
+            preview_warnings = getattr(self, "_training_preview_warnings", [])
+            if preview_warnings:
+                warning_summary = preview_warnings[0]
+                if len(preview_warnings) > 1:
+                    warning_summary += f" (+{len(preview_warnings) - 1} more preview warning(s))"
+                self.validation_message_var.set(f"{message} Preview warning: {warning_summary}")
+            else:
+                self.validation_message_var.set(message)
 
     def _append_log(self, message: str) -> None:
         if not hasattr(self, "run_logs"):
@@ -1448,6 +1932,40 @@ class CreateRegimePage(ttk.Frame):
             initial_spec=leg.get("architecture_spec") if isinstance(leg.get("architecture_spec"), dict) else None,
             on_save=_save,
             custom_presets=custom_presets,
+        )
+
+    def _open_calibration_spec_designer(self) -> None:
+        leg = self._selected_leg()
+        if self._calibration_designer_window is not None and self._calibration_designer_window.winfo_exists():
+            self._calibration_designer_window.focus_set()
+            return
+
+        def _save(spec: dict[str, Any]) -> None:
+            leg["calibration_spec"] = dict(spec)
+            self._persist_editor_state()
+            self._load_selected_leg_into_form()
+
+        self._calibration_designer_window = CalibrationSpecDesignerPage(
+            self,
+            initial_spec=leg.get("calibration_spec") if isinstance(leg.get("calibration_spec"), dict) else None,
+            on_save=_save,
+        )
+
+    def _open_event_process_designer(self) -> None:
+        leg = self._selected_leg()
+        if self._event_process_designer_window is not None and self._event_process_designer_window.winfo_exists():
+            self._event_process_designer_window.focus_set()
+            return
+
+        def _save(spec: dict[str, Any]) -> None:
+            leg["event_process_spec"] = dict(spec)
+            self._persist_editor_state()
+            self._load_selected_leg_into_form()
+
+        self._event_process_designer_window = EventProcessDesignerPage(
+            self,
+            initial_spec=leg.get("event_process_spec") if isinstance(leg.get("event_process_spec"), dict) else None,
+            on_save=_save,
         )
 
     def _last_successful_training_run(self) -> dict[str, object] | None:
