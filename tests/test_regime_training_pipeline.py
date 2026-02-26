@@ -14,6 +14,7 @@ from backtesting.regime_training_pipeline import (
     RegimeTrainingRequest,
     TrainedArtifactLocations,
     _load_returns_from_cache,
+    RegistryBackedRegimeTrainingAdapter,
     execute_regime_training_pipeline,
 )
 
@@ -550,3 +551,54 @@ def test_pipeline_consumes_architecture_spec_for_supported_models(tmp_path):
     diagnostics_key = next(key for key in result.artifact_paths if key.endswith("_diagnostics"))
     diagnostics_payload = json.loads(Path(result.artifact_paths[diagnostics_key]).read_text(encoding="utf-8"))
     assert diagnostics_payload["architecture_spec"]["optimizer"]["name"] == "adam"
+
+
+def test_candidate_selection_modes_include_new_model_ids() -> None:
+    leg = RegimeLegTrainingConfig(
+        name="Regime Detection",
+        model_type="regime_change_detection",
+        controls={"model_confidence_min": 0.6},
+        model_id="ppo_regime_policy",
+    )
+
+    req_single = RegimeTrainingRequest(
+        schema_version=2,
+        regime_id="mode-single",
+        regime_name="Mode Single",
+        legs=(leg,),
+        model_choice="single_model",
+        training_window={"retrain_frequency_days": 14, "lookback_days": 252},
+        risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
+        output_dir=".",
+        training_data_settings={"allow_synthetic_fallback": True},
+    )
+    assert RegistryBackedRegimeTrainingAdapter._candidate_model_ids(req_single, leg) == ["ppo_regime_policy"]
+
+    req_auto = RegimeTrainingRequest(
+        schema_version=2,
+        regime_id="mode-auto",
+        regime_name="Mode Auto",
+        legs=(leg,),
+        model_choice="auto",
+        training_window={"retrain_frequency_days": 14, "lookback_days": 252},
+        risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
+        output_dir=".",
+        training_data_settings={"allow_synthetic_fallback": True},
+    )
+    auto_candidates = RegistryBackedRegimeTrainingAdapter._candidate_model_ids(req_auto, leg)
+    assert "policy_gradient_allocation" in auto_candidates
+    assert "dqn_regime_allocation" in auto_candidates
+    assert "ppo_regime_policy" in auto_candidates
+
+    req_ensemble = RegimeTrainingRequest(
+        schema_version=2,
+        regime_id="mode-ensemble",
+        regime_name="Mode Ensemble",
+        legs=(leg,),
+        model_choice="ensemble",
+        training_window={"retrain_frequency_days": 14, "lookback_days": 252},
+        risk_limits={"max_drawdown_stop": 0.15, "max_position_pct": 0.08},
+        output_dir=".",
+        training_data_settings={"allow_synthetic_fallback": True},
+    )
+    assert RegistryBackedRegimeTrainingAdapter._candidate_model_ids(req_ensemble, leg) == ["meta_label_classifier"]

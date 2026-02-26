@@ -215,3 +215,76 @@ class ChangepointRegimeChangeModel(BaseParadigmModel):
             "iv_rv_spread",
             "term_slope",
         )
+
+
+class PolicyGradientAllocationModel(BaseParadigmModel):
+    name = "policy_gradient_allocation"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "returns_1m",
+            "returns_3m",
+            "liquidity_regime",
+            "risk_budget_utilization",
+        )
+
+
+class DQNRegimeAllocationModel(BaseParadigmModel):
+    name = "dqn_regime_allocation"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "returns_1m",
+            "realized_vol",
+            "term_slope",
+            "drawdown_20d",
+        )
+
+
+class PPORegimePolicyModel(BaseParadigmModel):
+    name = "ppo_regime_policy"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "returns_1m",
+            "returns_6m",
+            "liquidity_regime",
+            "corr_risk_premium",
+        )
+
+
+class TemporalTransformerRegimeModel(BaseParadigmModel):
+    name = "temporal_transformer_regime"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "returns_1m",
+            "returns_3m",
+            "returns_6m",
+            "term_slope",
+            "iv_rv_spread",
+        )
+
+
+class TCNRegimeModel(BaseParadigmModel):
+    name = "tcn_regime"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "returns_1m",
+            "returns_3m",
+            "realized_vol",
+            "order_book_imbalance",
+        )
+
+
+class LSTMRegimeModel(BaseParadigmModel):
+    name = "lstm_regime"
+
+    def required_feature_names(self) -> tuple[str, ...]:
+        return (
+            "returns_1m",
+            "returns_3m",
+            "realized_vol",
+            "trend_strength_20d",
+        )
