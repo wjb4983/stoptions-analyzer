@@ -14,6 +14,7 @@ from backtesting.regime_training_pipeline import (
     RegimeTrainingRequest,
     TrainedArtifactLocations,
     _load_returns_from_cache,
+    _resolve_return_sample_budget,
     RegistryBackedRegimeTrainingAdapter,
     execute_regime_training_pipeline,
 )
@@ -319,6 +320,34 @@ def test_load_returns_from_cache_mixed_coverage_universe_enforces_pass_ratio(tmp
     assert excluded["TSLA"] == "missing_or_unreadable_cache"
     assert bundle.metadata["universe_pass_ratio"] == 1 / 3
     assert bundle.metadata["pass"] is False
+
+
+def test_load_returns_from_cache_respects_max_total_return_samples(tmp_path):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    _write_symbol_cache(tmp_path, "AAPL", now - timedelta(days=365 * 6), days=365 * 6 + 3)
+    _write_symbol_cache(tmp_path, "MSFT", now - timedelta(days=365 * 6), days=365 * 6 + 3)
+
+    bundle = _load_returns_from_cache(
+        symbols=["AAPL", "MSFT"],
+        cache_root=tmp_path,
+        min_usable_history_years=5,
+        max_total_return_samples=500,
+        required_universe_pass_ratio=1.0,
+        now=now,
+    )
+
+    assert bundle.returns.size == 500
+    assert bundle.metadata["returns_sample_count"] == 500
+    assert bundle.metadata["returns_sample_cap"] == 500
+
+
+def test_resolve_return_sample_budget_uses_user_max_ram_setting():
+    max_samples, metadata = _resolve_return_sample_budget({"max_ram_usage_gb": 1.5})
+
+    assert max_samples is not None
+    assert max_samples == int((1.5 * (1024**3)) // 8)
+    assert metadata["memory_budget_source"] == "user:max_ram_usage_gb"
+    assert metadata["max_total_return_samples"] == max_samples
 
 
 

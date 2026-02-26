@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,9 @@ from models.robustness import build_robustness_scorecards
 from backtesting.walk_forward import build_walk_forward_folds, run_walk_forward_optimization
 
 DEFAULT_REGIME_TRAINING_OUTPUT_DIR = Path("data/regime_training_runs")
+_FLOAT64_BYTES = 8
+_DEFAULT_RAM_BUDGET_UTILIZATION = 0.65
+_MIN_RAM_BUDGET_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -491,14 +495,17 @@ class RegistryBackedRegimeTrainingAdapter:
         required_years = max(1, int(settings.get("required_history_years", 5)))
         cache_root = Path(str(settings.get("cache_root", BACKTEST_CACHE_DIR)))
         allow_synthetic_fallback = bool(settings.get("allow_synthetic_fallback", False))
+        max_total_return_samples, memory_budget_metadata = _resolve_return_sample_budget(settings)
         bundle = _load_returns_from_cache(
             symbols=symbols,
             cache_root=cache_root,
             min_usable_history_years=required_years,
+            max_total_return_samples=max_total_return_samples,
             required_universe_pass_ratio=float(
                 settings.get("required_universe_pass_ratio", settings.get("min_universe_pass_ratio", 1.0))
             ),
         )
+        bundle.metadata.update(memory_budget_metadata)
         bundle.metadata["allow_synthetic_fallback"] = allow_synthetic_fallback
         bundle.metadata["synthetic_fallback_used"] = False
         return bundle
@@ -766,6 +773,7 @@ def _load_returns_from_cache(
     symbols: list[str],
     cache_root: Path,
     min_usable_history_years: int,
+    max_total_return_samples: int | None = None,
     required_universe_pass_ratio: float = 1.0,
     now: datetime | None = None,
 ) -> TrainingDataBundle:
@@ -794,6 +802,7 @@ def _load_returns_from_cache(
     used_symbols: list[str] = []
     excluded: list[dict[str, Any]] = []
     usable_returns: list[np.ndarray] = []
+    retained_samples = 0
     training_start_ms: int | None = None
     training_end_ms: int | None = None
 
@@ -840,7 +849,22 @@ def _load_returns_from_cache(
 
         used_symbols.append(symbol)
         per_symbol[symbol] = detail
-        usable_returns.append(usable_rets)
+        if max_total_return_samples is not None and max_total_return_samples > 0:
+            trimmed = usable_rets[-max_total_return_samples:]
+            usable_returns.append(trimmed)
+            retained_samples += int(trimmed.size)
+            while retained_samples > max_total_return_samples and usable_returns:
+                overflow = retained_samples - max_total_return_samples
+                first = usable_returns[0]
+                if first.size <= overflow:
+                    retained_samples -= int(first.size)
+                    usable_returns.pop(0)
+                    continue
+                usable_returns[0] = first[overflow:]
+                retained_samples -= overflow
+                break
+        else:
+            usable_returns.append(usable_rets)
         if usable_ts.size:
             symbol_start = int(np.min(usable_ts))
             symbol_end = int(np.max(usable_ts))
@@ -862,8 +886,68 @@ def _load_returns_from_cache(
         "required_universe_pass_ratio": required_pass_ratio,
         "minimum_usable_history_years": min_years,
         "pass": pass_ratio >= required_pass_ratio,
+        "returns_sample_count": int(merged_returns.size),
+        "returns_sample_cap": int(max_total_return_samples) if max_total_return_samples is not None else None,
     }
     return TrainingDataBundle(returns=merged_returns[np.isfinite(merged_returns)], metadata=metadata)
+
+
+def _detect_available_ram_bytes() -> int | None:
+    if hasattr(os, "sysconf"):
+        try:
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+            if page_size > 0 and available_pages > 0:
+                return page_size * available_pages
+        except (OSError, ValueError):
+            pass
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if not line.startswith("MemAvailable:"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                return int(parts[1]) * 1024
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _resolve_return_sample_budget(settings: dict[str, Any]) -> tuple[int | None, dict[str, Any]]:
+    configured_gb = settings.get("max_ram_usage_gb")
+    utilization = float(settings.get("ram_utilization_fraction", _DEFAULT_RAM_BUDGET_UTILIZATION))
+    utilization = max(0.05, min(1.0, utilization))
+    metadata: dict[str, Any] = {"ram_utilization_fraction": utilization}
+
+    budget_bytes: int | None = None
+    source = "none"
+    if configured_gb is not None:
+        try:
+            budget_bytes = int(max(float(configured_gb), 0.0) * (1024**3))
+            source = "user:max_ram_usage_gb"
+        except (TypeError, ValueError):
+            budget_bytes = None
+    if budget_bytes is None:
+        available = _detect_available_ram_bytes()
+        if available is not None:
+            budget_bytes = int(available * utilization)
+            source = "auto:available_ram"
+            metadata["available_ram_bytes"] = int(available)
+
+    if budget_bytes is None:
+        metadata.update({"memory_budget_source": source, "memory_budget_bytes": None, "max_total_return_samples": None})
+        return None, metadata
+
+    budget_bytes = max(_MIN_RAM_BUDGET_BYTES, int(budget_bytes))
+    max_samples = max(1, budget_bytes // _FLOAT64_BYTES)
+    metadata.update(
+        {
+            "memory_budget_source": source,
+            "memory_budget_bytes": int(budget_bytes),
+            "max_total_return_samples": int(max_samples),
+        }
+    )
+    return int(max_samples), metadata
 
 
 def _build_regime_training_scenarios(settings: dict[str, Any], *, n_assets: int) -> list[dict[str, Any]]:
