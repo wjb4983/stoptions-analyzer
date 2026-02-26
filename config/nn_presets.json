@@ -4,42 +4,379 @@
     "small_mlp": {
       "schema_version": 1,
       "layers": [
-        {"type": "Dense", "units": 64, "activation": "relu"},
-        {"type": "Dropout", "rate": 0.2},
-        {"type": "Dense", "units": 1, "activation": "sigmoid"}
+        {
+          "type": "Dense",
+          "units": 64,
+          "activation": "relu"
+        },
+        {
+          "type": "Dropout",
+          "rate": 0.2
+        },
+        {
+          "type": "Dense",
+          "units": 1,
+          "activation": "sigmoid"
+        }
       ],
-      "optimizer": {"name": "adam", "learning_rate": 0.001, "weight_decay": 0.0},
-      "loss": {"name": "binary_cross_entropy"},
-      "scheduler": {"name": "none"},
-      "training": {"batch_size": 32, "epochs": 40, "early_stopping": {"enabled": true, "patience": 6, "min_delta": 0.0001}}
+      "optimizer": {
+        "name": "adam",
+        "learning_rate": 0.001,
+        "weight_decay": 0.0
+      },
+      "loss": {
+        "name": "binary_cross_entropy"
+      },
+      "scheduler": {
+        "name": "none"
+      },
+      "training": {
+        "batch_size": 32,
+        "epochs": 40,
+        "early_stopping": {
+          "enabled": true,
+          "patience": 6,
+          "min_delta": 0.0001
+        }
+      }
     },
     "temporal_mlp": {
       "schema_version": 1,
       "layers": [
-        {"type": "Dense", "units": 128, "activation": "relu"},
-        {"type": "Norm", "norm": "layer"},
-        {"type": "Dense", "units": 64, "activation": "relu"},
-        {"type": "Dropout", "rate": 0.15},
-        {"type": "Dense", "units": 1, "activation": "sigmoid"}
+        {
+          "type": "Dense",
+          "units": 128,
+          "activation": "relu"
+        },
+        {
+          "type": "Norm",
+          "norm": "layer"
+        },
+        {
+          "type": "Dense",
+          "units": 64,
+          "activation": "relu"
+        },
+        {
+          "type": "Dropout",
+          "rate": 0.15
+        },
+        {
+          "type": "Dense",
+          "units": 1,
+          "activation": "sigmoid"
+        }
       ],
-      "optimizer": {"name": "adamw", "learning_rate": 0.0008, "weight_decay": 0.0005},
-      "loss": {"name": "binary_cross_entropy"},
-      "scheduler": {"name": "cosine"},
-      "training": {"batch_size": 64, "epochs": 60, "early_stopping": {"enabled": true, "patience": 8, "min_delta": 0.0001}}
+      "optimizer": {
+        "name": "adamw",
+        "learning_rate": 0.0008,
+        "weight_decay": 0.0005
+      },
+      "loss": {
+        "name": "binary_cross_entropy"
+      },
+      "scheduler": {
+        "name": "cosine"
+      },
+      "training": {
+        "batch_size": 64,
+        "epochs": 60,
+        "early_stopping": {
+          "enabled": true,
+          "patience": 8,
+          "min_delta": 0.0001
+        }
+      }
     },
     "residual_mlp": {
       "schema_version": 1,
       "layers": [
-        {"type": "Dense", "units": 256, "activation": "relu"},
-        {"type": "Dense", "units": 256, "activation": "relu", "residual": true},
-        {"type": "Norm", "norm": "batch"},
-        {"type": "Dropout", "rate": 0.2},
-        {"type": "Dense", "units": 1, "activation": "sigmoid"}
+        {
+          "type": "Dense",
+          "units": 256,
+          "activation": "relu"
+        },
+        {
+          "type": "Dense",
+          "units": 256,
+          "activation": "relu",
+          "residual": true
+        },
+        {
+          "type": "Norm",
+          "norm": "batch"
+        },
+        {
+          "type": "Dropout",
+          "rate": 0.2
+        },
+        {
+          "type": "Dense",
+          "units": 1,
+          "activation": "sigmoid"
+        }
       ],
-      "optimizer": {"name": "adamw", "learning_rate": 0.0005, "weight_decay": 0.001},
-      "loss": {"name": "focal"},
-      "scheduler": {"name": "one_cycle"},
-      "training": {"batch_size": 128, "epochs": 80, "early_stopping": {"enabled": true, "patience": 10, "min_delta": 0.0001}}
+      "optimizer": {
+        "name": "adamw",
+        "learning_rate": 0.0005,
+        "weight_decay": 0.001
+      },
+      "loss": {
+        "name": "focal"
+      },
+      "scheduler": {
+        "name": "one_cycle"
+      },
+      "training": {
+        "batch_size": 128,
+        "epochs": 80,
+        "early_stopping": {
+          "enabled": true,
+          "patience": 10,
+          "min_delta": 0.0001
+        }
+      }
+    },
+    "lstm_regime_classifier": {
+      "schema_version": 1,
+      "layers": [
+        {
+          "type": "Conv1D",
+          "filters": 32,
+          "kernel_size": 5,
+          "stride": 1,
+          "padding": "same",
+          "activation": "relu"
+        },
+        {
+          "type": "ResidualBlock",
+          "units": 64,
+          "depth": 2,
+          "activation": "relu",
+          "norm": "layer"
+        },
+        {
+          "type": "Dropout",
+          "rate": 0.2
+        },
+        {
+          "type": "Dense",
+          "units": 32,
+          "activation": "relu",
+          "use_bias": true
+        },
+        {
+          "type": "Dense",
+          "units": 1,
+          "activation": "sigmoid",
+          "use_bias": true
+        }
+      ],
+      "optimizer": {
+        "name": "adamw",
+        "learning_rate": 0.0005,
+        "weight_decay": 0.001,
+        "beta1": 0.9,
+        "beta2": 0.999
+      },
+      "loss": {
+        "name": "binary_cross_entropy"
+      },
+      "scheduler": {
+        "name": "reduce_on_plateau",
+        "factor": 0.5,
+        "patience": 4,
+        "min_lr": 1e-06
+      },
+      "training": {
+        "batch_size": 64,
+        "epochs": 80,
+        "gradient_clip_norm": 1.0,
+        "early_stopping": {
+          "enabled": true,
+          "patience": 10,
+          "min_delta": 0.0001
+        }
+      }
+    },
+    "transformer_time_series": {
+      "schema_version": 1,
+      "layers": [
+        {
+          "type": "Conv1D",
+          "filters": 64,
+          "kernel_size": 3,
+          "stride": 1,
+          "padding": "same",
+          "activation": "relu"
+        },
+        {
+          "type": "Attention",
+          "heads": 4,
+          "key_dim": 32,
+          "dropout": 0.1,
+          "causal": true
+        },
+        {
+          "type": "ResidualBlock",
+          "units": 128,
+          "depth": 2,
+          "activation": "gelu",
+          "norm": "layer"
+        },
+        {
+          "type": "Dropout",
+          "rate": 0.1
+        },
+        {
+          "type": "Dense",
+          "units": 1,
+          "activation": "sigmoid",
+          "use_bias": true
+        }
+      ],
+      "optimizer": {
+        "name": "adamw",
+        "learning_rate": 0.0003,
+        "weight_decay": 0.01,
+        "beta1": 0.9,
+        "beta2": 0.98
+      },
+      "loss": {
+        "name": "binary_cross_entropy"
+      },
+      "scheduler": {
+        "name": "cosine_warm_restarts",
+        "t0": 10,
+        "eta_min": 1e-06
+      },
+      "training": {
+        "batch_size": 128,
+        "epochs": 100,
+        "gradient_clip_norm": 0.5,
+        "label_smoothing": 0.02,
+        "early_stopping": {
+          "enabled": true,
+          "patience": 12,
+          "min_delta": 5e-05
+        }
+      }
+    },
+    "ppo_actor_critic_small": {
+      "schema_version": 1,
+      "layers": [
+        {
+          "type": "Dense",
+          "units": 128,
+          "activation": "tanh",
+          "use_bias": true
+        },
+        {
+          "type": "Dense",
+          "units": 64,
+          "activation": "tanh",
+          "use_bias": true
+        },
+        {
+          "type": "PolicyHead",
+          "action_dim": 4,
+          "distribution": "categorical"
+        },
+        {
+          "type": "ValueHead",
+          "value_dim": 1,
+          "activation": "linear"
+        }
+      ],
+      "optimizer": {
+        "name": "adam",
+        "learning_rate": 0.0003,
+        "weight_decay": 0.0,
+        "eps": 1e-05
+      },
+      "loss": {
+        "name": "ppo_clipped",
+        "value_loss_coef": 0.5,
+        "entropy_coef": 0.01,
+        "clip_range": 0.2
+      },
+      "scheduler": {
+        "name": "linear_decay"
+      },
+      "training": {
+        "batch_size": 256,
+        "epochs": 30,
+        "mini_batches": 4,
+        "gae_lambda": 0.95,
+        "gamma": 0.99,
+        "gradient_clip_norm": 0.5,
+        "early_stopping": {
+          "enabled": true,
+          "patience": 8,
+          "min_delta": 0.0001
+        }
+      }
+    },
+    "dqn_mlp_dueling": {
+      "schema_version": 1,
+      "layers": [
+        {
+          "type": "Dense",
+          "units": 256,
+          "activation": "relu",
+          "use_bias": true
+        },
+        {
+          "type": "Norm",
+          "norm": "layer"
+        },
+        {
+          "type": "Dropout",
+          "rate": 0.1
+        },
+        {
+          "type": "ResidualBlock",
+          "units": 128,
+          "depth": 2,
+          "activation": "relu",
+          "norm": "layer"
+        },
+        {
+          "type": "PolicyHead",
+          "action_dim": 6,
+          "distribution": "q_values_dueling"
+        },
+        {
+          "type": "ValueHead",
+          "value_dim": 1,
+          "activation": "linear"
+        }
+      ],
+      "optimizer": {
+        "name": "adam",
+        "learning_rate": 0.0001,
+        "weight_decay": 0.0
+      },
+      "loss": {
+        "name": "huber",
+        "delta": 1.0
+      },
+      "scheduler": {
+        "name": "none"
+      },
+      "training": {
+        "batch_size": 128,
+        "epochs": 120,
+        "target_update_interval": 500,
+        "replay_buffer_size": 100000,
+        "warmup_steps": 5000,
+        "gradient_clip_norm": 1.0,
+        "early_stopping": {
+          "enabled": true,
+          "patience": 15,
+          "min_delta": 0.0001
+        }
+      }
     }
   }
 }

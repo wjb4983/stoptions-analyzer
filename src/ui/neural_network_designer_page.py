@@ -11,7 +11,17 @@ from typing import Any, Callable
 NN_PRESETS_PATH = Path("config/nn_presets.json")
 NN_MODEL_PROFILES_PATH = Path("config/nn_model_profiles.json")
 NN_EXPORT_DIR = Path("data/nn_architectures")
-_LAYER_TYPES = ["Dense", "Dropout", "Norm", "Activation"]
+_LAYER_TYPES = [
+    "Dense",
+    "Dropout",
+    "Norm",
+    "Activation",
+    "Conv1D",
+    "ResidualBlock",
+    "Attention",
+    "PolicyHead",
+    "ValueHead",
+]
 
 
 class LayerEditorRow(ttk.Frame):
@@ -51,6 +61,40 @@ class LayerEditorRow(ttk.Frame):
             self._add_labeled_entry(row, "Norm mode", "norm", layer)
         elif layer_type == "Activation":
             self._add_labeled_entry(row, "Activation name", "name", layer)
+        elif layer_type == "Conv1D":
+            self._add_labeled_entry(row, "Filters", "filters", layer)
+            row += 1
+            self._add_labeled_entry(row, "Kernel size", "kernel_size", layer)
+            row += 1
+            self._add_labeled_entry(row, "Stride", "stride", layer)
+            row += 1
+            self._add_labeled_entry(row, "Padding", "padding", layer)
+            row += 1
+            self._add_labeled_entry(row, "Activation", "activation", layer)
+        elif layer_type == "ResidualBlock":
+            self._add_labeled_entry(row, "Units", "units", layer)
+            row += 1
+            self._add_labeled_entry(row, "Depth", "depth", layer)
+            row += 1
+            self._add_labeled_entry(row, "Activation", "activation", layer)
+            row += 1
+            self._add_labeled_entry(row, "Norm", "norm", layer)
+        elif layer_type == "Attention":
+            self._add_labeled_entry(row, "Heads", "heads", layer)
+            row += 1
+            self._add_labeled_entry(row, "Key dim", "key_dim", layer)
+            row += 1
+            self._add_labeled_entry(row, "Dropout", "dropout", layer)
+            row += 1
+            self._add_labeled_entry(row, "Causal (true/false)", "causal", layer)
+        elif layer_type == "PolicyHead":
+            self._add_labeled_entry(row, "Action dim", "action_dim", layer)
+            row += 1
+            self._add_labeled_entry(row, "Distribution", "distribution", layer)
+        elif layer_type == "ValueHead":
+            self._add_labeled_entry(row, "Value dim", "value_dim", layer)
+            row += 1
+            self._add_labeled_entry(row, "Activation", "activation", layer)
 
     def _add_labeled_entry(self, row: int, label: str, key: str, layer: dict[str, Any]) -> None:
         ttk.Label(self, text=label).grid(row=row, column=0, sticky="w")
@@ -58,10 +102,12 @@ class LayerEditorRow(ttk.Frame):
 
         def _on_var_change(*_: Any) -> None:
             value = var.get().strip()
-            if key in {"units"}:
+            if key in {"units", "filters", "kernel_size", "stride", "depth", "heads", "key_dim", "action_dim", "value_dim"}:
                 layer[key] = _as_int(value, 0)
-            elif key in {"rate"}:
+            elif key in {"rate", "dropout"}:
                 layer[key] = _as_float(value, -1.0)
+            elif key == "causal":
+                layer[key] = value.lower() in {"1", "true", "yes", "y", "on"}
             else:
                 layer[key] = value
             self._on_change()
@@ -133,7 +179,7 @@ def normalize_architecture_spec(payload: dict[str, Any] | None) -> dict[str, Any
     if isinstance(layers, list):
         for layer in layers:
             if isinstance(layer, dict) and str(layer.get("type", "")).strip():
-                normalized_layers.append(dict(layer))
+                normalized_layers.append(_normalize_layer_spec(layer))
     normalized["layers"] = normalized_layers or base["layers"]
 
     for section in ("optimizer", "loss", "scheduler", "training"):
@@ -155,6 +201,61 @@ def normalize_architecture_spec(payload: dict[str, Any] | None) -> dict[str, Any
     training["epochs"] = max(1, _as_int(training.get("epochs", 50), 50))
     normalized["training"] = training
     return normalized
+
+
+def _normalize_layer_spec(layer: dict[str, Any]) -> dict[str, Any]:
+    layer_type = str(layer.get("type", "")).strip()
+    if layer_type == "Dense":
+        return {
+            "type": "Dense",
+            "units": max(1, _as_int(layer.get("units", 64), 64)),
+            "activation": str(layer.get("activation", "relu")).strip() or "relu",
+            "use_bias": bool(layer.get("use_bias", True)),
+        }
+    if layer_type == "Dropout":
+        return {"type": "Dropout", "rate": min(max(_as_float(layer.get("rate", 0.2), 0.2), 0.0), 0.95)}
+    if layer_type == "Norm":
+        return {"type": "Norm", "norm": str(layer.get("norm", "layer")).strip() or "layer"}
+    if layer_type == "Activation":
+        return {"type": "Activation", "name": str(layer.get("name", "relu")).strip() or "relu"}
+    if layer_type == "Conv1D":
+        return {
+            "type": "Conv1D",
+            "filters": max(1, _as_int(layer.get("filters", 64), 64)),
+            "kernel_size": max(1, _as_int(layer.get("kernel_size", 3), 3)),
+            "stride": max(1, _as_int(layer.get("stride", 1), 1)),
+            "padding": str(layer.get("padding", "same")).strip() or "same",
+            "activation": str(layer.get("activation", "relu")).strip() or "relu",
+        }
+    if layer_type == "ResidualBlock":
+        return {
+            "type": "ResidualBlock",
+            "units": max(1, _as_int(layer.get("units", 128), 128)),
+            "depth": max(1, _as_int(layer.get("depth", 2), 2)),
+            "activation": str(layer.get("activation", "relu")).strip() or "relu",
+            "norm": str(layer.get("norm", "layer")).strip() or "layer",
+        }
+    if layer_type == "Attention":
+        return {
+            "type": "Attention",
+            "heads": max(1, _as_int(layer.get("heads", 4), 4)),
+            "key_dim": max(1, _as_int(layer.get("key_dim", 32), 32)),
+            "dropout": min(max(_as_float(layer.get("dropout", 0.1), 0.1), 0.0), 0.95),
+            "causal": bool(layer.get("causal", False)),
+        }
+    if layer_type == "PolicyHead":
+        return {
+            "type": "PolicyHead",
+            "action_dim": max(1, _as_int(layer.get("action_dim", 2), 2)),
+            "distribution": str(layer.get("distribution", "categorical")).strip() or "categorical",
+        }
+    if layer_type == "ValueHead":
+        return {
+            "type": "ValueHead",
+            "value_dim": max(1, _as_int(layer.get("value_dim", 1), 1)),
+            "activation": str(layer.get("activation", "linear")).strip() or "linear",
+        }
+    return dict(layer)
 
 
 def _extract_custom_preset_entries(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -265,6 +366,46 @@ def _validate_architecture_spec_for_ui(payload: dict[str, Any] | None, *, field_
                 errors.append(f"{field_path}.layers[{idx}].norm is required")
             if layer_type == "Activation" and not str(layer.get("name", "")).strip():
                 errors.append(f"{field_path}.layers[{idx}].name is required")
+            if layer_type == "Conv1D":
+                if _as_int(layer.get("filters", 0), 0) <= 0:
+                    errors.append(f"{field_path}.layers[{idx}].filters must be > 0")
+                if _as_int(layer.get("kernel_size", 0), 0) <= 0:
+                    errors.append(f"{field_path}.layers[{idx}].kernel_size must be > 0")
+                if _as_int(layer.get("stride", 0), 0) <= 0:
+                    errors.append(f"{field_path}.layers[{idx}].stride must be > 0")
+                if str(layer.get("padding", "")).strip() not in {"same", "valid", "causal"}:
+                    errors.append(f"{field_path}.layers[{idx}].padding must be one of ['same', 'valid', 'causal']")
+                if not str(layer.get("activation", "")).strip():
+                    errors.append(f"{field_path}.layers[{idx}].activation is required")
+            if layer_type == "ResidualBlock":
+                if _as_int(layer.get("units", 0), 0) <= 0:
+                    errors.append(f"{field_path}.layers[{idx}].units must be > 0")
+                if _as_int(layer.get("depth", 0), 0) <= 0:
+                    errors.append(f"{field_path}.layers[{idx}].depth must be > 0")
+                if not str(layer.get("activation", "")).strip():
+                    errors.append(f"{field_path}.layers[{idx}].activation is required")
+                if not str(layer.get("norm", "")).strip():
+                    errors.append(f"{field_path}.layers[{idx}].norm is required")
+            if layer_type == "Attention":
+                if _as_int(layer.get("heads", 0), 0) <= 0:
+                    errors.append(f"{field_path}.layers[{idx}].heads must be > 0")
+                if _as_int(layer.get("key_dim", 0), 0) <= 0:
+                    errors.append(f"{field_path}.layers[{idx}].key_dim must be > 0")
+                dropout = _as_float(layer.get("dropout", -1), -1)
+                if dropout < 0.0 or dropout >= 1.0:
+                    errors.append(f"{field_path}.layers[{idx}].dropout must be within [0, 1)")
+                if not isinstance(layer.get("causal", False), bool):
+                    errors.append(f"{field_path}.layers[{idx}].causal must be boolean")
+            if layer_type == "PolicyHead":
+                if _as_int(layer.get("action_dim", 0), 0) <= 0:
+                    errors.append(f"{field_path}.layers[{idx}].action_dim must be > 0")
+                if not str(layer.get("distribution", "")).strip():
+                    errors.append(f"{field_path}.layers[{idx}].distribution is required")
+            if layer_type == "ValueHead":
+                if _as_int(layer.get("value_dim", 0), 0) <= 0:
+                    errors.append(f"{field_path}.layers[{idx}].value_dim must be > 0")
+                if not str(layer.get("activation", "")).strip():
+                    errors.append(f"{field_path}.layers[{idx}].activation is required")
 
     optimizer = payload.get("optimizer")
     if not isinstance(optimizer, dict):
@@ -510,6 +651,16 @@ class NeuralNetworkDesignerPage(tk.Toplevel):
             layer = {"type": "Dropout", "rate": 0.2}
         elif layer_type == "Norm":
             layer = {"type": "Norm", "norm": "batch"}
+        elif layer_type == "Conv1D":
+            layer = {"type": "Conv1D", "filters": 64, "kernel_size": 3, "stride": 1, "padding": "same", "activation": "relu"}
+        elif layer_type == "ResidualBlock":
+            layer = {"type": "ResidualBlock", "units": 128, "depth": 2, "activation": "relu", "norm": "layer"}
+        elif layer_type == "Attention":
+            layer = {"type": "Attention", "heads": 4, "key_dim": 32, "dropout": 0.1, "causal": False}
+        elif layer_type == "PolicyHead":
+            layer = {"type": "PolicyHead", "action_dim": 2, "distribution": "categorical"}
+        elif layer_type == "ValueHead":
+            layer = {"type": "ValueHead", "value_dim": 1, "activation": "linear"}
         else:
             layer = {"type": "Activation", "name": "relu"}
         self._spec["layers"].append(layer)
