@@ -670,6 +670,15 @@ class CreateRegimePage(ttk.Frame):
         self._load_selected_leg_into_form()
         self._update_validation_and_actions()
 
+    def _theme_background_color(self) -> str:
+        """Return a Tk-compatible background color for labels embedded in ttk frames."""
+        style = ttk.Style()
+        background = style.lookup("TFrame", "background")
+        if background:
+            return str(background)
+        parent_bg = self.master.cget("bg") if self.master is not None else ""
+        return str(parent_bg or "#f0f0f0")
+
     def _build_default_leg(self, leg_type: str) -> dict[str, object]:
         controls = {}
         schema = LEG_CONTROL_GROUPS[leg_type]
@@ -1194,7 +1203,7 @@ class CreateRegimePage(ttk.Frame):
                 chips_row,
                 text=f"{spec_labels[spec_key]}: {state_text}",
                 foreground=fg_color,
-                background=self.cget("background"),
+                background=chip_background,
             ).grid(row=0, column=idx, sticky="w", padx=(0, 12))
 
         configure_row = ttk.Frame(selector_section)
