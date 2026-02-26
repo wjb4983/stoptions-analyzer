@@ -633,7 +633,7 @@ class CreateRegimePage(ttk.Frame):
         self.selected_leg_index = 0
         self.leg_control_vars: dict[str, tk.Variable] = {}
         self.hyperparameter_vars: dict[str, tk.Variable] = {}
-        self._model_selection_by_label: dict[str, ModelDescriptor] = {}
+        self._model_selection_by_label: dict[str, ModelProfile | None] = {}
         self._is_training = False
         self._nn_designer_window: NeuralNetworkDesignerPage | None = None
         self._calibration_designer_window: CalibrationSpecDesignerPage | None = None
@@ -692,10 +692,13 @@ class CreateRegimePage(ttk.Frame):
             "controls": controls,
             "model_id": selected_model_id,
             "selected_model_id": selected_model_id,
+            "selected_profile_id": "",
+            "profile_source": "catalog",
             "hyperparameters": hyperparameters,
             "architecture_spec": None,
             "calibration_spec": None,
             "event_process_spec": None,
+            "artifact_reference": None,
             "nn_custom_presets": {},
         }
 
@@ -746,8 +749,31 @@ class CreateRegimePage(ttk.Frame):
         selected_model_id = raw_leg.get("selected_model_id")
         if isinstance(selected_model_id, str):
             leg["selected_model_id"] = selected_model_id
+        selected_profile_id = raw_leg.get("selected_profile_id")
+        if isinstance(selected_profile_id, str):
+            leg["selected_profile_id"] = selected_profile_id
+        profile_source = raw_leg.get("profile_source")
+        if isinstance(profile_source, str) and profile_source in {"catalog", "preset", "trained_artifact"}:
+            leg["profile_source"] = profile_source
+        artifact_reference = raw_leg.get("artifact_reference")
+        if isinstance(artifact_reference, dict):
+            checksum_metadata = artifact_reference.get("checksum_metadata")
+            leg["artifact_reference"] = {
+                "run_id": str(artifact_reference.get("run_id", "")),
+                "artifact_path": str(artifact_reference.get("artifact_path", "")),
+                "checksum_metadata": dict(checksum_metadata) if isinstance(checksum_metadata, dict) else {},
+            }
+
         if not isinstance(leg.get("model_id"), str) or not str(leg.get("model_id", "")).strip():
             leg["model_id"] = str(leg.get("selected_model_id", ""))
+        if not isinstance(leg.get("selected_model_id"), str) or not str(leg.get("selected_model_id", "")).strip():
+            leg["selected_model_id"] = str(leg.get("model_id", ""))
+        if not isinstance(leg.get("selected_profile_id"), str) or not str(leg.get("selected_profile_id", "")).strip():
+            model_ref = str(leg.get("selected_model_id", leg.get("model_id", ""))).strip()
+            if model_ref:
+                leg["selected_profile_id"] = f"catalog:auto:{model_ref}"
+                leg["profile_source"] = "catalog"
+
         hyperparameters = raw_leg.get("hyperparameters")
         if isinstance(hyperparameters, dict):
             leg["hyperparameters"] = dict(hyperparameters)
@@ -780,16 +806,30 @@ class CreateRegimePage(ttk.Frame):
             "controls": dict(leg.get("controls", {})),
             "model_id": str(leg.get("model_id", leg.get("selected_model_id", ""))),
             "selected_model_id": str(leg.get("selected_model_id", "")),
+            "selected_profile_id": str(leg.get("selected_profile_id", "")),
+            "profile_source": str(leg.get("profile_source", "catalog")),
             "hyperparameters": dict(leg.get("hyperparameters", {})),
             "architecture_spec": leg.get("architecture_spec"),
             "calibration_spec": leg.get("calibration_spec"),
             "event_process_spec": leg.get("event_process_spec"),
+            "artifact_reference": leg.get("artifact_reference"),
             "nn_custom_presets": leg.get("nn_custom_presets", {}),
         }
 
-    def _allowed_models_for_leg(self, leg: dict[str, object]) -> list[ModelDescriptor]:
+    def _profile_registry_for_leg(self, leg: dict[str, object]):
         mapped_leg = to_regime_leg_spec(leg)
-        return list_models_for_leg(mapped_leg.leg_spec.leg_family)
+        regime_definition = self._active_regime_definition()
+        presets = regime_definition.get("model_presets")
+        if not isinstance(presets, dict):
+            presets = {}
+        return build_model_profile_registry(
+            leg_family=mapped_leg.leg_spec.leg_family,
+            presets=presets,
+            training_runs=self.controller.state.regime_training_runs,
+        )
+
+    def _profiles_for_leg(self, leg: dict[str, object]) -> tuple[ModelProfile, ...]:
+        return self._profile_registry_for_leg(leg).profiles
 
     def _selected_model_descriptor(self, leg: dict[str, object]) -> ModelDescriptor | None:
         selected_model_id = str(leg.get("selected_model_id", "")).strip()
@@ -832,24 +872,50 @@ class CreateRegimePage(ttk.Frame):
         return blockers
 
     def _ensure_leg_model_defaults(self, leg: dict[str, object]) -> None:
-        descriptors = self._allowed_models_for_leg(leg)
-        if not descriptors:
+        profiles = self._profiles_for_leg(leg)
+        if not profiles:
             leg["selected_model_id"] = ""
+            leg["model_id"] = ""
+            leg["selected_profile_id"] = ""
+            leg["profile_source"] = "catalog"
             leg["hyperparameters"] = {}
+            leg["artifact_reference"] = None
             return
-        selected = str(leg.get("selected_model_id", "")).strip()
-        descriptor_by_model = {item.model_name: item for item in descriptors}
-        if selected not in descriptor_by_model:
-            selected = descriptors[0].model_name
-            leg["selected_model_id"] = selected
-        leg["model_id"] = selected
-        selected_descriptor = descriptor_by_model[selected]
-        current_hyperparams = leg.get("hyperparameters")
-        if not isinstance(current_hyperparams, dict):
-            current_hyperparams = {}
-        merged_hyperparams = dict(selected_descriptor.hyperparameter_template)
-        merged_hyperparams.update(current_hyperparams)
-        leg["hyperparameters"] = merged_hyperparams
+
+        selected_profile_id = str(leg.get("selected_profile_id", "")).strip()
+        selected_model_id = str(leg.get("selected_model_id", "")).strip()
+        profile_by_id = {item.profile_id: item for item in profiles}
+        selected_profile = profile_by_id.get(selected_profile_id)
+        if selected_profile is None and selected_model_id:
+            selected_profile = next((item for item in profiles if item.base_model_id == selected_model_id), None)
+        if selected_profile is None:
+            selected_profile = profiles[0]
+
+        leg["selected_profile_id"] = selected_profile.profile_id
+        leg["profile_source"] = selected_profile.source
+        leg["selected_model_id"] = selected_profile.base_model_id
+        leg["model_id"] = selected_profile.resolved_model_id
+        if isinstance(selected_profile.hyperparameters, dict):
+            current_hyperparams = leg.get("hyperparameters") if isinstance(leg.get("hyperparameters"), dict) else {}
+            merged_hyperparams = dict(selected_profile.hyperparameters)
+            merged_hyperparams.update(current_hyperparams)
+            leg["hyperparameters"] = merged_hyperparams
+        elif not isinstance(leg.get("hyperparameters"), dict):
+            leg["hyperparameters"] = {}
+
+        for field_name in ("architecture_spec", "calibration_spec", "event_process_spec"):
+            profile_value = getattr(selected_profile, field_name)
+            if isinstance(profile_value, dict) and not isinstance(leg.get(field_name), dict):
+                leg[field_name] = dict(profile_value)
+
+        if selected_profile.artifact_reference is None:
+            leg["artifact_reference"] = None
+        else:
+            leg["artifact_reference"] = {
+                "run_id": selected_profile.artifact_reference.run_id,
+                "artifact_path": selected_profile.artifact_reference.artifact_path,
+                "checksum_metadata": dict(selected_profile.artifact_reference.checksum_metadata),
+            }
 
     def _build_legs_panel(self) -> None:
         ttk.Label(self.legs_panel, text="Regime legs", font=("Arial", 12, "bold")).pack(anchor="w")
@@ -1113,6 +1179,9 @@ class CreateRegimePage(ttk.Frame):
         selected_model_id, hyperparameters = self._default_model_config_for_leg_type(leg_type)
         leg["selected_model_id"] = selected_model_id
         leg["model_id"] = selected_model_id
+        leg["selected_profile_id"] = ""
+        leg["profile_source"] = "catalog"
+        leg["artifact_reference"] = None
         leg["hyperparameters"] = hyperparameters
         self._persist_editor_state()
         self._refresh_legs_list()
@@ -1142,31 +1211,51 @@ class CreateRegimePage(ttk.Frame):
             foreground="#555555",
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
-        ttk.Label(selector_section, text="Model").grid(row=1, column=0, sticky="w")
-        model_descriptors = self._allowed_models_for_leg(leg)
-        self._model_selection_by_label = {
-            f"{descriptor.display_name} ({descriptor.model_name})": descriptor
-            for descriptor in model_descriptors
-        }
-        if not self._model_selection_by_label:
-            self._model_selection_by_label = {"No models available": ModelDescriptor("", "", {})}
-        selected_model_id = str(leg.get("selected_model_id", ""))
+        ttk.Label(selector_section, text="Model profile").grid(row=0, column=0, sticky="w")
+        profile_registry = self._profile_registry_for_leg(leg)
+        grouped_profiles = [
+            ("Catalog models", profile_registry.catalog_profiles),
+            ("Saved presets", profile_registry.preset_profiles),
+            ("Trained models", profile_registry.trained_profiles),
+        ]
+        self._model_selection_by_label = {}
+        profile_labels: list[str] = []
+        for group_name, profiles in grouped_profiles:
+            if not profiles:
+                continue
+            header = f"── {group_name} ──"
+            self._model_selection_by_label[header] = None
+            profile_labels.append(header)
+            for profile in profiles:
+                profile_label = f"  {profile.display_name} ({profile.base_model_id})"
+                suffix = 2
+                candidate = profile_label
+                while candidate in self._model_selection_by_label:
+                    suffix += 1
+                    candidate = f"{profile_label} [{suffix}]"
+                self._model_selection_by_label[candidate] = profile
+                profile_labels.append(candidate)
+        if not profile_labels:
+            self._model_selection_by_label = {"No model profiles available": None}
+            profile_labels = ["No model profiles available"]
+
+        selected_profile_id = str(leg.get("selected_profile_id", "")).strip()
+        selected_model_id = str(leg.get("selected_model_id", "")).strip()
         default_label = next(
             (
                 label
-                for label, descriptor in self._model_selection_by_label.items()
-                if descriptor.model_name == selected_model_id
+                for label, profile in self._model_selection_by_label.items()
+                if profile is not None and (profile.profile_id == selected_profile_id or profile.base_model_id == selected_model_id)
             ),
-            next(iter(self._model_selection_by_label)),
+            next((label for label in profile_labels if self._model_selection_by_label.get(label) is not None), profile_labels[0]),
         )
         self.selected_model_var = tk.StringVar(value=default_label)
         self.model_combo = ttk.Combobox(
             selector_section,
             textvariable=self.selected_model_var,
-            values=list(self._model_selection_by_label.keys()),
+            values=profile_labels,
             state="readonly",
-            width=36,
-            takefocus=True,
+            width=52,
         )
         self.model_combo.grid(row=1, column=1, sticky="w", padx=4)
         self.model_combo.bind("<<ComboboxSelected>>", self._on_leg_model_selected)
@@ -1478,12 +1567,26 @@ class CreateRegimePage(ttk.Frame):
 
     def _on_leg_model_selected(self, _event=None) -> None:
         leg = self._selected_leg()
-        selected_descriptor = self._model_selection_by_label.get(self.selected_model_var.get())
-        if selected_descriptor is None:
+        selected_profile = self._model_selection_by_label.get(self.selected_model_var.get())
+        if selected_profile is None:
             return
-        leg["selected_model_id"] = selected_descriptor.model_name
-        leg["model_id"] = selected_descriptor.model_name
-        leg["hyperparameters"] = dict(selected_descriptor.hyperparameter_template)
+        leg["selected_profile_id"] = selected_profile.profile_id
+        leg["profile_source"] = selected_profile.source
+        leg["selected_model_id"] = selected_profile.base_model_id
+        leg["model_id"] = selected_profile.resolved_model_id
+        leg["hyperparameters"] = dict(selected_profile.hyperparameters or {})
+        leg["architecture_spec"] = dict(selected_profile.architecture_spec) if isinstance(selected_profile.architecture_spec, dict) else None
+        leg["calibration_spec"] = dict(selected_profile.calibration_spec) if isinstance(selected_profile.calibration_spec, dict) else None
+        leg["event_process_spec"] = dict(selected_profile.event_process_spec) if isinstance(selected_profile.event_process_spec, dict) else None
+        leg["artifact_reference"] = (
+            {
+                "run_id": selected_profile.artifact_reference.run_id,
+                "artifact_path": selected_profile.artifact_reference.artifact_path,
+                "checksum_metadata": dict(selected_profile.artifact_reference.checksum_metadata),
+            }
+            if selected_profile.artifact_reference is not None
+            else None
+        )
         self._persist_editor_state()
         self._load_selected_leg_into_form()
 
@@ -1753,21 +1856,37 @@ class CreateRegimePage(ttk.Frame):
             mapped_leg = to_regime_leg_spec(leg)
             mapped_controls = {key: float(value) for key, value in mapped_leg.leg_spec.knobs.items()}
             selected_model_id = str(leg.get("selected_model_id", "")).strip()
+            resolved_model_id = str(leg.get("model_id", selected_model_id)).strip() or selected_model_id
+            selected_profile_id = str(leg.get("selected_profile_id", "")).strip()
+            profile_source = str(leg.get("profile_source", "catalog")).strip() or "catalog"
             hyperparameters_raw = leg.get("hyperparameters", {})
             hyperparameters: dict[str, Any] = {}
             if isinstance(hyperparameters_raw, dict):
                 hyperparameters = dict(hyperparameters_raw)
+            architecture_spec = leg.get("architecture_spec") if isinstance(leg.get("architecture_spec"), dict) else None
+            calibration_spec = leg.get("calibration_spec") if isinstance(leg.get("calibration_spec"), dict) else None
+            event_process_spec = leg.get("event_process_spec") if isinstance(leg.get("event_process_spec"), dict) else None
+            artifact_reference = leg.get("artifact_reference") if isinstance(leg.get("artifact_reference"), dict) else None
             legs.append(
                 RegimeLegTrainingConfig(
                     name=str(leg.get("name", "Unnamed leg")),
                     model_type=mapped_leg.leg_spec.leg_family,
                     controls={**cast_controls, **mapped_controls},
-                    model_id=selected_model_id,
+                    model_id=resolved_model_id,
                     selected_model_id=selected_model_id,
+                    selected_profile_id=selected_profile_id,
+                    profile_source=profile_source,
                     hyperparameters=hyperparameters,
-                    architecture_spec=leg.get("architecture_spec") if isinstance(leg.get("architecture_spec"), dict) else None,
-                    calibration_spec=leg.get("calibration_spec") if isinstance(leg.get("calibration_spec"), dict) else None,
-                    event_process_spec=leg.get("event_process_spec") if isinstance(leg.get("event_process_spec"), dict) else None,
+                    architecture_spec=architecture_spec,
+                    calibration_spec=calibration_spec,
+                    event_process_spec=event_process_spec,
+                    model_provenance={
+                        "selected_profile_id": selected_profile_id,
+                        "profile_source": profile_source,
+                        "selected_model_id": selected_model_id,
+                        "resolved_model_id": resolved_model_id,
+                        "artifact_reference": dict(artifact_reference) if artifact_reference is not None else None,
+                    },
                 )
             )
 

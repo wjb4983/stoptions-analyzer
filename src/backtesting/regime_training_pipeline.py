@@ -33,10 +33,13 @@ class RegimeLegTrainingConfig:
     controls: dict[str, float]
     model_id: str = ""
     selected_model_id: str = ""
+    selected_profile_id: str = ""
+    profile_source: str = "catalog"
     hyperparameters: dict[str, Any] = field(default_factory=dict)
     architecture_spec: dict[str, Any] | None = None
     calibration_spec: dict[str, Any] | None = None
     event_process_spec: dict[str, Any] | None = None
+    model_provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def resolved_model_id(self) -> str:
