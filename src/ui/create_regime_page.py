@@ -1357,8 +1357,40 @@ class CreateRegimePage(ttk.Frame):
         self.model_combo.grid(row=1, column=1, sticky="w", padx=4)
         self.model_combo.bind("<<ComboboxSelected>>", self._on_leg_model_selected)
 
+        profile = self._training_profile_payload()
+        profile_effects = self._profile_effects_for_leg(
+            profile,
+            leg_name=str(leg.get("name", f"Leg {self.selected_leg_index + 1}")),
+            leg_family=str(leg.get("model_type", "")).strip(),
+            leg_index=self.selected_leg_index,
+        )
+        selected_profile_model_id = self._preview_selected_model_id(leg)
+        self.profile_override_status_var = tk.StringVar()
+        self.profile_override_warning_var = tk.StringVar()
+        ttk.Label(selector_section, text="Profile override status").grid(row=2, column=0, sticky="nw", pady=(6, 0))
+        override_status_frame = ttk.Frame(selector_section)
+        override_status_frame.grid(row=2, column=1, sticky="w", padx=4, pady=(6, 0))
+        ttk.Label(
+            override_status_frame,
+            textvariable=self.profile_override_status_var,
+            justify="left",
+            wraplength=520,
+        ).grid(row=0, column=0, sticky="w")
+        self.profile_override_warning_label = ttk.Label(
+            override_status_frame,
+            textvariable=self.profile_override_warning_var,
+            foreground="#b12704",
+            justify="left",
+            wraplength=520,
+        )
+        self.profile_override_warning_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self._update_profile_override_status(
+            selected_profile_model_id=selected_profile_model_id,
+            profile_effects=profile_effects,
+        )
+
         nn_row = ttk.Frame(selector_section)
-        nn_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        nn_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Button(nn_row, text="Open neural network designer", command=self._open_neural_network_designer).pack(side="left")
         architecture_state = "configured" if isinstance(leg.get("architecture_spec"), dict) else "not set"
         ttk.Label(nn_row, text=f"Architecture: {architecture_state}").pack(side="left", padx=(8, 0))
@@ -1372,7 +1404,7 @@ class CreateRegimePage(ttk.Frame):
         }
 
         chips_row = ttk.Frame(selector_section)
-        chips_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        chips_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
         for idx, spec_key in enumerate(("architecture_spec", "calibration_spec", "event_process_spec")):
             requirement = spec_requirements[spec_key]
             configured = isinstance(leg.get(spec_key), dict)
@@ -1392,7 +1424,7 @@ class CreateRegimePage(ttk.Frame):
             ).grid(row=0, column=idx, sticky="w", padx=(0, 12))
 
         configure_row = ttk.Frame(selector_section)
-        configure_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        configure_row.grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
         required_actions: list[tuple[str, object]] = []
         if spec_requirements["architecture_spec"] == "required":
             required_actions.append(("Configure architecture…", self._open_neural_network_designer))
@@ -1408,7 +1440,7 @@ class CreateRegimePage(ttk.Frame):
             ttk.Label(configure_row, text="No required model-specific spec configuration.").grid(row=0, column=0, sticky="w")
 
         execution_intent_section = ttk.LabelFrame(selector_section, text="Execution intent", padding=8)
-        execution_intent_section.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        execution_intent_section.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         execution_intent_section.columnconfigure(0, weight=1)
         self.execution_intent_var = tk.StringVar()
         ttk.Label(
@@ -1750,6 +1782,38 @@ class CreateRegimePage(ttk.Frame):
         self.training_preview_text.insert("1.0", preview_text)
         self.training_preview_text.configure(state="disabled")
         self._update_execution_intent_summary()
+
+
+    def _update_profile_override_status(self, *, selected_profile_model_id: str, profile_effects: dict[str, Any]) -> None:
+        if not hasattr(self, "profile_override_status_var") or not hasattr(self, "model_combo"):
+            return
+
+        fixed_model = str(profile_effects.get("fixed_model") or "").strip()
+        auto_seed_models = [str(item).strip() for item in profile_effects.get("auto_seed_models", []) if str(item).strip()]
+        ensemble_members = [str(item).strip() for item in profile_effects.get("ensemble_members", []) if str(item).strip()]
+
+        status_lines: list[str] = []
+        if fixed_model:
+            status_lines.append(f"• fixed model override: {fixed_model}")
+        if auto_seed_models:
+            status_lines.append(f"• auto-search seed models: {', '.join(auto_seed_models)}")
+        if ensemble_members:
+            status_lines.append(f"• ensemble members: {', '.join(ensemble_members)}")
+        self.profile_override_status_var.set("\n".join(status_lines) if status_lines else "No profile overrides for this leg.")
+
+        warning = ""
+        selected = selected_profile_model_id.strip().lower()
+        if fixed_model:
+            self.model_combo.configure(state="disabled")
+            self.model_combo.configure(takefocus=False)
+            if selected and selected != fixed_model.lower():
+                warning = "Selected profile differs from fixed override; fixed override will be used."
+        else:
+            self.model_combo.configure(state="readonly")
+            self.model_combo.configure(takefocus=True)
+
+        if hasattr(self, "profile_override_warning_var"):
+            self.profile_override_warning_var.set(f"⚠ {warning}" if warning else "")
 
     def _on_leg_model_selected(self, _event=None) -> None:
         leg = self._selected_leg()
