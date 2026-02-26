@@ -197,7 +197,11 @@
           "patience": 10,
           "min_delta": 0.0001
         }
-      }
+      },
+      "paper_title": "Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting",
+      "citation_key_or_url": "https://arxiv.org/abs/1912.09363",
+      "task_fit": "regime classification",
+      "market_assumptions": "Regime signals are path-dependent with mixed static and time-varying covariates."
     },
     "transformer_time_series": {
       "schema_version": 1,
@@ -260,7 +264,11 @@
           "patience": 12,
           "min_delta": 5e-05
         }
-      }
+      },
+      "paper_title": "Attention Is All You Need",
+      "citation_key_or_url": "https://arxiv.org/abs/1706.03762",
+      "task_fit": "regime classification",
+      "market_assumptions": "Temporal dependencies can be captured via attention over engineered market sequences."
     },
     "ppo_actor_critic_small": {
       "schema_version": 1,
@@ -315,7 +323,11 @@
           "patience": 8,
           "min_delta": 0.0001
         }
-      }
+      },
+      "paper_title": "Proximal Policy Optimization Algorithms",
+      "citation_key_or_url": "https://arxiv.org/abs/1707.06347",
+      "task_fit": "allocation policy",
+      "market_assumptions": "On-policy updates assume stationarity over short rollout windows and bounded policy drift."
     },
     "dqn_mlp_dueling": {
       "schema_version": 1,
@@ -376,7 +388,11 @@
           "patience": 15,
           "min_delta": 0.0001
         }
-      }
+      },
+      "paper_title": "Human-level control through deep reinforcement learning",
+      "citation_key_or_url": "https://www.nature.com/articles/nature14236",
+      "task_fit": "allocation policy",
+      "market_assumptions": "Markovian state transitions and reward shaping that approximates trading utility."
     }
   }
 }
