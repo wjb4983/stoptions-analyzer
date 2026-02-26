@@ -819,14 +819,24 @@ class CreateRegimePage(ttk.Frame):
 
     def _profile_registry_for_leg(self, leg: dict[str, object]):
         mapped_leg = to_regime_leg_spec(leg)
-        regime_definition = self._active_regime_definition()
-        presets = regime_definition.get("model_presets")
-        if not isinstance(presets, dict):
-            presets = {}
+        controller = getattr(self, "controller", None)
+        state = getattr(controller, "state", None)
+
+        presets: dict[str, object] = {}
+        if state is not None and getattr(state, "active_regime_id", None):
+            regime_definition = self._active_regime_definition()
+            raw_presets = regime_definition.get("model_presets")
+            if isinstance(raw_presets, dict):
+                presets = raw_presets
+
+        training_runs = []
+        if state is not None and isinstance(getattr(state, "regime_training_runs", None), list):
+            training_runs = state.regime_training_runs
+
         return build_model_profile_registry(
             leg_family=mapped_leg.leg_spec.leg_family,
             presets=presets,
-            training_runs=self.controller.state.regime_training_runs,
+            training_runs=training_runs,
         )
 
     def _profiles_for_leg(self, leg: dict[str, object]) -> tuple[ModelProfile, ...]:
@@ -840,7 +850,9 @@ class CreateRegimePage(ttk.Frame):
         return get_model_descriptor(mapped_leg.leg_spec.leg_family, selected_model_id)
 
     @staticmethod
-    def _spec_requirements_for_descriptor(descriptor: ModelDescriptor | None) -> dict[str, str]:
+    def _spec_requirements_for_descriptor(
+        descriptor: ModelDescriptor | ModelProfile | None,
+    ) -> dict[str, str]:
         requirements = {
             "architecture_spec": "unsupported",
             "calibration_spec": "unsupported",
@@ -849,7 +861,11 @@ class CreateRegimePage(ttk.Frame):
         if descriptor is None:
             return requirements
 
-        tags = descriptor.capability_tags
+        if isinstance(descriptor, ModelProfile):
+            resolved_descriptor = get_model_descriptor(descriptor.leg_family, descriptor.base_model_id)
+            tags = resolved_descriptor.capability_tags if resolved_descriptor is not None else frozenset()
+        else:
+            tags = descriptor.capability_tags
         requirements["architecture_spec"] = "required" if "needs_architecture_spec" in tags else "optional" if "supports_architecture_spec" in tags else "unsupported"
         requirements["calibration_spec"] = "required" if "needs_calibration_spec" in tags else "optional" if "supports_calibration_spec" in tags else "unsupported"
         requirements["event_process_spec"] = "required" if "needs_event_process_spec" in tags else "optional" if "supports_event_process_spec" in tags else "unsupported"
