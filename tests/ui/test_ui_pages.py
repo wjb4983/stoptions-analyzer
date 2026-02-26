@@ -852,11 +852,11 @@ def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch
     assert request.training_data_settings["min_symbol_coverage_ratio"] == 1.0
     assert request.training_data_settings["min_bars_per_year"] == 1
     assert request.training_data_settings["max_ram_usage_gb"] is None
-    assert request.training_data_settings["ram_utilization_fraction"] == pytest.approx(0.65)
+    assert request.training_data_settings["ram_utilization_fraction"] == pytest.approx(0.40)
     assert request.training_data_settings["max_total_return_samples"] is None
 
     preview = page._build_training_execution_preview()
-    assert "Training data RAM budget: auto (65% of available RAM)" in preview
+    assert "Training data RAM budget: auto (40% of available RAM)" in preview
 
 
 def test_create_regime_successful_training_appends_run_and_persists(monkeypatch):
