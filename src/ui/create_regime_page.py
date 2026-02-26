@@ -1730,6 +1730,26 @@ class CreateRegimePage(ttk.Frame):
             f"Training mode: {mode or 'auto_model_search'}",
         ]
 
+        definition = self._active_regime_definition()
+        training_data_settings = {
+            **DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
+            **(definition.get("training_data_settings", {}) if isinstance(definition.get("training_data_settings"), dict) else {}),
+        }
+        raw_max_ram_gb = training_data_settings.get("max_ram_usage_gb")
+        ram_utilization = training_data_settings.get("ram_utilization_fraction", 0.65)
+        try:
+            ram_utilization = max(0.05, min(1.0, float(ram_utilization)))
+        except (TypeError, ValueError):
+            ram_utilization = 0.65
+        if raw_max_ram_gb in (None, ""):
+            ram_budget_text = f"auto ({ram_utilization:.0%} of available RAM)"
+        else:
+            try:
+                ram_budget_text = f"manual ({max(0.0, float(raw_max_ram_gb)):.2f} GiB)"
+            except (TypeError, ValueError):
+                ram_budget_text = f"auto ({ram_utilization:.0%} of available RAM)"
+        lines.append(f"Training data RAM budget: {ram_budget_text}")
+
         if not self.regime_legs:
             lines.append("No legs configured.")
             self._training_preview_warnings = warnings
@@ -2137,6 +2157,19 @@ class CreateRegimePage(ttk.Frame):
             **DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
             **(definition.get("training_data_settings", {}) if isinstance(definition.get("training_data_settings"), dict) else {}),
         }
+        ram_fraction = training_data_settings.get("ram_utilization_fraction", 0.65)
+        try:
+            training_data_settings["ram_utilization_fraction"] = max(0.05, min(1.0, float(ram_fraction)))
+        except (TypeError, ValueError):
+            training_data_settings["ram_utilization_fraction"] = 0.65
+        raw_max_ram_gb = training_data_settings.get("max_ram_usage_gb")
+        if raw_max_ram_gb in (None, ""):
+            training_data_settings["max_ram_usage_gb"] = None
+        else:
+            try:
+                training_data_settings["max_ram_usage_gb"] = max(0.0, float(raw_max_ram_gb))
+            except (TypeError, ValueError):
+                training_data_settings["max_ram_usage_gb"] = None
 
         legs: list[RegimeLegTrainingConfig] = []
         for leg in self.regime_legs:

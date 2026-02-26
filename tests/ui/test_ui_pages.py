@@ -851,6 +851,11 @@ def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch
     assert request.training_data_settings["allow_synthetic_fallback"] is False
     assert request.training_data_settings["min_symbol_coverage_ratio"] == 1.0
     assert request.training_data_settings["min_bars_per_year"] == 1
+    assert request.training_data_settings["max_ram_usage_gb"] is None
+    assert request.training_data_settings["ram_utilization_fraction"] == pytest.approx(0.65)
+
+    preview = page._build_training_execution_preview()
+    assert "Training data RAM budget: auto (65% of available RAM)" in preview
 
 
 def test_create_regime_successful_training_appends_run_and_persists(monkeypatch):
@@ -1021,6 +1026,19 @@ def test_create_regime_run_train_attaches_cache_audit_metadata(monkeypatch, tmp_
 
     assert calls
     assert calls[0]["cache_audit_report"].endswith("audit.json")
+
+
+def test_create_regime_request_coerces_ram_training_data_settings():
+    page, controller = _build_create_regime_training_page()
+    controller.state.regime_definitions["baseline"]["training_data_settings"] = {
+        "max_ram_usage_gb": "2.5",
+        "ram_utilization_fraction": "1.8",
+    }
+
+    request = page._build_regime_training_request()
+
+    assert request.training_data_settings["max_ram_usage_gb"] == pytest.approx(2.5)
+    assert request.training_data_settings["ram_utilization_fraction"] == pytest.approx(1.0)
 
 
 def test_create_regime_training_failure_shows_hard_error_for_insufficient_real_history(monkeypatch):
