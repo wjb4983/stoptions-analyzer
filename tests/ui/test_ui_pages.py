@@ -9,6 +9,7 @@ import pytest
 from state import AppState
 from ui import analysis_page, backtesting_page, call_put_analysis_page, create_regime_page, general_analysis_page, main_menu, research_lab_page, spread_analysis_page, ticker_entry_page, ticker_select_page
 from backtesting.regime_training_pipeline import RegimeTrainingResult
+from models.model_profiles import ModelProfile
 
 
 class Var:
@@ -725,6 +726,7 @@ def test_create_regime_change_invalid_knob_combinations_are_blocked():
         ({"lookback_days": 20, "entry_zscore": 3.2, "turnover_limit": 1.2, "slippage_bps": 45}, False),
     ],
 )
+
 def test_create_regime_train_export_buttons_follow_validation(overrides, expected):
     page = _build_create_regime_logic_page()
     page.train_button = FakeWidget()
@@ -754,6 +756,21 @@ def test_create_regime_train_export_buttons_follow_validation(overrides, expecte
     assert page.train_button.config_calls[-1]["state"] == expected_state
     assert page.export_button.config_calls[-1]["state"] == expected_state
 
+
+def test_create_regime_spec_requirements_resolve_profile_capabilities():
+    profile = ModelProfile(
+        profile_id="trained:1",
+        display_name="Meta Label",
+        source="trained_artifact",
+        base_model_id="meta_label_classifier",
+        leg_family="meta_label_regime_ensemble",
+    )
+
+    requirements = create_regime_page.CreateRegimePage._spec_requirements_for_descriptor(profile)
+
+    assert requirements["architecture_spec"] == "optional"
+    assert requirements["calibration_spec"] == "unsupported"
+    assert requirements["event_process_spec"] == "unsupported"
 
 def test_create_regime_run_train_calls_pipeline_with_translated_legs(monkeypatch):
     infos = []
