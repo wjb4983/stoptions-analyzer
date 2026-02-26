@@ -640,6 +640,7 @@ class CreateRegimePage(ttk.Frame):
         self._calibration_designer_window: CalibrationSpecDesignerPage | None = None
         self._event_process_designer_window: EventProcessDesignerPage | None = None
         self._training_preview_warnings: list[str] = []
+        self._initial_focus_set = False
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
