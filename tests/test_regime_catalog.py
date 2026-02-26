@@ -57,3 +57,36 @@ def test_get_model_descriptor_roundtrip() -> None:
     assert descriptor is not None
     assert descriptor.model_name == "macro_regime_conditioned"
     assert descriptor.catalog_phase == "phase_2"
+
+
+def test_catalog_registry_consistency_for_all_descriptors() -> None:
+    covered_models: set[str] = set()
+    for leg_family in SUPPORTED_LEG_FAMILIES:
+        descriptors = list_models_for_leg(leg_family)
+        for descriptor in descriptors:
+            covered_models.add(descriptor.model_name)
+            assert descriptor.model_name in MODEL_REGISTRY
+            assert descriptor.display_name.strip()
+            assert descriptor.hyperparameter_template
+
+    assert {
+        "policy_gradient_allocation",
+        "dqn_regime_allocation",
+        "ppo_regime_policy",
+        "temporal_transformer_regime",
+        "tcn_regime",
+        "lstm_regime",
+    }.issubset(covered_models)
+
+
+def test_validate_model_leg_pairing_accepts_new_rl_dl_models() -> None:
+    supported_pairs = (
+        ("regime_change_detection", "policy_gradient_allocation"),
+        ("regime_change_detection", "dqn_regime_allocation"),
+        ("regime_change_detection", "ppo_regime_policy"),
+        ("cross_asset_macro_conditioned", "temporal_transformer_regime"),
+        ("cross_asset_macro_conditioned", "tcn_regime"),
+        ("cross_asset_macro_conditioned", "lstm_regime"),
+    )
+    for leg_family, model_id in supported_pairs:
+        validate_model_leg_pairing(leg_family, model_id)

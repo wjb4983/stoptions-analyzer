@@ -36,6 +36,9 @@ _DEFAULT_MODEL_CANDIDATES_BY_LEG_FAMILY: dict[str, tuple[str, ...]] = {
         "hmm_regime_change",
         "markov_regime_switching",
         "changepoint_regime_change",
+        "policy_gradient_allocation",
+        "dqn_regime_allocation",
+        "ppo_regime_policy",
         "meta_label_classifier",
     ),
     "volatility_clustering": (
@@ -66,6 +69,9 @@ _DEFAULT_MODEL_CANDIDATES_BY_LEG_FAMILY: dict[str, tuple[str, ...]] = {
         "macro_regime_conditioned",
         "factor_neutral_cross_sectional_rank",
         "dispersion",
+        "temporal_transformer_regime",
+        "tcn_regime",
+        "lstm_regime",
         "meta_label_classifier",
     ),
     "meta_label_regime_ensemble": (
