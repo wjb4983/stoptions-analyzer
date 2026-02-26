@@ -124,8 +124,10 @@ DEFAULT_BACKTEST_SETTINGS = {
     "stress_overlay_spread_multiplier": "2.5",
     "stress_overlay_liquidity_multiplier": "0.4",
     "ui_mode": "basic",
+    "show_advanced_controls": False,
     "selected_preset": "custom",
     "selected_template": "",
+    "selected_stress_profile": "Base",
     "backtest_data_root": str(BACKTEST_CACHE_DIR),
 }
 
