@@ -1118,6 +1118,7 @@ def test_backtesting_trained_regime_dropdown_population_and_hydration(tmp_path):
             {
                 "run_id": "run-ui",
                 "request": {
+                    "schema_version": 2,
                     "regime_name": "UI Risk",
                     "model_choice": "auto_model_search",
                     "training_window": {"lookback_days": 77, "retrain_frequency_days": 4},

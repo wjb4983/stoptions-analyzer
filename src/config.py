@@ -127,6 +127,11 @@ DEFAULT_BACKTEST_SETTINGS = {
     "show_advanced_controls": False,
     "selected_preset": "custom",
     "selected_template": "",
+    "selected_backtest_type": "classic_strategy",
+    "selected_trained_regime": "(none)",
+    "selected_trained_regime_option_id": "",
+    "selected_trained_regime_manifest_path": "",
+    "selected_trained_regime_source": "",
     "selected_stress_profile": "Base",
     "backtest_data_root": str(BACKTEST_CACHE_DIR),
 }
