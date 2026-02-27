@@ -101,6 +101,7 @@ def test_contract_hydration_maps_expected_defaults(tmp_path: Path) -> None:
     assert contract.execution_artifacts["model_paths"]["trend"] == "artifacts/trend/model.pkl"
     assert contract.execution_artifacts["calibration_paths"]["carry"] == "artifacts/carry/calibration.json"
     assert contract.execution_artifacts["feature_expectations"]["Trend"] == ["ret_5", "vol_20"]
+    assert contract.reproducibility_status == "compatible_with_migration"
 
 
 def test_invalid_or_missing_bundle_manifest_raises_actionable_error(tmp_path: Path) -> None:
@@ -172,3 +173,57 @@ def test_bundle_rejects_incompatible_schema_version(tmp_path: Path) -> None:
 
     with pytest.raises(RegimeBundleCompatibilityError, match="not supported"):
         load_regime_backtest_contract(option)
+
+
+def test_contract_rejects_replay_payload_run_id_mismatch(tmp_path: Path) -> None:
+    replay_path = tmp_path / "run" / "regime_backtest_replay_payload.json"
+    _write_json(
+        replay_path,
+        {
+            "replay_schema_version": "1.0.0",
+            "source_manifest": {"run_id": "other-run"},
+            "artifact_lineage": {},
+            "selected_champions": {},
+            "feature_schema_hash": "abc",
+            "training_data_assumptions": {},
+        },
+    )
+    manifest = _training_manifest("run-hydrate")
+    manifest["artifact_paths"]["regime_backtest_replay_payload"] = str(replay_path)
+    manifest_path = _write_json(tmp_path / "run" / "manifest.json", manifest)
+    option = RegimeBacktestOption(
+        option_id="training:run-hydrate",
+        label="hydrate",
+        source="training_run",
+        manifest_path=str(manifest_path),
+    )
+
+    with pytest.raises(RegimeBundleCompatibilityError, match="run_id mismatch"):
+        load_regime_backtest_contract(option)
+
+
+def test_contract_marks_exact_replay_when_payload_is_present(tmp_path: Path) -> None:
+    replay_path = tmp_path / "run" / "regime_backtest_replay_payload.json"
+    _write_json(
+        replay_path,
+        {
+            "replay_schema_version": "1.0.0",
+            "source_manifest": {"run_id": "run-hydrate"},
+            "artifact_lineage": {"spec": "run/regime_spec_snapshot.json"},
+            "selected_champions": {"Trend": "meta_label_classifier"},
+            "feature_schema_hash": "abc",
+            "training_data_assumptions": {"allow_synthetic_fallback": False},
+        },
+    )
+    manifest = _training_manifest("run-hydrate")
+    manifest["artifact_paths"]["regime_backtest_replay_payload"] = str(replay_path)
+    manifest_path = _write_json(tmp_path / "run" / "manifest.json", manifest)
+    option = RegimeBacktestOption(
+        option_id="training:run-hydrate",
+        label="hydrate",
+        source="training_run",
+        manifest_path=str(manifest_path),
+    )
+
+    contract = load_regime_backtest_contract(option)
+    assert contract.reproducibility_status == "exact_replay_compatible"

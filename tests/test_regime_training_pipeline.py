@@ -87,6 +87,7 @@ def test_pipeline_success_writes_manifest_and_returns_artifacts(tmp_path):
     assert result.warnings == ("[momentum] insufficient history in one bucket",)
     assert "trend_model_weights" in result.artifact_paths
     assert "manifest" in result.artifact_paths
+    assert "regime_backtest_replay_payload" in result.artifact_paths
 
     manifest_path = result.artifact_paths["manifest"]
     payload = json.loads(open(manifest_path, encoding="utf-8").read())
@@ -102,6 +103,11 @@ def test_pipeline_success_writes_manifest_and_returns_artifacts(tmp_path):
     leg_fingerprint = reproducibility["legs"]["00:Trend"]
     assert leg_fingerprint["hyperparameters_checksum"]
     assert leg_fingerprint["architecture_spec_checksum"]
+
+    replay_payload = json.loads(Path(result.artifact_paths["regime_backtest_replay_payload"]).read_text(encoding="utf-8"))
+    assert replay_payload["replay_schema_version"] == "1.0.0"
+    assert replay_payload["source_manifest"]["run_id"] == result.run_id
+    assert replay_payload["feature_schema_hash"]
 
 
 def test_pipeline_validation_failure_returns_machine_readable_error(tmp_path):

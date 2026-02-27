@@ -2665,8 +2665,16 @@ class BacktestingPage(ttk.Frame):
         }
         self._regime_loaded_values["selected_scenario_packs"] = ",".join(selected_packs)
 
+        status_map = {
+            "exact_replay_compatible": "Exact Replay Compatible",
+            "compatible_with_migration": "Compatible with Migration",
+            "incompatible": "Incompatible",
+        }
+        repro_status = status_map.get(contract.reproducibility_status, "Compatible with Migration")
         self.regime_provenance_var.set(
-            f"Loaded from regime {contract.regime_name} ({contract.source})\nManifest: {contract.manifest_path}"
+            f"Reproducibility: {repro_status}\n"
+            f"Regime: {contract.regime_name} ({contract.source})\n"
+            f"Manifest: {contract.manifest_path}"
         )
         self._apply_regime_lock_state()
         self._refresh_regime_diff_indicator()

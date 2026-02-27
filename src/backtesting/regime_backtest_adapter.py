@@ -8,6 +8,8 @@ from typing import Any
 from backtesting.schema_contracts import (
     BACKTEST_HYDRATION_PAYLOAD_CONTRACT,
     EXPORT_BUNDLE_MANIFEST_CONTRACT,
+    REGIME_BACKTEST_REPLAY_PAYLOAD_CONTRACT,
+    REGIME_BACKTEST_REPLAY_REQUIRED_FIELDS,
     REGIME_TRAINING_MANIFEST_CONTRACT,
 )
 
@@ -31,6 +33,8 @@ class RegimeBacktestContract:
     manifest_path: str
     defaults: dict[str, object]
     execution_artifacts: dict[str, object]
+    reproducibility_status: str
+    compatibility_metadata: dict[str, object]
 
 
 def discover_regime_backtest_options(
@@ -93,6 +97,11 @@ def discover_regime_backtest_options(
 def load_regime_backtest_contract(option: RegimeBacktestOption) -> RegimeBacktestContract:
     payload = _read_manifest_payload(Path(option.manifest_path), source=option.source)
     training_payload = _normalize_training_manifest_payload(payload)
+    replay_diagnostics = _validate_replay_payload_compatibility(
+        training_payload,
+        source=option.source,
+        selected_manifest_path=Path(option.manifest_path),
+    )
     request = training_payload.get("request", {}) if isinstance(training_payload.get("request"), dict) else {}
     training_window = request.get("training_window", {}) if isinstance(request.get("training_window"), dict) else {}
     risk_limits = request.get("risk_limits", {}) if isinstance(request.get("risk_limits"), dict) else {}
@@ -135,6 +144,8 @@ def load_regime_backtest_contract(option: RegimeBacktestOption) -> RegimeBacktes
         manifest_path=option.manifest_path,
         defaults=defaults,
         execution_artifacts=execution_artifacts,
+        reproducibility_status=str(replay_diagnostics["status"]),
+        compatibility_metadata=replay_diagnostics,
     )
 
 
@@ -218,12 +229,98 @@ def _read_manifest_payload(manifest_path: Path, *, source: str) -> dict[str, Any
         )
 
     contents = payload.get("contents", {}) if isinstance(payload.get("contents"), dict) else {}
+    replay_payload_path = str(contents.get("regime_backtest_replay_payload", "")).strip()
+    compatibility = contents.get("replay_compatibility") if isinstance(contents.get("replay_compatibility"), dict) else {}
+    if replay_payload_path and not compatibility:
+        raise RegimeBundleCompatibilityError(
+            "Bundle manifest includes contents.regime_backtest_replay_payload but is missing contents.replay_compatibility metadata. "
+            "Re-export the bundle with compatibility metadata."
+        )
     training_manifest_path = str(contents.get("training_manifest", "")).strip()
     if not training_manifest_path:
         raise RegimeBundleCompatibilityError(
             "Bundle manifest missing contents.training_manifest. Re-export the bundle from a full training manifest."
         )
     return _read_manifest_payload(Path(training_manifest_path), source="training_run")
+
+
+def _validate_replay_payload_compatibility(
+    training_payload: dict[str, Any],
+    *,
+    source: str,
+    selected_manifest_path: Path,
+) -> dict[str, object]:
+    artifact_paths = training_payload.get("artifact_paths", {}) if isinstance(training_payload.get("artifact_paths"), dict) else {}
+    replay_path_raw = str(artifact_paths.get("regime_backtest_replay_payload", "")).strip()
+    metadata = training_payload.get("metadata", {}) if isinstance(training_payload.get("metadata"), dict) else {}
+    replay_meta = metadata.get("replay_payload") if isinstance(metadata.get("replay_payload"), dict) else {}
+
+    if not replay_path_raw:
+        if replay_meta:
+            return {
+                "status": "compatible_with_migration",
+                "reason": "manifest metadata includes replay payload contract but artifact path is unavailable",
+                "schema_contract": replay_meta.get("schema_contract"),
+                "schema_version": replay_meta.get("schema_version"),
+            }
+        return {
+            "status": "compatible_with_migration",
+            "reason": "legacy training manifest without replay payload artifact",
+        }
+
+    replay_path = Path(replay_path_raw)
+    if not replay_path.is_absolute() and source == "bundle":
+        replay_path = selected_manifest_path.parent / replay_path
+    if not replay_path.exists():
+        raise RegimeBundleCompatibilityError(
+            "Training manifest points to artifact_paths.regime_backtest_replay_payload but the file is missing at "
+            f"'{replay_path}'. Re-run regime training/export to regenerate reproducibility artifacts."
+        )
+
+    try:
+        replay_payload = json.loads(replay_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RegimeBundleCompatibilityError(
+            f"Replay payload at '{replay_path}' is invalid JSON (line {exc.lineno}, column {exc.colno})."
+        ) from exc
+
+    if not isinstance(replay_payload, dict):
+        raise RegimeBundleCompatibilityError(f"Replay payload at '{replay_path}' must be a JSON object.")
+
+    missing = [field for field in REGIME_BACKTEST_REPLAY_REQUIRED_FIELDS if field not in replay_payload]
+    if missing:
+        raise RegimeBundleCompatibilityError(
+            "Replay payload is missing required field(s): "
+            + ", ".join(missing)
+            + ". Regenerate the payload using a compatible trainer."
+        )
+
+    replay_version = str(replay_payload.get("replay_schema_version", "")).strip()
+    if not replay_version:
+        raise RegimeBundleCompatibilityError("Replay payload missing replay_schema_version.")
+    if not REGIME_BACKTEST_REPLAY_PAYLOAD_CONTRACT.is_compatible(replay_version):
+        raise RegimeBundleCompatibilityError(
+            f"Replay payload schema v{replay_version} is incompatible. Supported range: "
+            f"{REGIME_BACKTEST_REPLAY_PAYLOAD_CONTRACT.minimum_compatible_version}-"
+            f"{REGIME_BACKTEST_REPLAY_PAYLOAD_CONTRACT.current_version}."
+        )
+
+    source_manifest = replay_payload.get("source_manifest", {}) if isinstance(replay_payload.get("source_manifest"), dict) else {}
+    replay_run_id = str(source_manifest.get("run_id", "")).strip()
+    training_run_id = str(training_payload.get("run_id", "")).strip()
+    if replay_run_id and training_run_id and replay_run_id != training_run_id:
+        raise RegimeBundleCompatibilityError(
+            "Replay payload run_id mismatch: "
+            f"payload references '{replay_run_id}', manifest is '{training_run_id}'."
+        )
+
+    return {
+        "status": "exact_replay_compatible",
+        "reason": "replay payload schema and lineage validated",
+        "schema_contract": REGIME_BACKTEST_REPLAY_PAYLOAD_CONTRACT.name,
+        "schema_version": replay_version,
+        "path": str(replay_path),
+    }
 
 
 def _ensure_training_manifest_compatible(payload: dict[str, Any]) -> None:
