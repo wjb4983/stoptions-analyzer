@@ -324,6 +324,11 @@ def run_trained_regime_backtest(
     regime_contract: RegimeBacktestContract | None = None,
     regime_manifest_path: str | Path | None = None,
     regime_source: str | None = None,
+    governance_metadata: dict[str, Any] | None = None,
+    stress_controls: dict[str, Any] | None = None,
+    scenario_packs: list[str] | None = None,
+    selected_test_suite: str = "custom",
+    suite_composition: dict[str, Any] | None = None,
 ) -> str:
     contract = regime_contract
     if contract is None:
@@ -359,8 +364,22 @@ def run_trained_regime_backtest(
         portfolio_max_net_exposure=float(defaults.get("portfolio_max_net_exposure", 1.0) or 1.0),
         portfolio_max_symbol_weight=float(defaults.get("portfolio_max_symbol_weight", 0.25) or 0.25),
         portfolio_max_sector_weight=float(defaults.get("portfolio_max_sector_weight", 0.60) or 0.60),
+        governance_metadata=dict(governance_metadata or {}),
+        stress_controls=dict(stress_controls or {}),
+        scenario_packs=list(scenario_packs or []),
+        selected_test_suite=selected_test_suite,
+        suite_composition=dict(suite_composition or {}),
     )
     artifacts = contract.execution_artifacts
+    run_dir = _extract_run_dir_from_output(output_text)
+    if run_dir is not None:
+        _write_suite_artifact_bundle(
+            run_dir=run_dir,
+            suite_key=selected_test_suite,
+            suite_composition=dict(suite_composition or {}),
+            governance_metadata=dict(governance_metadata or {}),
+            stress_controls=dict(stress_controls or {}),
+        )
     return (
         output_text
         + "\nRegime contract: " + contract.regime_name
@@ -369,6 +388,8 @@ def run_trained_regime_backtest(
         + "\nChampion model IDs: " + json.dumps(artifacts.get("champion_model_ids", {}), sort_keys=True)
         + "\nModel paths: " + json.dumps(artifacts.get("model_paths", {}), sort_keys=True)
         + "\nCalibration paths: " + json.dumps(artifacts.get("calibration_paths", {}), sort_keys=True)
+        + "\nTest suite: " + str(selected_test_suite)
+        + "\nSuite composition: " + json.dumps(dict(suite_composition or {}), sort_keys=True)
     )
 
 def run_time_series_momentum_backtest(
@@ -425,6 +446,8 @@ def run_time_series_momentum_backtest(
     random_seed: int = 42,
     preflight_config: PreflightValidationConfig | None = None,
     benchmarks: list[str] | None = None,
+    selected_test_suite: str = "custom",
+    suite_composition: dict[str, Any] | None = None,
 ) -> str:
     BACKTEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     random.seed(int(random_seed))
@@ -904,6 +927,8 @@ def run_time_series_momentum_backtest(
         "governance": governance_payload,
         "stress_controls": dict(stress_controls or {}),
         "scenario_packs": [str(pack) for pack in (scenario_packs or [])],
+        "selected_test_suite": str(selected_test_suite or "custom"),
+        "suite_composition": dict(suite_composition or {}),
     }
 
     fill_rows = list(result.fills)
@@ -972,6 +997,14 @@ def run_time_series_momentum_backtest(
         corporate_action_splits=arrays.split_factors,
         corporate_action_dividends=arrays.dividends,
         attribution_payload={"time_series": attribution_payload.time_series, "summary": attribution_payload.summary},
+        fill_rows=fill_rows,
+        slippage_calibration_selection={
+            "source": calibration_selection.source,
+            "effective_date": calibration_selection.effective_date,
+            "warning_flags": list(calibration_selection.warning_flags),
+        },
+        selected_test_suite=str(selected_test_suite or "custom"),
+        suite_composition=dict(suite_composition or {}),
     )
 
     trade_log_rows = _build_trade_log_rows(
@@ -4224,6 +4257,10 @@ def _persist_backtest_outputs(
     corporate_action_splits: np.ndarray | None = None,
     corporate_action_dividends: np.ndarray | None = None,
     attribution_payload: dict[str, Any] | None = None,
+    fill_rows: list[dict[str, Any]] | None = None,
+    slippage_calibration_selection: dict[str, Any] | None = None,
+    selected_test_suite: str = "custom",
+    suite_composition: dict[str, Any] | None = None,
 ) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = BACKTEST_OUTPUT_DIR / f"tsmom_backtest_{timestamp}"
@@ -4334,6 +4371,13 @@ def _persist_backtest_outputs(
     if scenario_payload is not None:
         (run_dir / "stress_scenarios.json").write_text(json.dumps(scenario_payload, indent=2))
 
+    _write_slippage_decomposition_artifacts(
+        run_dir=run_dir,
+        fill_rows=list(fill_rows or []),
+        regime_labels=regime_labels,
+        slippage_calibration_selection=dict(slippage_calibration_selection or {}),
+    )
+
     if dataset_contracts is not None:
         audit_payload = {
             "coverage_by_symbol": dataset_contracts.coverage_by_symbol,
@@ -4352,6 +4396,10 @@ def _persist_backtest_outputs(
         random_seed=random_seed,
         governance=governance_payload,
         metric_tables=metric_tables,
+        extra_fingerprint_payload={
+            "selected_test_suite": str(selected_test_suite or "custom"),
+            "suite_composition": dict(suite_composition or {}),
+        },
         result_summary={
             "metrics": {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))},
             **_collect_artifact_inventory(run_dir),
@@ -4363,6 +4411,8 @@ def _persist_backtest_outputs(
         "run_type": "backtest",
         "random_seeds": {"run_seed": random_seed, "python_random_seed": random_seed, "numpy_random_seed": random_seed},
         "data_fingerprint": dict((data_snapshot or {}).get("data_fingerprint", {})) if isinstance(data_snapshot, dict) else {},
+        "selected_test_suite": str(selected_test_suite or "custom"),
+        "suite_composition": dict(suite_composition or {}),
     }, indent=2))
     _append_experiment_index(
         {
@@ -4429,6 +4479,121 @@ def _write_corporate_actions_applied_csv(
         writer.writeheader()
         writer.writerows(rows)
 
+
+
+def _extract_run_dir_from_output(output_text: str) -> Path | None:
+    marker = "Saved outputs to:"
+    if marker not in output_text:
+        return None
+    tail = output_text.split(marker)[-1].strip().splitlines()[0].strip()
+    if not tail:
+        return None
+    run_dir = Path(tail)
+    return run_dir if run_dir.exists() else None
+
+
+def _write_slippage_decomposition_artifacts(
+    *,
+    run_dir: Path,
+    fill_rows: list[dict[str, Any]],
+    regime_labels: np.ndarray | None,
+    slippage_calibration_selection: dict[str, Any] | None = None,
+) -> None:
+    if not fill_rows:
+        payload = {
+            "expected_vs_observed_fill_slippage_drift_bps": 0.0,
+            "by_regime": [],
+            "by_liquidity_bucket": [],
+            "calibration": dict(slippage_calibration_selection or {}),
+        }
+        (run_dir / "slippage_decomposition.json").write_text(json.dumps(payload, indent=2))
+        return
+
+    labels = np.asarray(regime_labels, dtype=object) if regime_labels is not None else np.asarray([], dtype=object)
+    by_regime: dict[str, dict[str, float]] = {}
+    by_liquidity: dict[str, dict[str, float]] = {}
+    total_expected = 0.0
+    total_observed = 0.0
+
+    for row in fill_rows:
+        requested = float(row.get("requested_size", 0.0) or 0.0)
+        filled = float(row.get("filled_size", 0.0) or 0.0)
+        residual = float(row.get("residual_size", 0.0) or 0.0)
+        participation = max(float(row.get("participation_rate", 0.0) or 0.0), 0.0)
+        expected_bps = participation * 10.0
+        fill_ratio = abs(filled) / max(abs(requested), 1e-9) if requested != 0.0 else 0.0
+        observed_bps = expected_bps * (1.0 + max(0.0, 1.0 - fill_ratio) + min(abs(residual) / max(abs(requested), 1e-9), 1.0))
+        drift = observed_bps - expected_bps
+        total_expected += expected_bps
+        total_observed += observed_bps
+
+        bar_index = int(row.get("bar_index", 0) or 0)
+        regime = str(labels[bar_index]) if 0 <= bar_index < labels.size else "unlabeled"
+        if participation < 0.10:
+            bucket = "low"
+        elif participation < 0.30:
+            bucket = "medium"
+        else:
+            bucket = "high"
+
+        slot = by_regime.setdefault(regime, {"count": 0.0, "expected_bps": 0.0, "observed_bps": 0.0, "drift_bps": 0.0})
+        slot["count"] += 1
+        slot["expected_bps"] += expected_bps
+        slot["observed_bps"] += observed_bps
+        slot["drift_bps"] += drift
+
+        lslot = by_liquidity.setdefault(bucket, {"count": 0.0, "expected_bps": 0.0, "observed_bps": 0.0, "drift_bps": 0.0})
+        lslot["count"] += 1
+        lslot["expected_bps"] += expected_bps
+        lslot["observed_bps"] += observed_bps
+        lslot["drift_bps"] += drift
+
+    payload = {
+        "expected_vs_observed_fill_slippage_drift_bps": float(total_observed - total_expected),
+        "by_regime": [{"regime": key, **vals} for key, vals in sorted(by_regime.items())],
+        "by_liquidity_bucket": [{"liquidity_bucket": key, **vals} for key, vals in sorted(by_liquidity.items())],
+        "calibration": dict(slippage_calibration_selection or {}),
+    }
+    (run_dir / "slippage_decomposition.json").write_text(json.dumps(payload, indent=2))
+
+
+def _write_suite_artifact_bundle(
+    *,
+    run_dir: Path,
+    suite_key: str,
+    suite_composition: dict[str, Any],
+    governance_metadata: dict[str, Any],
+    stress_controls: dict[str, Any],
+) -> None:
+    metrics = json.loads((run_dir / "metrics.json").read_text()) if (run_dir / "metrics.json").exists() else []
+    stress = json.loads((run_dir / "stress_scenarios.json").read_text()) if (run_dir / "stress_scenarios.json").exists() else {}
+    manifest = json.loads((run_dir / "manifest.json").read_text()) if (run_dir / "manifest.json").exists() else {}
+    governance = manifest.get("governance", {}) if isinstance(manifest, dict) else {}
+    slippage_diag = json.loads((run_dir / "slippage_decomposition.json").read_text()) if (run_dir / "slippage_decomposition.json").exists() else {}
+    bundle = {
+        "suite": str(suite_key or "custom"),
+        "composition": dict(suite_composition or {}),
+        "execution_stack": (manifest.get("parameters", {}) if isinstance(manifest, dict) else {}).get("execution_model", ""),
+        "slippage_calibration_source": (manifest.get("parameters", {}) if isinstance(manifest, dict) else {}).get("execution_model_calibration", {}).get("source", "config"),
+        "fee_borrow_assumptions": {
+            "costs_bps": (manifest.get("parameters", {}) if isinstance(manifest, dict) else {}).get("costs_bps", 0.0),
+            "carry_model": (manifest.get("parameters", {}) if isinstance(manifest, dict) else {}).get("carry_model", ""),
+        },
+        "walk_forward_cpcv": {
+            "cv_scheme": (manifest.get("parameters", {}) if isinstance(manifest, dict) else {}).get("wf_cv_scheme", "walk_forward"),
+        },
+        "scenario_packs": (manifest.get("parameters", {}) if isinstance(manifest, dict) else {}).get("scenario_packs", []),
+        "governance_gates": governance.get("gate_checks", {}),
+        "governance_thresholds": governance.get("gate_thresholds", {}),
+        "calibration_diagnostics": slippage_diag.get("calibration", {}),
+        "stress_outcomes": stress,
+        "metrics": metrics,
+        "ui_inputs": {
+            "governance_metadata": dict(governance_metadata or {}),
+            "stress_controls": dict(stress_controls or {}),
+        },
+    }
+    (run_dir / f"suite_bundle_{suite_key or 'custom'}.json").write_text(json.dumps(bundle, indent=2))
 
 def _write_capacity_frontier_artifacts(*, run_dir: Path, robustness_report: dict[str, Any]) -> None:
     capacity = robustness_report.get("capacity_diagnostics", {}) if isinstance(robustness_report, dict) else {}
