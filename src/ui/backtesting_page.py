@@ -25,7 +25,7 @@ from backtesting.regime_backtest_adapter import (
     load_regime_backtest_contract,
 )
 from backtesting.scenario_toolkit import list_scenario_pack_templates
-from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PRESETS, DEFAULT_BACKTEST_SETTINGS
+from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PRESETS, BACKTEST_TEST_SUITE_PRESETS, DEFAULT_BACKTEST_SETTINGS
 from ui.backtesting_insights import (
     build_guardrails,
     build_scenario_comparison,
@@ -175,6 +175,11 @@ class BacktestingPage(ttk.Frame):
             display = f"{preset_cfg.get('label', preset_key)} ({preset_key})"
             self._preset_display_to_key[display] = preset_key
         self._preset_key_to_display = {value: key for key, value in self._preset_display_to_key.items()}
+        self._suite_display_to_key = {"Custom": "custom"}
+        for suite_key, suite_cfg in BACKTEST_TEST_SUITE_PRESETS.items():
+            suite_display = f"{suite_cfg.get('label', suite_key)} ({suite_key})"
+            self._suite_display_to_key[suite_display] = suite_key
+        self._suite_key_to_display = {value: key for key, value in self._suite_display_to_key.items()}
 
         workflow_frame = ttk.LabelFrame(run_setup_tab, text="Workflow Mode & Presets")
         workflow_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 8))
@@ -208,7 +213,18 @@ class BacktestingPage(ttk.Frame):
             pady=(0, 6),
         )
 
-        ttk.Label(workflow_frame, text="Backtest Type").grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(workflow_frame, text="Test Suite").grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        self.test_suite_var = tk.StringVar(value="Custom")
+        self.test_suite_combo = ttk.Combobox(
+            workflow_frame,
+            textvariable=self.test_suite_var,
+            state="readonly",
+            values=list(self._suite_display_to_key.keys()),
+        )
+        self.test_suite_combo.grid(row=3, column=1, sticky="ew", padx=8, pady=6)
+        self.test_suite_combo.bind("<<ComboboxSelected>>", self._on_test_suite_selected)
+
+        ttk.Label(workflow_frame, text="Backtest Type").grid(row=4, column=0, sticky="w", padx=8, pady=6)
         self.backtest_type_var = tk.StringVar(value="Classic Strategy")
         self.backtest_type_combo = ttk.Combobox(
             workflow_frame,
@@ -216,14 +232,14 @@ class BacktestingPage(ttk.Frame):
             state="readonly",
             values=list(BACKTEST_WORKFLOW_TYPE_MAP.keys()),
         )
-        self.backtest_type_combo.grid(row=3, column=1, sticky="ew", padx=8, pady=6)
+        self.backtest_type_combo.grid(row=4, column=1, sticky="ew", padx=8, pady=6)
 
         self.start_date_var = tk.StringVar()
         self.end_date_var = tk.StringVar()
         self.starting_capital_var = tk.StringVar()
 
         regime_replay_frame = ttk.LabelFrame(workflow_frame, text="Regime Replay (required)")
-        regime_replay_frame.grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 8))
+        regime_replay_frame.grid(row=5, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 8))
         regime_replay_frame.columnconfigure(1, weight=1)
 
         ttk.Label(regime_replay_frame, text="Trained regime artifact").grid(row=0, column=0, sticky="w", padx=6, pady=4)
@@ -1232,6 +1248,8 @@ class BacktestingPage(ttk.Frame):
         self.attribution_notebook.add(slippage_tab, text="Slippage Attribution")
         self.cost_canvas = tk.Canvas(slippage_tab, height=180, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
         self.cost_canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.slippage_summary_var = tk.StringVar(value="Slippage decomposition card will populate after selecting a run.")
+        ttk.Label(slippage_tab, textvariable=self.slippage_summary_var, justify="left", foreground="#7a4f00", wraplength=760).grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 6))
 
         regime_tab = ttk.Frame(self.attribution_notebook)
         regime_tab.columnconfigure(0, weight=1)
@@ -2248,6 +2266,20 @@ class BacktestingPage(ttk.Frame):
             ("total", float(metrics.get("cost_total", 0.0))),
         ]
         self._draw_bar_canvas(self.cost_canvas, cost_rows, color="#ff7f0e")
+        slippage_payload = self._read_json(run_dir / "slippage_decomposition.json")
+        if isinstance(slippage_payload, dict):
+            drift = float(slippage_payload.get("expected_vs_observed_fill_slippage_drift_bps", 0.0) or 0.0)
+            regime_rows = slippage_payload.get("by_regime", []) if isinstance(slippage_payload.get("by_regime"), list) else []
+            liquidity_rows = slippage_payload.get("by_liquidity_bucket", []) if isinstance(slippage_payload.get("by_liquidity_bucket"), list) else []
+            top_regime = regime_rows[0] if regime_rows else {}
+            top_bucket = liquidity_rows[0] if liquidity_rows else {}
+            self.slippage_summary_var.set(
+                f"Slippage drift card → total drift: {drift:.2f} bps | regimes: {len(regime_rows)} | liquidity buckets: {len(liquidity_rows)} | "
+                f"sample regime={top_regime.get('regime', 'n/a')} drift={float(top_regime.get('drift_bps', 0.0) or 0.0):.2f} bps | "
+                f"sample bucket={top_bucket.get('liquidity_bucket', 'n/a')} drift={float(top_bucket.get('drift_bps', 0.0) or 0.0):.2f} bps"
+            )
+        else:
+            self.slippage_summary_var.set("Slippage decomposition card unavailable for this run.")
 
         turnover_rows = self._load_rows(run_dir, "turnover_by_symbol")
         aggregate: dict[str, float] = {}
@@ -2726,7 +2758,8 @@ class BacktestingPage(ttk.Frame):
             self.regime_provenance_var.set("No trained regime loaded.")
             self.regime_diff_var.set("")
             self._regime_immutable_values = {}
-            self.regime_immutable_reason_var.set("Immutable fields: select a trained regime to inspect replay constraints.")
+            if hasattr(self, "regime_immutable_reason_var"):
+                self.regime_immutable_reason_var.set("Immutable fields: select a trained regime to inspect replay constraints.")
             self._apply_regime_lock_state()
             return
         option = self._selected_regime_option()
@@ -2745,7 +2778,8 @@ class BacktestingPage(ttk.Frame):
             self.regime_provenance_var.set("No trained regime loaded.")
             self.regime_diff_var.set("")
             self._regime_immutable_values = {}
-            self.regime_immutable_reason_var.set("Immutable fields: select a trained regime to inspect replay constraints.")
+            if hasattr(self, "regime_immutable_reason_var"):
+                self.regime_immutable_reason_var.set("Immutable fields: select a trained regime to inspect replay constraints.")
             self._apply_regime_lock_state()
             return
         self._active_regime_contract = contract
@@ -2809,12 +2843,17 @@ class BacktestingPage(ttk.Frame):
         }
 
     def _regime_immutable_field_var_map(self) -> dict[str, tk.Variable]:
-        return {
-            "start_date": self.start_date_var,
-            "end_date": self.end_date_var,
-            "starting_capital": self.starting_capital_var,
-            "selected_trained_regime": self.trained_regime_var,
-        }
+        mapping: dict[str, tk.Variable] = {}
+        for key, attr in (
+            ("start_date", "start_date_var"),
+            ("end_date", "end_date_var"),
+            ("starting_capital", "starting_capital_var"),
+            ("selected_trained_regime", "trained_regime_var"),
+        ):
+            var = getattr(self, attr, None)
+            if var is not None:
+                mapping[key] = var
+        return mapping
 
     def _bind_regime_override_watchers(self) -> None:
         for var in self._regime_override_field_var_map().values():
@@ -2976,6 +3015,21 @@ class BacktestingPage(ttk.Frame):
             self.controller.state.backtest_settings["selected_preset"] = preset_key
             self.controller.persist_state()
 
+    def _on_test_suite_selected(self, _event: object | None = None) -> None:
+        suite_display = self.test_suite_var.get().strip()
+        suite_key = self._suite_display_to_key.get(suite_display, "custom")
+        if suite_key == "custom":
+            return
+        suite = BACKTEST_TEST_SUITE_PRESETS.get(suite_key)
+        if not suite:
+            return
+        suite_settings = suite.get("settings", {})
+        if isinstance(suite_settings, dict):
+            self._apply_settings(suite_settings)
+            self.test_suite_var.set(self._suite_key_to_display.get(suite_key, "Custom"))
+            self.controller.state.backtest_settings["selected_test_suite"] = suite_key
+            self.controller.persist_state()
+
     def save_template(self) -> None:
         template_name = self.template_var.get().strip()
         if not template_name:
@@ -3024,6 +3078,11 @@ class BacktestingPage(ttk.Frame):
         if selected_preset not in {"custom", *BACKTEST_STRATEGY_PRESETS.keys()}:
             selected_preset = "custom"
         self.preset_var.set(self._preset_key_to_display.get(selected_preset, "Custom"))
+        selected_test_suite = str(settings.get("selected_test_suite", "custom"))
+        if selected_test_suite not in {"custom", *BACKTEST_TEST_SUITE_PRESETS.keys()}:
+            selected_test_suite = "custom"
+        self.test_suite_var.set(self._suite_key_to_display.get(selected_test_suite, "Custom"))
+
         selected_backtest_type = str(settings.get("selected_backtest_type", "classic_strategy")).strip().lower().replace(" ", "_")
         if selected_backtest_type not in set(BACKTEST_WORKFLOW_TYPES):
             selected_backtest_type = "classic_strategy"
@@ -3384,6 +3443,7 @@ class BacktestingPage(ttk.Frame):
             "ui_mode": self.ui_mode_var.get().strip() or "basic",
             "show_advanced_controls": bool(self.show_advanced_controls_var.get()),
             "selected_preset": self._preset_display_to_key.get(self.preset_var.get().strip(), "custom"),
+            "selected_test_suite": self._suite_display_to_key.get(self.test_suite_var.get().strip(), "custom"),
             "selected_template": self.template_var.get().strip(),
             "selected_backtest_type": self._normalized_backtest_type(),
             "selected_trained_regime": self.trained_regime_var.get().strip(),
@@ -3489,7 +3549,12 @@ class BacktestingPage(ttk.Frame):
             "latency_ms": int(parse_float(self.execution_latency_ms_var.get()) or 0),
             "drift_bps_per_bar": float(parse_float(self.execution_impact_bps_var.get()) or 1.0),
         }
+        selected_suite_key = self._suite_display_to_key.get(self.test_suite_var.get().strip(), "custom")
+        suite_config = BACKTEST_TEST_SUITE_PRESETS.get(selected_suite_key, {}) if selected_suite_key != "custom" else {}
+        suite_composition = dict(suite_config.get("composition", {})) if isinstance(suite_config, dict) else {}
         selected_scenario_packs = self._selected_listbox_values(self.scenario_pack_listbox)
+        if not selected_scenario_packs and isinstance(suite_composition.get("scenario_packs"), list):
+            selected_scenario_packs = [str(item) for item in suite_composition.get("scenario_packs", [])]
         selected_profile = self.selected_stress_profile_var.get().strip() or "Base"
         stress_controls = {
             "enable_historical_replay_regimes": bool(self.stress_enable_historical_replay_var.get()),
@@ -3501,6 +3566,8 @@ class BacktestingPage(ttk.Frame):
             "overlay_spread_multiplier": float(parse_float(self.stress_overlay_spread_multiplier_var.get()) or 2.5),
             "overlay_liquidity_multiplier": float(parse_float(self.stress_overlay_liquidity_multiplier_var.get()) or 0.4),
             "selected_profile": selected_profile,
+            "selected_test_suite": selected_suite_key,
+            "suite_composition": suite_composition,
             "run_mode": run_mode,
         }
         self.run_selection_summary_var.set(
@@ -3508,6 +3575,8 @@ class BacktestingPage(ttk.Frame):
             + run_mode
             + ", stress profile: "
             + selected_profile
+            + ", suite: "
+            + selected_suite_key
             + ", scenario packs: "
             + (", ".join(selected_scenario_packs) if selected_scenario_packs else "none")
         )
@@ -3540,6 +3609,8 @@ class BacktestingPage(ttk.Frame):
             "comments": list(self._governance_comments),
             "review_actions": list(self._governance_review_actions),
             "decision_log": list(self._governance_decision_log),
+            "selected_test_suite": selected_suite_key,
+            "suite_composition": suite_composition,
         }
 
         decision_owner = self.gov_owner_var.get().strip() or "research_lab_ui"
@@ -3583,6 +3654,11 @@ class BacktestingPage(ttk.Frame):
                 cache_root,
                 timeframe,
                 regime_contract,
+                governance_payload,
+                stress_controls,
+                selected_scenario_packs,
+                selected_suite_key,
+                suite_composition,
             )
             status_line = f"Running trained regime policy '{regime_contract.regime_name}' ({run_mode})...\n"
         elif strategy == "momentum":
@@ -4303,6 +4379,11 @@ class BacktestingPage(ttk.Frame):
         cache_root: Path,
         timeframe: str,
         contract: RegimeBacktestContract,
+        governance_payload: dict[str, object],
+        stress_controls: dict[str, object],
+        scenario_packs: list[str],
+        selected_test_suite: str,
+        suite_composition: dict[str, object],
     ) -> None:
         try:
             output_text = run_trained_regime_backtest(
@@ -4312,6 +4393,11 @@ class BacktestingPage(ttk.Frame):
                 cache_root=cache_root,
                 timeframe=timeframe,
                 regime_contract=contract,
+                governance_metadata=dict(governance_payload),
+                stress_controls=dict(stress_controls),
+                scenario_packs=list(scenario_packs),
+                selected_test_suite=str(selected_test_suite),
+                suite_composition=dict(suite_composition),
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
