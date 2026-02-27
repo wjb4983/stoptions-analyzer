@@ -113,6 +113,7 @@ class BacktestingPage(ttk.Frame):
         self._regime_loading_defaults = False
         self._regime_locked_fields = True
         self._regime_loaded_values: dict[str, str] = {}
+        self._regime_immutable_values: dict[str, str] = {}
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -217,20 +218,71 @@ class BacktestingPage(ttk.Frame):
         )
         self.backtest_type_combo.grid(row=3, column=1, sticky="ew", padx=8, pady=6)
 
-        ttk.Label(workflow_frame, text="Trained Regime").grid(row=4, column=0, sticky="w", padx=8, pady=6)
+        self.start_date_var = tk.StringVar()
+        self.end_date_var = tk.StringVar()
+        self.starting_capital_var = tk.StringVar()
+
+        regime_replay_frame = ttk.LabelFrame(workflow_frame, text="Regime Replay (required)")
+        regime_replay_frame.grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 8))
+        regime_replay_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(regime_replay_frame, text="Trained regime artifact").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         self.trained_regime_var = tk.StringVar(value="")
-        self.trained_regime_combo = ttk.Combobox(workflow_frame, textvariable=self.trained_regime_var, state="readonly", values=[])
-        self.trained_regime_combo.grid(row=4, column=1, sticky="ew", padx=8, pady=6)
+        self.trained_regime_combo = ttk.Combobox(regime_replay_frame, textvariable=self.trained_regime_var, state="readonly", values=[])
+        self.trained_regime_combo.grid(row=0, column=1, sticky="ew", padx=6, pady=4)
         self.trained_regime_combo.bind("<<ComboboxSelected>>", self._on_trained_regime_selected)
 
-        lock_row = ttk.Frame(workflow_frame)
-        lock_row.grid(row=5, column=1, sticky="w", padx=8, pady=(0, 6))
+        ttk.Label(regime_replay_frame, text="Replay date range").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        date_row = ttk.Frame(regime_replay_frame)
+        date_row.grid(row=1, column=1, sticky="w", padx=6, pady=4)
+        ttk.Entry(date_row, textvariable=self.start_date_var, width=14).pack(side="left")
+        ttk.Label(date_row, text=" → ").pack(side="left")
+        ttk.Entry(date_row, textvariable=self.end_date_var, width=14).pack(side="left")
+
+        ttk.Label(regime_replay_frame, text="Ticker universe source").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        self.regime_ticker_source_var = tk.StringVar(value="Ticker Entry page (0 symbols)")
+        ttk.Label(regime_replay_frame, textvariable=self.regime_ticker_source_var, justify="left").grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(regime_replay_frame, text="Starting capital").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(regime_replay_frame, textvariable=self.starting_capital_var).grid(row=3, column=1, sticky="ew", padx=6, pady=4)
+
+        quick_actions = ttk.Frame(regime_replay_frame)
+        quick_actions.grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(2, 4))
+        ttk.Button(quick_actions, text="Run exact training-window replay", command=self._run_exact_training_window_replay).pack(side="left", padx=(0, 6))
+        ttk.Button(quick_actions, text="Run full-history replay", command=self._run_full_history_replay).pack(side="left")
+
+        ttk.Button(regime_replay_frame, text="Run regime replay", command=self.run_full_chain).grid(row=5, column=1, sticky="e", padx=6, pady=(4, 6))
+
+        self.regime_overrides_expanded_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            regime_replay_frame,
+            text="Advanced overrides",
+            variable=self.regime_overrides_expanded_var,
+            command=self._toggle_regime_advanced_overrides,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
+
+        self.regime_advanced_overrides_frame = ttk.Frame(regime_replay_frame)
+        self.regime_advanced_overrides_frame.columnconfigure(0, weight=1)
+        self.regime_immutable_reason_var = tk.StringVar(value="Immutable fields: select a trained regime to inspect replay constraints.")
+        ttk.Label(
+            self.regime_advanced_overrides_frame,
+            textvariable=self.regime_immutable_reason_var,
+            foreground="#225577",
+            wraplength=620,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=2, pady=(0, 2))
+
+        lock_row = ttk.Frame(self.regime_advanced_overrides_frame)
+        lock_row.grid(row=1, column=0, sticky="w", pady=(0, 4))
         self.regime_lock_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(lock_row, text="Lock loaded fields", variable=self.regime_lock_var, command=self._on_regime_lock_toggled).pack(side="left")
+        ttk.Checkbutton(lock_row, text="Lock override fields", variable=self.regime_lock_var, command=self._on_regime_lock_toggled).pack(side="left")
+        ttk.Button(lock_row, text="Compatibility troubleshooting", command=self._show_regime_compatibility_details).pack(side="left", padx=(8, 0))
+
         self.regime_provenance_var = tk.StringVar(value="No trained regime loaded.")
         self.regime_diff_var = tk.StringVar(value="")
-        ttk.Label(workflow_frame, textvariable=self.regime_provenance_var, justify="left", foreground="#225577").grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
-        ttk.Label(workflow_frame, textvariable=self.regime_diff_var, justify="left", foreground="#995500", wraplength=640).grid(row=7, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
+        ttk.Label(self.regime_advanced_overrides_frame, textvariable=self.regime_provenance_var, justify="left", foreground="#225577").grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 2))
+        ttk.Label(self.regime_advanced_overrides_frame, textvariable=self.regime_diff_var, justify="left", foreground="#995500", wraplength=640).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self._toggle_regime_advanced_overrides()
 
         strategy_frame = ttk.LabelFrame(run_setup_tab, text="Strategy")
         strategy_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=10)
@@ -367,7 +419,6 @@ class BacktestingPage(ttk.Frame):
 
         row += 1
         ttk.Label(strategy_frame, text="Starting Capital").grid(row=row, column=0, sticky="w", padx=8, pady=6)
-        self.starting_capital_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.starting_capital_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
@@ -757,12 +808,10 @@ class BacktestingPage(ttk.Frame):
 
         row += 1
         ttk.Label(strategy_frame, text="Start Date (YYYY-MM-DD)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
-        self.start_date_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.start_date_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
         ttk.Label(strategy_frame, text="End Date (YYYY-MM-DD)").grid(row=row, column=0, sticky="w", padx=8, pady=6)
-        self.end_date_var = tk.StringVar()
         ttk.Entry(strategy_frame, textvariable=self.end_date_var).grid(row=row, column=1, sticky="ew", padx=8, pady=6)
 
         row += 1
@@ -2535,6 +2584,7 @@ class BacktestingPage(ttk.Frame):
     def _update_validation_hint(self) -> bool:
         messages: list[str] = []
         disable_run = False
+        self._update_ticker_universe_source()
         timeframe = self.timeframe_var.get().strip() or "1m"
         start_date = parse_date(self.start_date_var.get())
         end_date = parse_date(self.end_date_var.get())
@@ -2574,6 +2624,59 @@ class BacktestingPage(ttk.Frame):
         self.validation_hint_var.set("\n".join(messages))
         self._set_run_controls_state("disabled" if disable_run else "normal")
         return disable_run
+
+    def _toggle_regime_advanced_overrides(self) -> None:
+        if self.regime_overrides_expanded_var.get():
+            self.regime_advanced_overrides_frame.grid(row=7, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 4))
+        else:
+            self.regime_advanced_overrides_frame.grid_remove()
+
+    def _update_ticker_universe_source(self) -> None:
+        tickers = [str(item).strip().upper() for item in self.controller.state.tickers if str(item).strip()]
+        if not tickers:
+            self.regime_ticker_source_var.set("Ticker Entry page (0 symbols loaded)")
+            return
+        preview = ", ".join(tickers[:5])
+        suffix = "" if len(tickers) <= 5 else ", …"
+        self.regime_ticker_source_var.set(f"Ticker Entry page ({len(tickers)} symbols): {preview}{suffix}")
+
+    def _run_exact_training_window_replay(self) -> None:
+        if self._active_regime_contract is None:
+            messagebox.showinfo("Missing trained regime", "Select a trained regime artifact before using quick actions.")
+            return
+        self.backtest_type_var.set("Trained Regime")
+        start_date = str(self._active_regime_contract.defaults.get("start_date", "")).strip()
+        end_date = str(self._active_regime_contract.defaults.get("end_date", "")).strip()
+        if start_date and end_date:
+            self.start_date_var.set(start_date)
+            self.end_date_var.set(end_date)
+        self.run_full_chain()
+
+    def _run_full_history_replay(self) -> None:
+        if self._active_regime_contract is None:
+            messagebox.showinfo("Missing trained regime", "Select a trained regime artifact before using quick actions.")
+            return
+        self.backtest_type_var.set("Trained Regime")
+        self.start_date_var.set("")
+        self.end_date_var.set("")
+        self.run_full_chain()
+
+    def _show_regime_compatibility_details(self) -> None:
+        contract = self._active_regime_contract
+        if contract is None:
+            messagebox.showinfo(
+                "Compatibility troubleshooting",
+                "Load a trained regime artifact to inspect replay compatibility diagnostics.",
+            )
+            return
+        details = dict(contract.compatibility_metadata or {})
+        details_text = json.dumps(details, indent=2, sort_keys=True) if details else "No compatibility metadata was attached to this artifact."
+        messagebox.showinfo(
+            "Compatibility troubleshooting",
+            f"Reproducibility: {contract.reproducibility_status}\n"
+            f"Manifest: {contract.manifest_path}\n\n"
+            f"Diagnostics:\n{details_text}",
+        )
 
     def _refresh_template_choices(self) -> None:
         names = sorted(self.controller.state.backtest_templates.keys())
@@ -2622,6 +2725,8 @@ class BacktestingPage(ttk.Frame):
             self._regime_loaded_values = {}
             self.regime_provenance_var.set("No trained regime loaded.")
             self.regime_diff_var.set("")
+            self._regime_immutable_values = {}
+            self.regime_immutable_reason_var.set("Immutable fields: select a trained regime to inspect replay constraints.")
             self._apply_regime_lock_state()
             return
         option = self._selected_regime_option()
@@ -2639,13 +2744,15 @@ class BacktestingPage(ttk.Frame):
             self._regime_loaded_values = {}
             self.regime_provenance_var.set("No trained regime loaded.")
             self.regime_diff_var.set("")
+            self._regime_immutable_values = {}
+            self.regime_immutable_reason_var.set("Immutable fields: select a trained regime to inspect replay constraints.")
             self._apply_regime_lock_state()
             return
         self._active_regime_contract = contract
         self._apply_regime_contract_defaults(contract)
 
     def _apply_regime_contract_defaults(self, contract: RegimeBacktestContract) -> None:
-        var_map = self._regime_field_var_map()
+        var_map = self._regime_override_field_var_map()
         self._regime_loading_defaults = True
         try:
             for key, value in contract.defaults.items():
@@ -2658,12 +2765,18 @@ class BacktestingPage(ttk.Frame):
         finally:
             self._regime_loading_defaults = False
 
+        if str(contract.defaults.get("start_date", "")).strip():
+            self.start_date_var.set(str(contract.defaults.get("start_date", "")).strip())
+        if str(contract.defaults.get("end_date", "")).strip():
+            self.end_date_var.set(str(contract.defaults.get("end_date", "")).strip())
+
         self._regime_loaded_values = {
             key: str(var.get())
             for key, var in var_map.items()
             if key in contract.defaults
         }
         self._regime_loaded_values["selected_scenario_packs"] = ",".join(selected_packs)
+        self._regime_immutable_values = {key: str(var.get()) for key, var in self._regime_immutable_field_var_map().items()}
 
         status_map = {
             "exact_replay_compatible": "Exact Replay Compatible",
@@ -2679,7 +2792,7 @@ class BacktestingPage(ttk.Frame):
         self._apply_regime_lock_state()
         self._refresh_regime_diff_indicator()
 
-    def _regime_field_var_map(self) -> dict[str, tk.Variable]:
+    def _regime_override_field_var_map(self) -> dict[str, tk.Variable]:
         return {
             "strategy": self.strategy_var,
             "lookback_days": self.lookback_days_var,
@@ -2695,12 +2808,20 @@ class BacktestingPage(ttk.Frame):
             "stress_enable_historical_replay_regimes": self.stress_enable_historical_replay_var,
         }
 
+    def _regime_immutable_field_var_map(self) -> dict[str, tk.Variable]:
+        return {
+            "start_date": self.start_date_var,
+            "end_date": self.end_date_var,
+            "starting_capital": self.starting_capital_var,
+            "selected_trained_regime": self.trained_regime_var,
+        }
+
     def _bind_regime_override_watchers(self) -> None:
-        for var in self._regime_field_var_map().values():
+        for var in self._regime_override_field_var_map().values():
             var.trace_add("write", lambda *_args: self._refresh_regime_diff_indicator())
 
     def _current_regime_field_snapshot(self) -> dict[str, str]:
-        snapshot = {key: str(var.get()) for key, var in self._regime_field_var_map().items()}
+        snapshot = {key: str(var.get()) for key, var in self._regime_override_field_var_map().items()}
         snapshot["selected_scenario_packs"] = ",".join(self._selected_listbox_values(self.scenario_pack_listbox))
         return snapshot
 
@@ -2730,7 +2851,7 @@ class BacktestingPage(ttk.Frame):
                     packs = [item.strip() for item in expected.split(",") if item.strip()]
                     self._set_listbox_selection(self.scenario_pack_listbox, packs, valid_options=self._scenario_pack_options)
                     continue
-                var = self._regime_field_var_map().get(key)
+                var = self._regime_override_field_var_map().get(key)
                 if var is not None and str(var.get()) != expected:
                     var.set(expected)
         finally:
@@ -2761,6 +2882,13 @@ class BacktestingPage(ttk.Frame):
         ):
             try:
                 widget.configure(state=state)
+            except tk.TclError:
+                pass
+        for widget in (
+            self.trained_regime_combo,
+        ):
+            try:
+                widget.configure(state="readonly")
             except tk.TclError:
                 pass
         if not enabled:
