@@ -28,6 +28,10 @@ def _training_manifest(run_id: str = "run-1") -> dict:
             "regime_name": "Risk On",
             "model_choice": "auto_model_search",
             "training_window": {"lookback_days": 144, "retrain_frequency_days": 8},
+            "legs": [
+                {"name": "Trend", "controls": {"feature_columns": ["ret_5", "vol_20"]}},
+                {"name": "Carry", "controls": {"feature_columns": ["carry_signal"]}},
+            ],
             "risk_limits": {
                 "max_gross_exposure": 1.25,
                 "max_net_exposure": 0.45,
@@ -40,6 +44,13 @@ def _training_manifest(run_id: str = "run-1") -> dict:
             "training_data_settings": {
                 "scenario_settings": [{"name": "panic_crash"}, {"name": "bull_low_vol"}],
             },
+        },
+        "metadata": {"champion_by_leg": {"Trend": "meta_label_classifier", "Carry": "ppo_regime_policy"}},
+        "artifact_paths": {
+            "trend_model_weights": "artifacts/trend/model.pkl",
+            "trend_calibration_object": "artifacts/trend/calibration.json",
+            "carry_model_weights": "artifacts/carry/model.pkl",
+            "carry_calibration_object": "artifacts/carry/calibration.json"
         },
     }
 
@@ -86,6 +97,10 @@ def test_contract_hydration_maps_expected_defaults(tmp_path: Path) -> None:
     assert contract.defaults["portfolio_max_gross_exposure"] == "1.25"
     assert contract.defaults["selected_scenario_packs"] == "panic_crash,bull_low_vol"
     assert contract.defaults["hydration_schema_version"] == "1.1.0"
+    assert contract.execution_artifacts["champion_model_ids"]["Trend"] == "meta_label_classifier"
+    assert contract.execution_artifacts["model_paths"]["trend"] == "artifacts/trend/model.pkl"
+    assert contract.execution_artifacts["calibration_paths"]["carry"] == "artifacts/carry/calibration.json"
+    assert contract.execution_artifacts["feature_expectations"]["Trend"] == ["ret_5", "vol_20"]
 
 
 def test_invalid_or_missing_bundle_manifest_raises_actionable_error(tmp_path: Path) -> None:

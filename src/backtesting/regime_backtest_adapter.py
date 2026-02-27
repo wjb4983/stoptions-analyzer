@@ -30,6 +30,7 @@ class RegimeBacktestContract:
     source: str
     manifest_path: str
     defaults: dict[str, object]
+    execution_artifacts: dict[str, object]
 
 
 def discover_regime_backtest_options(
@@ -126,13 +127,62 @@ def load_regime_backtest_contract(option: RegimeBacktestOption) -> RegimeBacktes
     }
     defaults["hydration_schema_version"] = BACKTEST_HYDRATION_PAYLOAD_CONTRACT.current_version
     regime_name = str(request.get("regime_name", training_payload.get("run_id", option.option_id))).strip() or option.option_id
+    execution_artifacts = _extract_execution_artifacts(training_payload)
     return RegimeBacktestContract(
         option_id=option.option_id,
         regime_name=regime_name,
         source=option.source,
         manifest_path=option.manifest_path,
         defaults=defaults,
+        execution_artifacts=execution_artifacts,
     )
+
+
+def _extract_execution_artifacts(training_payload: dict[str, Any]) -> dict[str, object]:
+    metadata = training_payload.get("metadata", {}) if isinstance(training_payload.get("metadata"), dict) else {}
+    artifact_paths = training_payload.get("artifact_paths", {}) if isinstance(training_payload.get("artifact_paths"), dict) else {}
+    request = training_payload.get("request", {}) if isinstance(training_payload.get("request"), dict) else {}
+    legs = request.get("legs", []) if isinstance(request.get("legs"), list) else []
+
+    champion_by_leg = {
+        str(leg_name): str(model_id)
+        for leg_name, model_id in (metadata.get("champion_by_leg", {}) or {}).items()
+        if str(leg_name).strip() and str(model_id).strip()
+    }
+
+    feature_expectations: dict[str, list[str]] = {}
+    for raw_leg in legs:
+        if not isinstance(raw_leg, dict):
+            continue
+        leg_name = str(raw_leg.get("name", "")).strip()
+        if not leg_name:
+            continue
+        controls = raw_leg.get("controls", {}) if isinstance(raw_leg.get("controls"), dict) else {}
+        feature_columns = controls.get("feature_columns")
+        if isinstance(feature_columns, list):
+            cleaned = [str(item).strip() for item in feature_columns if str(item).strip()]
+            if cleaned:
+                feature_expectations[leg_name] = cleaned
+
+    model_paths = {
+        key.removesuffix("_model_weights"): str(path)
+        for key, path in artifact_paths.items()
+        if isinstance(key, str) and key.endswith("_model_weights") and str(path).strip()
+    }
+    calibration_paths = {
+        key.removesuffix("_calibration_object"): str(path)
+        for key, path in artifact_paths.items()
+        if isinstance(key, str) and key.endswith("_calibration_object") and str(path).strip()
+    }
+
+    return {
+        "run_id": str(training_payload.get("run_id", "")).strip(),
+        "manifest_schema_version": str(training_payload.get("manifest_schema_version", "")).strip(),
+        "champion_model_ids": champion_by_leg,
+        "model_paths": model_paths,
+        "calibration_paths": calibration_paths,
+        "feature_expectations": feature_expectations,
+    }
 
 
 def _read_manifest_payload(manifest_path: Path, *, source: str) -> dict[str, Any]:

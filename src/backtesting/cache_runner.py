@@ -94,6 +94,7 @@ from backtesting.experiment_registry import append_experiment_entry
 from backtesting.monitoring import evaluate_drift_monitoring
 from backtesting.attribution import write_attribution_artifacts
 from backtesting.scenario_toolkit import list_scenario_pack_templates, resolve_scenario_pack_templates
+from backtesting.regime_backtest_adapter import RegimeBacktestContract, RegimeBacktestOption, load_regime_backtest_contract
 
 
 LOGGER = logging.getLogger(__name__)
@@ -310,6 +311,65 @@ def run_backtest_cache(
     output_path.write_text("\n".join(lines))
     return "\n".join(lines) + f"\n\nSaved summary to: {output_path}"
 
+
+
+
+def run_trained_regime_backtest(
+    *,
+    tickers: list[str],
+    start_date: date,
+    end_date: date,
+    cache_root: Path,
+    timeframe: str,
+    regime_contract: RegimeBacktestContract | None = None,
+    regime_manifest_path: str | Path | None = None,
+    regime_source: str | None = None,
+) -> str:
+    contract = regime_contract
+    if contract is None:
+        if regime_manifest_path is None:
+            raise ValueError("Either regime_contract or regime_manifest_path must be provided.")
+        manifest_path = Path(regime_manifest_path)
+        inferred_source = regime_source or ("bundle" if manifest_path.name == "bundle_manifest.json" else "training_run")
+        option = RegimeBacktestOption(
+            option_id=f"direct:{manifest_path.stem}",
+            label=str(manifest_path),
+            source=inferred_source,
+            manifest_path=str(manifest_path),
+        )
+        contract = load_regime_backtest_contract(option)
+
+    defaults = dict(contract.defaults)
+    strategy = str(defaults.get("strategy", "momentum")).strip() or "momentum"
+    lookback_days = int(float(defaults.get("lookback_days", 90) or 90))
+    skip_days = int(float(defaults.get("skip_days", 5) or 5))
+
+    output_text = run_time_series_momentum_backtest(
+        tickers=tickers,
+        start_date=start_date,
+        end_date=end_date,
+        cache_root=cache_root,
+        lookback_days=lookback_days,
+        skip_days=skip_days,
+        costs_bps=5.0,
+        strategy=strategy,
+        timeframe=timeframe,
+        portfolio_max_gross_exposure=float(defaults.get("portfolio_max_gross_exposure", 1.0) or 1.0),
+        portfolio_min_net_exposure=float(defaults.get("portfolio_min_net_exposure", -1.0) or -1.0),
+        portfolio_max_net_exposure=float(defaults.get("portfolio_max_net_exposure", 1.0) or 1.0),
+        portfolio_max_symbol_weight=float(defaults.get("portfolio_max_symbol_weight", 0.25) or 0.25),
+        portfolio_max_sector_weight=float(defaults.get("portfolio_max_sector_weight", 0.60) or 0.60),
+    )
+    artifacts = contract.execution_artifacts
+    return (
+        output_text
+        + "\nRegime contract: " + contract.regime_name
+        + f" ({contract.source})"
+        + "\nManifest: " + contract.manifest_path
+        + "\nChampion model IDs: " + json.dumps(artifacts.get("champion_model_ids", {}), sort_keys=True)
+        + "\nModel paths: " + json.dumps(artifacts.get("model_paths", {}), sort_keys=True)
+        + "\nCalibration paths: " + json.dumps(artifacts.get("calibration_paths", {}), sort_keys=True)
+    )
 
 def run_time_series_momentum_backtest(
     *,

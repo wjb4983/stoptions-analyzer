@@ -14,6 +14,7 @@ from backtesting.cache_runner import (
     run_multi_signal_backtest,
     run_strategy_optimization,
     run_time_series_momentum_backtest,
+    run_trained_regime_backtest,
     run_walk_forward_backtest,
 )
 from backtesting.regime_backtest_adapter import (
@@ -51,6 +52,9 @@ from utils.parsing import normalize_cache_root, parse_date, parse_float
 STRATEGIES = ["momentum", "xsmom"]
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 PORTFOLIO_METHODS = ["equal_weight", "vol_target", "inverse_vol", "capped_optimization", "hrp", "herc"]
+BACKTEST_WORKFLOW_TYPE_MAP = {"Classic Strategy": "classic_strategy", "Trained Regime": "trained_regime"}
+BACKTEST_WORKFLOW_TYPES = tuple(BACKTEST_WORKFLOW_TYPE_MAP.values())
+BACKTEST_WORKFLOW_TYPE_LABELS = {value: key for key, value in BACKTEST_WORKFLOW_TYPE_MAP.items()}
 
 STRESS_PROFILES: dict[str, dict[str, float]] = {
     "Mild": {
@@ -90,7 +94,7 @@ DEFAULT_OPTIMIZER_OVERFITTING_PENALTY = '{}'
 TIMEFRAME_HISTORY_DAYS = {"1m": 14, "5m": 30, "15m": 60, "30m": 120, "1h": 365, "1d": 3650}
 GOVERNANCE_PROMOTION_STATES = ["research", "paper", "shadow", "production"]
 GOVERNANCE_APPROVAL_STATES = ["pending", "in_review", "approved", "rejected", "waived"]
-BACKTEST_SETTINGS_SCHEMA_VERSION = 2
+BACKTEST_SETTINGS_SCHEMA_VERSION = 3
 
 class BacktestingPage(ttk.Frame):
     def __init__(self, parent: ttk.Frame, controller: StoptionsApp) -> None:
@@ -203,20 +207,30 @@ class BacktestingPage(ttk.Frame):
             pady=(0, 6),
         )
 
-        ttk.Label(workflow_frame, text="Trained Regime").grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(workflow_frame, text="Backtest Type").grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        self.backtest_type_var = tk.StringVar(value="Classic Strategy")
+        self.backtest_type_combo = ttk.Combobox(
+            workflow_frame,
+            textvariable=self.backtest_type_var,
+            state="readonly",
+            values=list(BACKTEST_WORKFLOW_TYPE_MAP.keys()),
+        )
+        self.backtest_type_combo.grid(row=3, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(workflow_frame, text="Trained Regime").grid(row=4, column=0, sticky="w", padx=8, pady=6)
         self.trained_regime_var = tk.StringVar(value="")
         self.trained_regime_combo = ttk.Combobox(workflow_frame, textvariable=self.trained_regime_var, state="readonly", values=[])
-        self.trained_regime_combo.grid(row=3, column=1, sticky="ew", padx=8, pady=6)
+        self.trained_regime_combo.grid(row=4, column=1, sticky="ew", padx=8, pady=6)
         self.trained_regime_combo.bind("<<ComboboxSelected>>", self._on_trained_regime_selected)
 
         lock_row = ttk.Frame(workflow_frame)
-        lock_row.grid(row=4, column=1, sticky="w", padx=8, pady=(0, 6))
+        lock_row.grid(row=5, column=1, sticky="w", padx=8, pady=(0, 6))
         self.regime_lock_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(lock_row, text="Lock loaded fields", variable=self.regime_lock_var, command=self._on_regime_lock_toggled).pack(side="left")
         self.regime_provenance_var = tk.StringVar(value="No trained regime loaded.")
         self.regime_diff_var = tk.StringVar(value="")
-        ttk.Label(workflow_frame, textvariable=self.regime_provenance_var, justify="left", foreground="#225577").grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
-        ttk.Label(workflow_frame, textvariable=self.regime_diff_var, justify="left", foreground="#995500", wraplength=640).grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
+        ttk.Label(workflow_frame, textvariable=self.regime_provenance_var, justify="left", foreground="#225577").grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
+        ttk.Label(workflow_frame, textvariable=self.regime_diff_var, justify="left", foreground="#995500", wraplength=640).grid(row=7, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
 
         strategy_frame = ttk.LabelFrame(run_setup_tab, text="Strategy")
         strategy_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=10)
@@ -2577,6 +2591,30 @@ class BacktestingPage(ttk.Frame):
         if selected and selected not in labels:
             self.trained_regime_var.set("(none)")
 
+    def _normalized_backtest_type(self) -> str:
+        selected = self.backtest_type_var.get().strip()
+        if selected in BACKTEST_WORKFLOW_TYPE_MAP:
+            return BACKTEST_WORKFLOW_TYPE_MAP[selected]
+        normalized = selected.lower().replace(" ", "_")
+        if normalized in set(BACKTEST_WORKFLOW_TYPES):
+            return normalized
+        return "classic_strategy"
+
+    def _selected_regime_option(self) -> RegimeBacktestOption | None:
+        label = self.trained_regime_var.get().strip()
+        option = self._regime_option_lookup.get(label)
+        if option is not None:
+            return option
+        selected_manifest = str(self.controller.state.backtest_settings.get("selected_trained_regime_manifest_path", "")).strip()
+        selected_source = str(self.controller.state.backtest_settings.get("selected_trained_regime_source", "")).strip()
+        selected_option_id = str(self.controller.state.backtest_settings.get("selected_trained_regime_option_id", "")).strip()
+        for candidate in self._regime_backtest_options:
+            if selected_option_id and candidate.option_id == selected_option_id:
+                return candidate
+            if selected_manifest and candidate.manifest_path == selected_manifest and (not selected_source or candidate.source == selected_source):
+                return candidate
+        return None
+
     def _on_trained_regime_selected(self, _event: object | None = None) -> None:
         selected = self.trained_regime_var.get().strip()
         if not selected or selected == "(none)":
@@ -2586,7 +2624,7 @@ class BacktestingPage(ttk.Frame):
             self.regime_diff_var.set("")
             self._apply_regime_lock_state()
             return
-        option = self._regime_option_lookup.get(selected)
+        option = self._selected_regime_option()
         if option is None:
             return
         try:
@@ -2743,6 +2781,11 @@ class BacktestingPage(ttk.Frame):
             defaults_to_backfill = (
                 "selected_preset",
                 "selected_template",
+                "selected_backtest_type",
+                "selected_trained_regime",
+                "selected_trained_regime_option_id",
+                "selected_trained_regime_manifest_path",
+                "selected_trained_regime_source",
                 "ui_mode",
                 "show_advanced_controls",
                 "selected_stress_profile",
@@ -2761,6 +2804,13 @@ class BacktestingPage(ttk.Frame):
                     f"Invalid key at $.backtest_settings.selected_preset: unsupported value {selected_preset!r}; using 'custom'."
                 )
                 migrated["selected_preset"] = "custom"
+                changed = True
+            selected_backtest_type = str(migrated.get("selected_backtest_type", "classic_strategy")).strip().lower().replace(" ", "_")
+            if selected_backtest_type not in set(BACKTEST_WORKFLOW_TYPES):
+                warnings.append(
+                    f"Invalid key at $.backtest_settings.selected_backtest_type: unsupported value {selected_backtest_type!r}; using 'classic_strategy'."
+                )
+                migrated["selected_backtest_type"] = "classic_strategy"
                 changed = True
 
         if migrated.get("schema_version") != BACKTEST_SETTINGS_SCHEMA_VERSION:
@@ -2838,9 +2888,28 @@ class BacktestingPage(ttk.Frame):
         if selected_preset not in {"custom", *BACKTEST_STRATEGY_PRESETS.keys()}:
             selected_preset = "custom"
         self.preset_var.set(self._preset_key_to_display.get(selected_preset, "Custom"))
+        selected_backtest_type = str(settings.get("selected_backtest_type", "classic_strategy")).strip().lower().replace(" ", "_")
+        if selected_backtest_type not in set(BACKTEST_WORKFLOW_TYPES):
+            selected_backtest_type = "classic_strategy"
+        self.backtest_type_var.set(BACKTEST_WORKFLOW_TYPE_LABELS.get(selected_backtest_type, "Classic Strategy"))
+
         selected_trained_regime = str(settings.get("selected_trained_regime", "(none)"))
         regime_labels = set(self.trained_regime_combo.cget("values"))
-        self.trained_regime_var.set(selected_trained_regime if selected_trained_regime in regime_labels else "(none)")
+        selected_option_id = str(settings.get("selected_trained_regime_option_id", "")).strip()
+        selected_manifest = str(settings.get("selected_trained_regime_manifest_path", "")).strip()
+        selected_source = str(settings.get("selected_trained_regime_source", "")).strip()
+        if selected_trained_regime in regime_labels:
+            self.trained_regime_var.set(selected_trained_regime)
+        else:
+            recovered = "(none)"
+            for option in self._regime_backtest_options:
+                if selected_option_id and option.option_id == selected_option_id:
+                    recovered = option.label
+                    break
+                if selected_manifest and option.manifest_path == selected_manifest and (not selected_source or option.source == selected_source):
+                    recovered = option.label
+                    break
+            self.trained_regime_var.set(recovered)
 
         self.lookback_days_var.set(str(settings.get("lookback_days", "90")))
         self.skip_days_var.set(str(settings.get("skip_days", "5")))
@@ -3068,6 +3137,7 @@ class BacktestingPage(ttk.Frame):
                 "xsmom_long_only": bool(self.xsmom_long_only_var.get()),
             }
 
+        selected_regime_option = self._selected_regime_option()
         self.controller.state.backtest_settings = {
             "strategy": strategy,
             "strategy_name": "Cross-Sectional Momentum" if strategy == "xsmom" else "Time-Series Momentum",
@@ -3179,7 +3249,11 @@ class BacktestingPage(ttk.Frame):
             "show_advanced_controls": bool(self.show_advanced_controls_var.get()),
             "selected_preset": self._preset_display_to_key.get(self.preset_var.get().strip(), "custom"),
             "selected_template": self.template_var.get().strip(),
+            "selected_backtest_type": self._normalized_backtest_type(),
             "selected_trained_regime": self.trained_regime_var.get().strip(),
+            "selected_trained_regime_option_id": (selected_regime_option.option_id if selected_regime_option else ""),
+            "selected_trained_regime_manifest_path": (selected_regime_option.manifest_path if selected_regime_option else ""),
+            "selected_trained_regime_source": (selected_regime_option.source if selected_regime_option else ""),
             "schema_version": BACKTEST_SETTINGS_SCHEMA_VERSION,
             **xsmom_params,
         }
@@ -3225,6 +3299,11 @@ class BacktestingPage(ttk.Frame):
         timeframe = self.timeframe_var.get().strip() or "1m"
         if timeframe not in TIMEFRAMES:
             messagebox.showinfo("Invalid input", "Please select a valid resolution.")
+            return
+
+        selected_backtest_type = self._normalized_backtest_type()
+        if selected_backtest_type not in set(BACKTEST_WORKFLOW_TYPES):
+            messagebox.showinfo("Invalid input", "Please select a valid backtest type.")
             return
 
         parsed_vol_lookback = parse_float(self.portfolio_vol_lookback_var.get())
@@ -3350,7 +3429,27 @@ class BacktestingPage(ttk.Frame):
         worker_args: tuple[object, ...]
         status_line: str
 
-        if strategy == "momentum":
+        if selected_backtest_type == "trained_regime":
+            regime_option = self._selected_regime_option()
+            if regime_option is None:
+                messagebox.showinfo("Missing trained regime", "Select a trained regime manifest for trained-regime mode.")
+                return
+            try:
+                regime_contract = load_regime_backtest_contract(regime_option)
+            except RegimeBundleCompatibilityError as exc:
+                messagebox.showerror("Regime bundle compatibility error", f"Cannot run selected trained regime.\n\n{exc}")
+                return
+            worker_target = self._run_trained_regime_worker
+            worker_args = (
+                tickers,
+                start_date,
+                end_date,
+                cache_root,
+                timeframe,
+                regime_contract,
+            )
+            status_line = f"Running trained regime policy '{regime_contract.regime_name}' ({run_mode})...\n"
+        elif strategy == "momentum":
             selected_entries = self._selected_signal_names(self.entry_signal_vars)
             selected_exits = self._selected_signal_names(self.exit_signal_vars)
             if not selected_entries:
@@ -3558,6 +3657,18 @@ class BacktestingPage(ttk.Frame):
                 stress_controls,
             )
             status_line = "Running cross-sectional momentum backtest...\n"
+
+        regime_option = self._selected_regime_option()
+        self.controller.state.backtest_settings.update(
+            {
+                "selected_backtest_type": selected_backtest_type,
+                "selected_trained_regime": self.trained_regime_var.get().strip(),
+                "selected_trained_regime_option_id": regime_option.option_id if regime_option else "",
+                "selected_trained_regime_manifest_path": regime_option.manifest_path if regime_option else "",
+                "selected_trained_regime_source": regime_option.source if regime_option else "",
+            }
+        )
+        self.controller.persist_state()
 
         self._set_run_controls_state("disabled")
         self.logs_text.delete("1.0", tk.END)
@@ -4044,6 +4155,28 @@ class BacktestingPage(ttk.Frame):
                 scenario_packs=list(scenario_packs),
             )
             output_text += "\nApplied stress profile: " + str(stress_controls.get("selected_profile", "Base")) + " | Scenario packs: " + (", ".join(scenario_packs) if scenario_packs else "none") + " | Run mode: " + run_mode
+        except Exception as exc:
+            output_text = f"Backtest failed: {exc}"
+        self.after(0, lambda: self._finish_backtest_run(output_text))
+
+    def _run_trained_regime_worker(
+        self,
+        tickers: list[str],
+        start_date: date,
+        end_date: date,
+        cache_root: Path,
+        timeframe: str,
+        contract: RegimeBacktestContract,
+    ) -> None:
+        try:
+            output_text = run_trained_regime_backtest(
+                tickers=tickers,
+                start_date=start_date,
+                end_date=end_date,
+                cache_root=cache_root,
+                timeframe=timeframe,
+                regime_contract=contract,
+            )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
         self.after(0, lambda: self._finish_backtest_run(output_text))
