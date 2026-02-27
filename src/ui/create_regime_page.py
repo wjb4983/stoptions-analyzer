@@ -798,6 +798,14 @@ class CreateRegimePage(ttk.Frame):
         self.training_mode = str(definition.get("training_mode", "auto_model_search"))
         if self.training_mode not in TRAINING_MODE_CHOICES:
             self.training_mode = "auto_model_search"
+        if hasattr(self, "max_ram_usage_gb_var") and hasattr(self, "ram_utilization_fraction_var") and hasattr(self, "max_total_return_samples_var"):
+            settings = {
+                **DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
+                **(definition.get("training_data_settings", {}) if isinstance(definition.get("training_data_settings"), dict) else {}),
+            }
+            self.ram_utilization_fraction_var.set(str(settings.get("ram_utilization_fraction", DEFAULT_REGIME_TRAINING_DATA_SETTINGS["ram_utilization_fraction"])))
+            self.max_ram_usage_gb_var.set("" if settings.get("max_ram_usage_gb") in (None, "") else str(settings.get("max_ram_usage_gb")))
+            self.max_total_return_samples_var.set("" if settings.get("max_total_return_samples") in (None, "") else str(settings.get("max_total_return_samples")))
         self.selected_leg_index = max(0, min(self.selected_leg_index, len(self.regime_legs) - 1))
 
     def _normalize_leg_payload(self, raw_leg: object) -> dict[str, object]:
@@ -869,7 +877,23 @@ class CreateRegimePage(ttk.Frame):
             return
         definition["legs"] = [self._serialize_leg(leg) for leg in self.regime_legs]
         definition["training_mode"] = getattr(self, "training_mode", "auto_model_search")
+        if hasattr(self, "max_ram_usage_gb_var") and hasattr(self, "ram_utilization_fraction_var") and hasattr(self, "max_total_return_samples_var"):
+            settings = {
+                **DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
+                **(definition.get("training_data_settings", {}) if isinstance(definition.get("training_data_settings"), dict) else {}),
+            }
+            raw_max_ram = str(self.max_ram_usage_gb_var.get()).strip()
+            raw_utilization = str(self.ram_utilization_fraction_var.get()).strip()
+            raw_sample_cap = str(self.max_total_return_samples_var.get()).strip()
+            settings["max_ram_usage_gb"] = raw_max_ram if raw_max_ram else None
+            settings["ram_utilization_fraction"] = raw_utilization if raw_utilization else DEFAULT_REGIME_TRAINING_DATA_SETTINGS["ram_utilization_fraction"]
+            settings["max_total_return_samples"] = raw_sample_cap if raw_sample_cap else None
+            definition["training_data_settings"] = settings
         controller.persist_state()
+
+    def _on_training_data_setting_changed(self, _event=None) -> None:
+        self._persist_editor_state()
+        self._update_training_execution_preview()
 
     @staticmethod
     def _serialize_leg(leg: dict[str, object]) -> dict[str, object]:
@@ -1197,6 +1221,35 @@ class CreateRegimePage(ttk.Frame):
         )
         self.training_mode_combo.pack(side="left", padx=(6, 0))
         self.training_mode_combo.bind("<<ComboboxSelected>>", self._on_training_mode_selected)
+
+        ram_frame = ttk.Frame(action_row)
+        ram_frame.pack(side="left", padx=(10, 0))
+        ttk.Label(ram_frame, text="RAM auto %").grid(row=0, column=0, sticky="w")
+        self.ram_utilization_fraction_var = tk.StringVar()
+        ram_util_entry = ttk.Entry(ram_frame, textvariable=self.ram_utilization_fraction_var, width=6, takefocus=True)
+        ram_util_entry.grid(row=0, column=1, sticky="w", padx=(4, 8))
+        ram_util_entry.bind("<FocusOut>", self._on_training_data_setting_changed)
+
+        ttk.Label(ram_frame, text="Max RAM GiB").grid(row=0, column=2, sticky="w")
+        self.max_ram_usage_gb_var = tk.StringVar()
+        max_ram_entry = ttk.Entry(ram_frame, textvariable=self.max_ram_usage_gb_var, width=8, takefocus=True)
+        max_ram_entry.grid(row=0, column=3, sticky="w", padx=(4, 8))
+        max_ram_entry.bind("<FocusOut>", self._on_training_data_setting_changed)
+
+        ttk.Label(ram_frame, text="Sample cap").grid(row=0, column=4, sticky="w")
+        self.max_total_return_samples_var = tk.StringVar()
+        sample_cap_entry = ttk.Entry(ram_frame, textvariable=self.max_total_return_samples_var, width=10, takefocus=True)
+        sample_cap_entry.grid(row=0, column=5, sticky="w", padx=(4, 0))
+        sample_cap_entry.bind("<FocusOut>", self._on_training_data_setting_changed)
+
+        initial_definition = self._active_regime_definition()
+        initial_settings = {
+            **DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
+            **(initial_definition.get("training_data_settings", {}) if isinstance(initial_definition.get("training_data_settings"), dict) else {}),
+        }
+        self.ram_utilization_fraction_var.set(str(initial_settings.get("ram_utilization_fraction", DEFAULT_REGIME_TRAINING_DATA_SETTINGS["ram_utilization_fraction"])))
+        self.max_ram_usage_gb_var.set("" if initial_settings.get("max_ram_usage_gb") in (None, "") else str(initial_settings.get("max_ram_usage_gb")))
+        self.max_total_return_samples_var.set("" if initial_settings.get("max_total_return_samples") in (None, "") else str(initial_settings.get("max_total_return_samples")))
 
         self.train_button = ttk.Button(action_row, text="Train", command=self._run_train)
         self.train_button.pack(side="left", padx=(12, 4))
@@ -1730,6 +1783,32 @@ class CreateRegimePage(ttk.Frame):
             f"Training mode: {mode or 'auto_model_search'}",
         ]
 
+        definition = self._active_regime_definition()
+        training_data_settings = {
+            **DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
+            **(definition.get("training_data_settings", {}) if isinstance(definition.get("training_data_settings"), dict) else {}),
+        }
+        raw_max_ram_gb = training_data_settings.get("max_ram_usage_gb")
+        raw_sample_cap = training_data_settings.get("max_total_return_samples")
+        ram_utilization = training_data_settings.get("ram_utilization_fraction", 0.40)
+        try:
+            ram_utilization = max(0.05, min(1.0, float(ram_utilization)))
+        except (TypeError, ValueError):
+            ram_utilization = 0.40
+        if raw_sample_cap not in (None, ""):
+            try:
+                ram_budget_text = f"manual sample cap ({max(1, int(float(raw_sample_cap))):,} returns)"
+            except (TypeError, ValueError):
+                ram_budget_text = f"auto ({ram_utilization:.0%} of available RAM)"
+        elif raw_max_ram_gb in (None, ""):
+            ram_budget_text = f"auto ({ram_utilization:.0%} of available RAM)"
+        else:
+            try:
+                ram_budget_text = f"manual ({max(0.0, float(raw_max_ram_gb)):.2f} GiB)"
+            except (TypeError, ValueError):
+                ram_budget_text = f"auto ({ram_utilization:.0%} of available RAM)"
+        lines.append(f"Training data RAM budget: {ram_budget_text}")
+
         if not self.regime_legs:
             lines.append("No legs configured.")
             self._training_preview_warnings = warnings
@@ -2137,6 +2216,27 @@ class CreateRegimePage(ttk.Frame):
             **DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
             **(definition.get("training_data_settings", {}) if isinstance(definition.get("training_data_settings"), dict) else {}),
         }
+        ram_fraction = training_data_settings.get("ram_utilization_fraction", 0.40)
+        try:
+            training_data_settings["ram_utilization_fraction"] = max(0.05, min(1.0, float(ram_fraction)))
+        except (TypeError, ValueError):
+            training_data_settings["ram_utilization_fraction"] = 0.40
+        raw_max_ram_gb = training_data_settings.get("max_ram_usage_gb")
+        if raw_max_ram_gb in (None, ""):
+            training_data_settings["max_ram_usage_gb"] = None
+        else:
+            try:
+                training_data_settings["max_ram_usage_gb"] = max(0.0, float(raw_max_ram_gb))
+            except (TypeError, ValueError):
+                training_data_settings["max_ram_usage_gb"] = None
+        raw_sample_cap = training_data_settings.get("max_total_return_samples")
+        if raw_sample_cap in (None, ""):
+            training_data_settings["max_total_return_samples"] = None
+        else:
+            try:
+                training_data_settings["max_total_return_samples"] = max(1, int(float(raw_sample_cap)))
+            except (TypeError, ValueError):
+                training_data_settings["max_total_return_samples"] = None
 
         legs: list[RegimeLegTrainingConfig] = []
         for leg in self.regime_legs:
