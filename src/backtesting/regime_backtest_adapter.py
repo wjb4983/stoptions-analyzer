@@ -134,6 +134,14 @@ def load_regime_backtest_contract(option: RegimeBacktestOption) -> RegimeBacktes
         "stress_enable_historical_replay_regimes": bool(scenario_names),
         "selected_scenario_packs": ",".join(scenario_names),
     }
+    for candidate in ("start_date", "end_date", "training_start_date", "training_end_date"):
+        raw = str(training_data_settings.get(candidate, "")).strip()
+        if not raw:
+            continue
+        if candidate.endswith("start_date"):
+            defaults["start_date"] = raw
+        elif candidate.endswith("end_date"):
+            defaults["end_date"] = raw
     defaults["hydration_schema_version"] = BACKTEST_HYDRATION_PAYLOAD_CONTRACT.current_version
     regime_name = str(request.get("regime_name", training_payload.get("run_id", option.option_id))).strip() or option.option_id
     execution_artifacts = _extract_execution_artifacts(training_payload)
