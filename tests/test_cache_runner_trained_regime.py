@@ -32,6 +32,8 @@ def test_run_trained_regime_backtest_uses_contract_defaults(monkeypatch, tmp_pat
             "portfolio_max_sector_weight": "0.25",
         },
         execution_artifacts={"champion_model_ids": {"Trend": "meta_label_classifier"}},
+        reproducibility_status="exact_replay_compatible",
+        compatibility_metadata={"status": "exact_replay_compatible"},
     )
 
     result = cache_runner.run_trained_regime_backtest(

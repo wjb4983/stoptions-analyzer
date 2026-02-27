@@ -20,6 +20,17 @@ def test_export_bundle_collects_expected_artifacts_and_metadata(tmp_path):
     weights = _write_json(run_dir / "trend_model_weights.json", {"required_features": ["ret_5d", "vol_20d"]})
     calibration = _write_json(run_dir / "trend_calibration_object.json", {"method": "platt"})
     diagnostics = _write_json(run_dir / "trend_diagnostics.json", {"accuracy": 0.71})
+    replay_payload = _write_json(
+        run_dir / "regime_backtest_replay_payload.json",
+        {
+            "replay_schema_version": "1.0.0",
+            "source_manifest": {"run_id": "abcd1234"},
+            "artifact_lineage": {},
+            "selected_champions": {},
+            "feature_schema_hash": "abc",
+            "training_data_assumptions": {},
+        },
+    )
 
     manifest = {
         "manifest_schema_version": "2.1.0",
@@ -30,12 +41,13 @@ def test_export_bundle_collects_expected_artifacts_and_metadata(tmp_path):
         "timestamps": {"started_at": "2024-01-01T00:00:00+00:00", "completed_at": "2024-01-01T00:01:00+00:00"},
         "request": {"schema_version": 2, "regime_name": "Risk On"},
         "metrics": {"portfolio_avg_accuracy": 0.71},
-        "metadata": {"oos_metrics": {"Trend": {"accuracy": 0.71}}},
+        "metadata": {"oos_metrics": {"Trend": {"accuracy": 0.71}}, "replay_payload": {"schema_contract": "regime_backtest_replay_payload", "schema_version": "1.0.0"}},
         "artifact_paths": {
             "spec": spec,
             "trend_model_weights": weights,
             "trend_calibration_object": calibration,
             "trend_diagnostics": diagnostics,
+            "regime_backtest_replay_payload": replay_payload,
         },
     }
     manifest_path = _write_json(run_dir / "manifest.json", manifest)
@@ -48,10 +60,12 @@ def test_export_bundle_collects_expected_artifacts_and_metadata(tmp_path):
     assert Path(bundle.exported_paths["trend_model_weights"]).exists()
     assert Path(bundle.exported_paths["trend_calibration_object"]).exists()
     assert Path(bundle.exported_paths["trend_diagnostics"]).exists()
+    assert Path(bundle.exported_paths["regime_backtest_replay_payload"]).exists()
 
     bundle_manifest = json.loads(Path(bundle.bundle_manifest_path).read_text(encoding="utf-8"))
     assert bundle_manifest["manifest_schema_version"] == "1.1.0"
     assert bundle_manifest["manifest_schema_min_reader_version"] == "1.0.0"
+    assert bundle_manifest["contents"]["replay_compatibility"]["status"] == "exact_replay_compatible"
 
     feature_schema = json.loads(Path(bundle.exported_paths["feature_schema"]).read_text(encoding="utf-8"))
     assert feature_schema["feature_schema_version"] == "regime-v2"

@@ -14,7 +14,10 @@ import numpy as np
 from config import BACKTEST_CACHE_DIR
 from data_access.cache import _safe_ticker_name
 from backtesting.scenario_toolkit import ScenarioSpec, build_custom_scenarios
-from backtesting.schema_contracts import REGIME_TRAINING_MANIFEST_CONTRACT
+from backtesting.schema_contracts import (
+    REGIME_BACKTEST_REPLAY_PAYLOAD_CONTRACT,
+    REGIME_TRAINING_MANIFEST_CONTRACT,
+)
 
 from modeling_nextgen.calibration.probability import ProbabilityCalibrator
 from modeling_nextgen.validation.quality_gates import evaluate_modeling_quality_gates, promotion_blocked
@@ -1277,6 +1280,7 @@ def write_regime_training_manifest(
     run_dir: Path,
     request: RegimeTrainingRequest,
     result: RegimeTrainingResult,
+    replay_payload_path: str | None = None,
 ) -> Path:
     manifest_path = run_dir / "manifest.json"
     reproducibility_payload = _build_reproducibility_payload(request)
@@ -1292,8 +1296,21 @@ def write_regime_training_manifest(
         "warnings": list(result.warnings),
         "errors": list(result.errors),
         "error_payload": result.error_payload,
-        "artifact_paths": result.artifact_paths,
-        "metadata": {**result.metadata, "reproducibility": reproducibility_payload},
+        "artifact_paths": {
+            **result.artifact_paths,
+            **({"regime_backtest_replay_payload": replay_payload_path} if replay_payload_path else {}),
+        },
+        "metadata": {
+            **result.metadata,
+            "reproducibility": reproducibility_payload,
+            "replay_payload": {
+                "path": replay_payload_path,
+                "schema_contract": REGIME_BACKTEST_REPLAY_PAYLOAD_CONTRACT.name,
+                "schema_version": REGIME_BACKTEST_REPLAY_PAYLOAD_CONTRACT.current_version,
+            }
+            if replay_payload_path
+            else None,
+        },
         "logs": list(result.logs),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -1323,6 +1340,66 @@ def _build_reproducibility_payload(request: RegimeTrainingRequest) -> dict[str, 
         "legs": legs,
     }
 
+
+
+
+def _write_regime_backtest_replay_payload(
+    *,
+    run_dir: Path,
+    request: RegimeTrainingRequest,
+    result: RegimeTrainingResult,
+    reproducibility_payload: dict[str, Any],
+) -> Path:
+    feature_schema_payload = _build_replay_feature_schema_payload(request)
+    payload = {
+        "replay_schema_version": REGIME_BACKTEST_REPLAY_PAYLOAD_CONTRACT.current_version,
+        "source_manifest": {
+            "manifest_schema_contract": REGIME_TRAINING_MANIFEST_CONTRACT.name,
+            "manifest_schema_version": REGIME_TRAINING_MANIFEST_CONTRACT.current_version,
+            "run_id": result.run_id,
+        },
+        "artifact_lineage": {
+            key: value for key, value in result.artifact_paths.items() if isinstance(value, str) and value.strip()
+        },
+        "selected_champions": {
+            str(k): str(v)
+            for k, v in (result.metadata.get("champion_by_leg", {}) or {}).items()
+            if str(k).strip() and str(v).strip()
+        },
+        "feature_schema_hash": _json_sha256(feature_schema_payload),
+        "feature_schema": feature_schema_payload,
+        "training_data_assumptions": _build_training_data_assumptions_payload(request, result),
+        "reproducibility": reproducibility_payload,
+    }
+    replay_path = run_dir / "regime_backtest_replay_payload.json"
+    replay_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return replay_path
+
+
+def _build_replay_feature_schema_payload(request: RegimeTrainingRequest) -> dict[str, list[str]]:
+    feature_schema: dict[str, list[str]] = {}
+    for leg in request.legs:
+        controls = leg.controls if isinstance(leg.controls, dict) else {}
+        columns = controls.get("feature_columns")
+        if not isinstance(columns, list):
+            continue
+        cleaned = [str(item).strip() for item in columns if str(item).strip()]
+        if cleaned:
+            feature_schema[str(leg.name)] = cleaned
+    return feature_schema
+
+
+def _build_training_data_assumptions_payload(request: RegimeTrainingRequest, result: RegimeTrainingResult) -> dict[str, Any]:
+    settings = dict(request.training_data_settings or {})
+    metadata_audit = result.metadata.get("training_data_audit", {}) if isinstance(result.metadata.get("training_data_audit"), dict) else {}
+    return {
+        "lookback_days": int(request.training_window.get("lookback_days", 0) or 0),
+        "retrain_frequency_days": int(request.training_window.get("retrain_frequency_days", 0) or 0),
+        "allow_synthetic_fallback": bool(settings.get("allow_synthetic_fallback", False)),
+        "synthetic_fallback_used": bool(result.metadata.get("synthetic_fallback_used", False)),
+        "scenario_settings": settings.get("scenario_settings", []),
+        "training_data_audit": metadata_audit,
+    }
 
 def run_regime_training(
     request: RegimeTrainingRequest,
@@ -1447,8 +1524,26 @@ def run_regime_training(
             logs=("saved config snapshot", "fit_and_backtest failed"),
         )
 
-    manifest_path = write_regime_training_manifest(run_dir=run_dir, request=request, result=result)
-    return replace(result, artifact_paths={**result.artifact_paths, "manifest": str(manifest_path)})
+    reproducibility_payload = _build_reproducibility_payload(request)
+    replay_payload_path: str | None = None
+    if result.status == "success":
+        replay_payload = _write_regime_backtest_replay_payload(
+            run_dir=run_dir,
+            request=request,
+            result=result,
+            reproducibility_payload=reproducibility_payload,
+        )
+        replay_payload_path = str(replay_payload)
+    manifest_path = write_regime_training_manifest(
+        run_dir=run_dir,
+        request=request,
+        result=result,
+        replay_payload_path=replay_payload_path,
+    )
+    final_artifacts = {**result.artifact_paths, "manifest": str(manifest_path)}
+    if replay_payload_path:
+        final_artifacts["regime_backtest_replay_payload"] = replay_payload_path
+    return replace(result, artifact_paths=final_artifacts)
 
 
 def execute_regime_training_pipeline(

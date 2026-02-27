@@ -70,6 +70,13 @@ def export_regime_training_bundle(
     if isinstance(spec_path_raw, str) and spec_path_raw.strip():
         copied["regime_spec_snapshot"] = _copy_if_exists(Path(spec_path_raw), metadata_dir / "regime_spec_snapshot.json")
 
+    replay_payload_raw = artifact_paths.get("regime_backtest_replay_payload")
+    if isinstance(replay_payload_raw, str) and replay_payload_raw.strip():
+        copied["regime_backtest_replay_payload"] = _copy_if_exists(
+            Path(replay_payload_raw),
+            metadata_dir / "regime_backtest_replay_payload.json",
+        )
+
     model_keys = sorted(k for k in artifact_paths if k.endswith("_model_weights"))
     calibration_keys = sorted(k for k in artifact_paths if k.endswith("_calibration_object"))
     diagnostics_keys = sorted(k for k in artifact_paths if k.endswith("_diagnostics"))
@@ -119,6 +126,16 @@ def export_regime_training_bundle(
     provenance_path.write_text(json.dumps(provenance_payload, indent=2, sort_keys=True), encoding="utf-8")
     copied["provenance"] = str(provenance_path)
 
+    replay_meta = metadata.get("replay_payload", {}) if isinstance(metadata.get("replay_payload"), dict) else {}
+    replay_status = "exact_replay_compatible" if "regime_backtest_replay_payload" in copied else "compatible_with_migration"
+    bundle_contents = dict(copied)
+    bundle_contents["replay_compatibility"] = {
+        "status": replay_status,
+        "schema_contract": replay_meta.get("schema_contract", "regime_backtest_replay_payload"),
+        "schema_version": replay_meta.get("schema_version"),
+        "path": copied.get("regime_backtest_replay_payload"),
+    }
+
     bundle_manifest_payload = {
         "manifest_schema_version": EXPORT_BUNDLE_MANIFEST_CONTRACT.current_version,
         "manifest_schema_min_reader_version": EXPORT_BUNDLE_MANIFEST_CONTRACT.minimum_compatible_version,
@@ -127,7 +144,7 @@ def export_regime_training_bundle(
         "deployment_version": deployment_version,
         "run_id": run_id,
         "bundle_dir": str(bundle_dir),
-        "contents": copied,
+        "contents": bundle_contents,
     }
     bundle_manifest_path = bundle_dir / "bundle_manifest.json"
     bundle_manifest_path.write_text(json.dumps(bundle_manifest_payload, indent=2, sort_keys=True), encoding="utf-8")

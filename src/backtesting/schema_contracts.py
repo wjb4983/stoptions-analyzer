@@ -36,6 +36,21 @@ BACKTEST_HYDRATION_PAYLOAD_CONTRACT = SchemaContract(
     minimum_compatible_version="1.0.0",
 )
 
+REGIME_BACKTEST_REPLAY_PAYLOAD_CONTRACT = SchemaContract(
+    name="regime_backtest_replay_payload",
+    current_version="1.0.0",
+    minimum_compatible_version="1.0.0",
+)
+
+REGIME_BACKTEST_REPLAY_REQUIRED_FIELDS: tuple[str, ...] = (
+    "replay_schema_version",
+    "source_manifest",
+    "artifact_lineage",
+    "selected_champions",
+    "feature_schema_hash",
+    "training_data_assumptions",
+)
+
 
 def _parse_semver(version: str) -> tuple[int, int, int]:
     raw = str(version).strip()

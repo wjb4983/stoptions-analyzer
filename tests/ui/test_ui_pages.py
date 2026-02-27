@@ -1177,7 +1177,8 @@ def test_backtesting_trained_regime_dropdown_population_and_hydration(tmp_path):
     assert page.lookback_days_var.get() == "77"
     assert page.skip_days_var.get() == "4"
     assert page.portfolio_max_gross_var.get() == "1.20"
-    assert "Loaded from regime UI Risk" in page.regime_provenance_var.get()
+    assert "Reproducibility: Compatible with Migration" in page.regime_provenance_var.get()
+    assert "Regime: UI Risk" in page.regime_provenance_var.get()
 
 
 def test_backtesting_trained_regime_invalid_bundle_shows_error(monkeypatch, tmp_path):
