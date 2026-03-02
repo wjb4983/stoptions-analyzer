@@ -27,8 +27,10 @@ from backtesting.regime_backtest_adapter import (
 from backtesting.scenario_toolkit import list_scenario_pack_templates
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PRESETS, BACKTEST_TEST_SUITE_PRESETS, DEFAULT_BACKTEST_SETTINGS
 from ui.backtesting_insights import (
+    aggregate_regime_market_stress,
     build_guardrails,
     build_scenario_comparison,
+    compare_manifests,
     compare_robustness_frontiers,
     fold_variance_rows,
     metric_deltas,
@@ -1174,11 +1176,13 @@ class BacktestingPage(ttk.Frame):
         variance_frame = ttk.Labelframe(cmp_pane, text="Fold-by-fold WF Variance")
         scenario_frame = ttk.Labelframe(cmp_pane, text="Scenario Comparison")
         frontier_frame = ttk.Labelframe(cmp_pane, text="Robustness Frontier")
+        manifest_frame = ttk.Labelframe(cmp_pane, text="Trained-regime A/B Manifest + Provenance")
         cmp_pane.add(metrics_frame, weight=1)
         cmp_pane.add(params_frame, weight=1)
         cmp_pane.add(variance_frame, weight=1)
         cmp_pane.add(scenario_frame, weight=1)
         cmp_pane.add(frontier_frame, weight=1)
+        cmp_pane.add(manifest_frame, weight=1)
         metrics_frame.columnconfigure(0, weight=1)
         metrics_frame.rowconfigure(0, weight=1)
         params_frame.columnconfigure(0, weight=1)
@@ -1199,6 +1203,12 @@ class BacktestingPage(ttk.Frame):
         frontier_frame.rowconfigure(0, weight=1)
         self.frontier_compare_tree = ttk.Treeview(frontier_frame, show="headings", height=12)
         self.frontier_compare_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        manifest_frame.columnconfigure(0, weight=1)
+        manifest_frame.rowconfigure(1, weight=1)
+        self.compare_manifest_summary_var = tk.StringVar(value="Manifest and provenance deltas appear here for trained-regime comparisons.")
+        ttk.Label(manifest_frame, textvariable=self.compare_manifest_summary_var, justify="left", wraplength=360).grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
+        self.manifest_diff_tree = ttk.Treeview(manifest_frame, show="headings", height=10)
+        self.manifest_diff_tree.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
 
         heatmap_tab = ttk.Frame(self.section_notebook)
         heatmap_tab.columnconfigure(0, weight=1)
@@ -1226,6 +1236,78 @@ class BacktestingPage(ttk.Frame):
         self.drawdown_tree.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 8))
         equity_tab.rowconfigure(2, weight=1)
         self._last_equity_run_dirs: list[Path] = []
+
+        run_results_tab = ttk.Frame(self.section_notebook)
+        run_results_tab.columnconfigure(0, weight=1)
+        run_results_tab.rowconfigure(2, weight=1)
+        self.section_notebook.add(run_results_tab, text="Run Results")
+        load_row = ttk.Frame(run_results_tab)
+        load_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        ttk.Label(load_row, text="Completed run directory").pack(side="left")
+        self.results_run_var = tk.StringVar(value="")
+        self.results_run_combo = ttk.Combobox(load_row, textvariable=self.results_run_var, state="readonly", values=[])
+        self.results_run_combo.pack(side="left", padx=(6, 8), fill="x", expand=True)
+        ttk.Button(load_row, text="Load", command=self._load_results_run).pack(side="left", padx=(0, 6))
+        ttk.Button(load_row, text="Export cards JSON", command=lambda: self._export_results_payload("results_cards", self._last_results_cards_payload)).pack(side="left")
+
+        cards_row = ttk.Frame(run_results_tab)
+        cards_row.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
+        self.results_summary_var = tk.StringVar(value="Load a completed run to render timelines, alpha/IR, and diagnostics cards.")
+        ttk.Label(cards_row, textvariable=self.results_summary_var, justify="left").pack(side="left", fill="x", expand=True)
+
+        results_notebook = ttk.Notebook(run_results_tab)
+        results_notebook.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 8))
+
+        timelines_tab = ttk.Frame(results_notebook)
+        timelines_tab.columnconfigure(0, weight=1)
+        results_notebook.add(timelines_tab, text="Timelines")
+        self.results_equity_canvas = tk.Canvas(timelines_tab, height=150, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.results_equity_canvas.grid(row=0, column=0, sticky="ew", pady=(6, 4))
+        self.results_regime_canvas = tk.Canvas(timelines_tab, height=120, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.results_regime_canvas.grid(row=1, column=0, sticky="ew", pady=4)
+        self.results_turnover_canvas = tk.Canvas(timelines_tab, height=120, bg="#fff", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.results_turnover_canvas.grid(row=2, column=0, sticky="ew", pady=(4, 6))
+
+        alpha_tab = ttk.Frame(results_notebook)
+        alpha_tab.columnconfigure(0, weight=1)
+        alpha_tab.rowconfigure(0, weight=1)
+        results_notebook.add(alpha_tab, text="Benchmark-relative alpha/IR")
+        self.alpha_ir_tree = ttk.Treeview(alpha_tab, show="headings", height=10)
+        self.alpha_ir_tree.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        ttk.Button(alpha_tab, text="Export alpha/IR CSV", command=lambda: self._export_tree_rows("alpha_ir", self.alpha_ir_tree)).grid(row=1, column=0, sticky="e", padx=6, pady=(0, 6))
+
+        drilldown_tab = ttk.Frame(results_notebook)
+        drilldown_tab.columnconfigure(0, weight=1)
+        drilldown_tab.rowconfigure(1, weight=1)
+        results_notebook.add(drilldown_tab, text="Drill-down")
+        drill_btn_row = ttk.Frame(drilldown_tab)
+        drill_btn_row.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
+        ttk.Button(drill_btn_row, text="Export trade explainability CSV", command=lambda: self._export_tree_rows("trade_explainability", self.trade_explain_tree)).pack(side="left")
+        ttk.Button(drill_btn_row, text="Export cost breakdown CSV", command=lambda: self._export_tree_rows("cost_breakdown", self.cost_breakdown_tree)).pack(side="left", padx=(6, 0))
+        ttk.Button(drill_btn_row, text="Export failure diagnostics CSV", command=lambda: self._export_tree_rows("failure_windows", self.failure_window_tree)).pack(side="left", padx=(6, 0))
+
+        drill_pane = ttk.Panedwindow(drilldown_tab, orient="horizontal")
+        drill_pane.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
+        trade_frame = ttk.Labelframe(drill_pane, text="Trade-level explainability")
+        cost_frame = ttk.Labelframe(drill_pane, text="Cost breakdown")
+        fail_frame = ttk.Labelframe(drill_pane, text="Failure-window diagnostics")
+        drill_pane.add(trade_frame, weight=1)
+        drill_pane.add(cost_frame, weight=1)
+        drill_pane.add(fail_frame, weight=1)
+        for frame in (trade_frame, cost_frame, fail_frame):
+            frame.columnconfigure(0, weight=1)
+            frame.rowconfigure(0, weight=1)
+        self.trade_explain_tree = ttk.Treeview(trade_frame, show="headings", height=10)
+        self.trade_explain_tree.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.trade_explain_tree.bind("<<TreeviewSelect>>", self._on_trade_drilldown_selected)
+        self.cost_breakdown_tree = ttk.Treeview(cost_frame, show="headings", height=10)
+        self.cost_breakdown_tree.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.failure_window_tree = ttk.Treeview(fail_frame, show="headings", height=10)
+        self.failure_window_tree.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self._trade_drilldown_rows: list[dict[str, object]] = []
+        self._cost_drilldown_rows: list[dict[str, object]] = []
+        self._failure_drilldown_rows: list[dict[str, object]] = []
+        self._last_results_cards_payload: dict[str, object] = {}
 
         trades_tab = ttk.Frame(self.section_notebook)
         trades_tab.columnconfigure(0, weight=1)
@@ -2020,6 +2102,10 @@ class BacktestingPage(ttk.Frame):
         names = [run.name for run in runs]
         self.compare_base_combo.configure(values=names)
         self.compare_other_combo.configure(values=names)
+        if hasattr(self, "results_run_combo"):
+            self.results_run_combo.configure(values=names)
+            if names and not self.results_run_var.get():
+                self.results_run_var.set(names[0])
         if names and not self.compare_base_var.get():
             self.compare_base_var.set(names[0])
         if len(names) > 1 and not self.compare_other_var.get():
@@ -2033,6 +2119,168 @@ class BacktestingPage(ttk.Frame):
             if run_dir.name == clean:
                 return run_dir
         return None
+
+    def _export_tree_rows(self, stem: str, tree: ttk.Treeview) -> None:
+        run_dir = self._resolve_run_by_name(self.results_run_var.get()) if hasattr(self, "results_run_var") else None
+        if run_dir is None:
+            selected = [self.current_run_dirs[idx] for idx in self.run_listbox.curselection() if idx < len(self.current_run_dirs)] if hasattr(self, "run_listbox") else []
+            run_dir = selected[0] if selected else (self.current_run_dirs[0] if self.current_run_dirs else None)
+        if run_dir is None:
+            messagebox.showinfo("Export", "Select a run before exporting.")
+            return
+        rows = self._tree_rows(tree)
+        if not rows:
+            messagebox.showinfo("Export", "No rows to export.")
+            return
+        export_dir = run_dir / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = export_dir / f"{stem}.csv"
+        json_path = export_dir / f"{stem}.json"
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        messagebox.showinfo("Export", f"Exported {stem} CSV/JSON to {export_dir}")
+
+    def _export_results_payload(self, stem: str, payload: dict[str, object]) -> None:
+        run_dir = self._resolve_run_by_name(self.results_run_var.get()) if hasattr(self, "results_run_var") else None
+        if run_dir is None:
+            messagebox.showinfo("Export", "Load a run in Run Results first.")
+            return
+        export_dir = run_dir / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        path = export_dir / f"{stem}.json"
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        messagebox.showinfo("Export", f"Exported {stem} JSON to {path}")
+
+    def _tree_rows(self, tree: ttk.Treeview) -> list[dict[str, object]]:
+        columns = [str(c) for c in tree["columns"]]
+        rows: list[dict[str, object]] = []
+        for item in tree.get_children():
+            values = tree.item(item, "values")
+            rows.append({col: values[idx] if idx < len(values) else "" for idx, col in enumerate(columns)})
+        return rows
+
+    def _load_results_run(self) -> None:
+        run_dir = self._resolve_run_by_name(self.results_run_var.get())
+        if run_dir is None:
+            return
+        self._render_single_run(run_dir)
+        metrics = self._load_metric_map(run_dir)
+        equity_rows = self._load_rows(run_dir, "equity")
+        drawdown_rows = self._load_rows(run_dir, "drawdown")
+        regime_rows = self._load_rows(run_dir, "regime_pnl_attribution")
+        turnover_rows = self._load_rows(run_dir, "turnover_by_symbol")
+        risk_rows = self._load_rows(run_dir, "risk_diagnostics")
+
+        equity_vals = [self._safe_float(r.get("equity")) for r in equity_rows]
+        dd_vals = [self._safe_float(r.get("drawdown")) for r in drawdown_rows]
+        turnover_vals = [self._safe_float(r.get("turnover")) for r in turnover_rows]
+        cost_vals = [self._safe_float(r.get("cost_total")) for r in risk_rows]
+        self._draw_line_canvas(self.results_equity_canvas, [v for v in equity_vals if v is not None], color="#1f77b4")
+        if any(v is not None for v in dd_vals):
+            self._draw_line_canvas(self.results_regime_canvas, [v for v in dd_vals if v is not None], color="#d62728")
+        else:
+            regime_scores = [self._safe_float(r.get("pnl_total")) for r in regime_rows]
+            self._draw_line_canvas(self.results_regime_canvas, [v for v in regime_scores if v is not None], color="#9467bd")
+        timeline = [v for v in turnover_vals if v is not None] + [v for v in cost_vals if v is not None]
+        self._draw_line_canvas(self.results_turnover_canvas, timeline if len(timeline) > 1 else [0.0, 0.0], color="#ff7f0e")
+
+        alpha_rows = [
+            {
+                "metric": "alpha_total",
+                "value": float(metrics.get("alpha_total", metrics.get("excess_return", 0.0))),
+            },
+            {
+                "metric": "information_ratio",
+                "value": float(metrics.get("information_ratio", metrics.get("ir", 0.0))),
+            },
+            {
+                "metric": "benchmark_sharpe",
+                "value": float(metrics.get("benchmark_sharpe", 0.0)),
+            },
+        ]
+        self._set_tree_data(self.alpha_ir_tree, alpha_rows)
+
+        trades = self._load_rows(run_dir, "trade_log") or self._load_rows(run_dir, "trades")
+        explain_rows: list[dict[str, object]] = []
+        for row in trades[:400]:
+            explain_rows.append({
+                "trade_id": row.get("trade_id", row.get("id", "")),
+                "timestamp": row.get("timestamp", row.get("entry_time", "")),
+                "symbol": row.get("symbol", ""),
+                "side": row.get("side", ""),
+                "pnl": row.get("pnl", row.get("net_pnl", "")),
+                "regime": row.get("regime", row.get("regime_label", "")),
+                "market_state": row.get("market_state", row.get("state", "")),
+                "stress_scenario": row.get("stress_scenario", row.get("scenario", "")),
+            })
+        self._trade_drilldown_rows = explain_rows
+        self._set_tree_data(self.trade_explain_tree, explain_rows)
+
+        cost_breakdown_rows = self._load_rows(run_dir, "cost_breakdown")
+        if not cost_breakdown_rows:
+            cost_breakdown_rows = [{
+                "trade_id": row.get("trade_id", row.get("id", "")),
+                "slippage": row.get("slippage", row.get("cost_slippage", 0.0)),
+                "fees": row.get("fees", row.get("cost_fees", 0.0)),
+                "borrow": row.get("borrow", row.get("cost_borrow", 0.0)),
+                "total_cost": row.get("total_cost", row.get("cost_total", 0.0)),
+            } for row in trades[:400]]
+        self._cost_drilldown_rows = cost_breakdown_rows
+        self._set_tree_data(self.cost_breakdown_tree, cost_breakdown_rows)
+
+        failure_rows = self._load_rows(run_dir, "failure_windows")
+        if not failure_rows:
+            failure_rows = [
+                {
+                    "window": row.get("window", idx),
+                    "timestamp": row.get("timestamp", row.get("entry_time", "")),
+                    "failure_reason": row.get("failure_reason", row.get("reject_reason", "")),
+                    "drawdown": row.get("drawdown", ""),
+                    "regime": row.get("regime", ""),
+                }
+                for idx, row in enumerate((risk_rows or drawdown_rows)[:300])
+            ]
+        self._failure_drilldown_rows = failure_rows
+        self._set_tree_data(self.failure_window_tree, failure_rows)
+
+        agg = aggregate_regime_market_stress(explain_rows, pnl_field="pnl", cost_field="pnl")
+        self._last_results_cards_payload = {
+            "run": run_dir.name,
+            "alpha_ir": alpha_rows,
+            "aggregates": agg,
+            "cost_summary": {
+                "cost_slippage": float(metrics.get("cost_slippage", 0.0)),
+                "cost_fees": float(metrics.get("cost_fees", 0.0)),
+                "cost_borrow": float(metrics.get("cost_borrow", 0.0)),
+                "cost_total": float(metrics.get("cost_total", 0.0)),
+            },
+            "diagnostic_counts": {
+                "trades": len(explain_rows),
+                "cost_rows": len(cost_breakdown_rows),
+                "failure_windows": len(failure_rows),
+            },
+        }
+        self.results_summary_var.set(
+            f"Loaded {run_dir.name}: equity={len(equity_rows)} rows, regimes={len(regime_rows)} rows, trades={len(explain_rows)} rows."
+        )
+
+    def _on_trade_drilldown_selected(self, _event: tk.Event) -> None:
+        selected = self.trade_explain_tree.selection()
+        if not selected:
+            self._set_tree_data(self.cost_breakdown_tree, self._cost_drilldown_rows)
+            self._set_tree_data(self.failure_window_tree, self._failure_drilldown_rows)
+            return
+        idx = self.trade_explain_tree.index(selected[0])
+        row = self._trade_drilldown_rows[idx] if idx < len(self._trade_drilldown_rows) else {}
+        trade_id = str(row.get("trade_id", "")).strip()
+        ts = str(row.get("timestamp", "")).strip()
+        filtered_cost = [r for r in self._cost_drilldown_rows if str(r.get("trade_id", "")).strip() == trade_id] if trade_id else self._cost_drilldown_rows
+        filtered_failure = [r for r in self._failure_drilldown_rows if ts and ts in str(r.get("timestamp", ""))]
+        self._set_tree_data(self.cost_breakdown_tree, filtered_cost or self._cost_drilldown_rows)
+        self._set_tree_data(self.failure_window_tree, filtered_failure or self._failure_drilldown_rows)
 
     def _load_run_parameters(self, run_dir: Path) -> dict[str, object]:
         manifest = self._read_json(run_dir / "manifest.json")
@@ -2077,6 +2325,39 @@ class BacktestingPage(ttk.Frame):
             other_frontier if isinstance(other_frontier, dict) else {},
         )
         self._set_tree_data(self.frontier_compare_tree, frontier_rows[:120])
+
+        base_manifest = self._read_json(base_run / "manifest.json")
+        other_manifest = self._read_json(other_run / "manifest.json")
+        cmp = compare_manifests(base_manifest if isinstance(base_manifest, dict) else {}, other_manifest if isinstance(other_manifest, dict) else {})
+        manifest_rows: list[dict[str, object]] = []
+        for row in cmp.get("parameter_diffs", []):
+            if isinstance(row, dict):
+                manifest_rows.append({"section": "parameters", **row})
+        for row in cmp.get("dependency_diffs", []):
+            if isinstance(row, dict):
+                manifest_rows.append({"section": "dependency_versions", **row})
+        for row in cmp.get("metric_table_diffs", []):
+            if isinstance(row, dict):
+                manifest_rows.append({"section": "metric_tables", **row})
+        manifest_rows.append({
+            "section": "provenance",
+            "parameter": "config_hash_changed",
+            "base": False,
+            "compare": bool(cmp.get("config_hash_changed", False)),
+        })
+        manifest_rows.append({
+            "section": "provenance",
+            "parameter": "reproducibility_fingerprint_changed",
+            "base": False,
+            "compare": bool(cmp.get("reproducibility_fingerprint_changed", False)),
+        })
+        self._set_tree_data(self.manifest_diff_tree, manifest_rows[:200])
+        trained_base = str((base_manifest or {}).get("run_type", "")) == "trained_regime"
+        trained_other = str((other_manifest or {}).get("run_type", "")) == "trained_regime"
+        focus = "trained-regime A/B" if trained_base and trained_other else "generic A/B"
+        self.compare_manifest_summary_var.set(
+            f"{focus}: params={len(cmp.get('parameter_diffs', []))}, dependency_diffs={len(cmp.get('dependency_diffs', []))}, metric_table_diffs={len(cmp.get('metric_table_diffs', []))}."
+        )
 
     def _render_guardrails(self, run_dir: Path) -> None:
         for child in self.guardrail_frame.winfo_children():

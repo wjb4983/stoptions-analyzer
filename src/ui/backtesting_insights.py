@@ -462,3 +462,55 @@ def compare_manifests(base: dict[str, Any], other: dict[str, Any]) -> dict[str, 
         "config_hash_changed": str(base.get("config_hash", "")) != str(other.get("config_hash", "")),
         "reproducibility_fingerprint_changed": str(base.get("reproducibility_fingerprint", "")) != str(other.get("reproducibility_fingerprint", "")),
     }
+
+
+def aggregate_rows(
+    rows: list[dict[str, Any]],
+    *,
+    group_field: str,
+    numeric_fields: list[str],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, float]] = {}
+    counts: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get(group_field, "")).strip() or "unknown"
+        bucket = grouped.setdefault(label, {field: 0.0 for field in numeric_fields})
+        counts[label] = counts.get(label, 0) + 1
+        for field in numeric_fields:
+            value = row.get(field)
+            if isinstance(value, (int, float)):
+                bucket[field] += float(value)
+            elif isinstance(value, str):
+                try:
+                    bucket[field] += float(value)
+                except ValueError:
+                    continue
+
+    output: list[dict[str, Any]] = []
+    for label in sorted(grouped):
+        totals = grouped[label]
+        count = counts.get(label, 0)
+        item: dict[str, Any] = {group_field: label, "count": count}
+        for field in numeric_fields:
+            total = float(totals.get(field, 0.0))
+            item[f"{field}_total"] = total
+            item[f"{field}_mean"] = (total / count) if count else 0.0
+        output.append(item)
+    output.sort(key=lambda row: int(row.get("count", 0)), reverse=True)
+    return output
+
+
+def aggregate_regime_market_stress(
+    rows: list[dict[str, Any]],
+    *,
+    pnl_field: str = "pnl",
+    cost_field: str = "cost",
+) -> dict[str, list[dict[str, Any]]]:
+    fields = [pnl_field, cost_field]
+    return {
+        "by_regime": aggregate_rows(rows, group_field="regime", numeric_fields=fields),
+        "by_market_state": aggregate_rows(rows, group_field="market_state", numeric_fields=fields),
+        "by_stress_scenario": aggregate_rows(rows, group_field="stress_scenario", numeric_fields=fields),
+    }
