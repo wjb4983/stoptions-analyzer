@@ -17,6 +17,12 @@ from backtesting.cache_runner import (
     run_trained_regime_backtest,
     run_walk_forward_backtest,
 )
+from backtesting.application_service import (
+    BacktestRequestValidationError,
+    BacktestingApplicationService,
+    ClassicStrategyRunRequest,
+    TrainedRegimeReplayRunRequest,
+)
 from backtesting.regime_backtest_adapter import (
     RegimeBundleCompatibilityError,
     RegimeBacktestContract,
@@ -116,6 +122,7 @@ class BacktestingPage(ttk.Frame):
         self._regime_locked_fields = True
         self._regime_loaded_values: dict[str, str] = {}
         self._regime_immutable_values: dict[str, str] = {}
+        self._application_service = BacktestingApplicationService(output_dir=BACKTEST_OUTPUT_DIR)
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -3919,29 +3926,31 @@ class BacktestingPage(ttk.Frame):
 
         if selected_backtest_type == "trained_regime":
             regime_option = self._selected_regime_option()
-            if regime_option is None:
-                messagebox.showinfo("Missing trained regime", "Select a trained regime manifest for trained-regime mode.")
-                return
             try:
-                regime_contract = load_regime_backtest_contract(regime_option)
+                trained_regime_request = self._application_service.build_trained_regime_replay_request(
+                    tickers=tickers,
+                    start_date=start_date,
+                    end_date=end_date,
+                    run_mode=run_mode,
+                    selected_backtest_type=selected_backtest_type,
+                    timeframe=timeframe,
+                    cache_root=cache_root,
+                    governance_payload=governance_payload,
+                    stress_controls=stress_controls,
+                    selected_scenario_packs=selected_scenario_packs,
+                    selected_suite_key=selected_suite_key,
+                    suite_composition=suite_composition,
+                    regime_option=regime_option,
+                )
+            except BacktestRequestValidationError as exc:
+                messagebox.showinfo("Invalid input", str(exc))
+                return
             except RegimeBundleCompatibilityError as exc:
                 messagebox.showerror("Regime bundle compatibility error", f"Cannot run selected trained regime.\n\n{exc}")
                 return
             worker_target = self._run_trained_regime_worker
-            worker_args = (
-                tickers,
-                start_date,
-                end_date,
-                cache_root,
-                timeframe,
-                regime_contract,
-                governance_payload,
-                stress_controls,
-                selected_scenario_packs,
-                selected_suite_key,
-                suite_composition,
-            )
-            status_line = f"Running trained regime policy '{regime_contract.regime_name}' ({run_mode})...\n"
+            worker_args = (trained_regime_request,)
+            status_line = f"Running trained regime policy '{trained_regime_request.regime_contract.regime_name}' ({run_mode})...\n"
         elif strategy == "momentum":
             selected_entries = self._selected_signal_names(self.entry_signal_vars)
             selected_exits = self._selected_signal_names(self.exit_signal_vars)
@@ -4096,29 +4105,36 @@ class BacktestingPage(ttk.Frame):
                 )
                 status_line = f"Running walk-forward with {len(selected_entries) * len(selected_exits)} candidates...\n"
             else:
+                try:
+                    classic_request = self._application_service.build_classic_strategy_request(
+                        tickers=tickers,
+                        start_date=start_date,
+                        end_date=end_date,
+                        run_mode=run_mode,
+                        selected_backtest_type=selected_backtest_type,
+                        strategy=strategy,
+                        lookback=lookback,
+                        skip=skip,
+                        costs_bps=costs_bps,
+                        starting_capital=starting_capital,
+                        custom_bet_pct=custom_bet_pct,
+                        cache_root=cache_root,
+                        bet_sizing_mode=bet_sizing_mode,
+                        timeframe=timeframe,
+                        execution_model=execution_model,
+                        execution_model_params=execution_model_params,
+                        portfolio_cfg=portfolio_cfg,
+                        governance_payload=governance_payload,
+                        stress_controls=stress_controls,
+                        selected_scenario_packs=selected_scenario_packs,
+                        selected_suite_key=selected_suite_key,
+                        suite_composition=suite_composition,
+                    )
+                except BacktestRequestValidationError as exc:
+                    messagebox.showinfo("Invalid input", str(exc))
+                    return
                 worker_target = self._run_momentum_worker
-                worker_args = (
-                    tickers,
-                    start_date,
-                    end_date,
-                    cache_root,
-                    lookback,
-                    skip,
-                    costs_bps,
-                    starting_capital,
-                    bet_sizing_mode,
-                    custom_bet_pct,
-                    timeframe,
-                    selected_entries,
-                    selected_exits,
-                    execution_model,
-                    execution_model_params,
-                    portfolio_cfg,
-                    governance_payload,
-                    stress_controls,
-                    selected_scenario_packs,
-                    run_mode,
-                )
+                worker_args = (classic_request, selected_entries, selected_exits)
                 status_line = f"Running {len(selected_entries) * len(selected_exits)} momentum entry/exit combinations ({run_mode})...\n"
         else:
             xsmom_valid = self._validate_xsmom_inputs()
@@ -4600,85 +4616,58 @@ class BacktestingPage(ttk.Frame):
 
     def _run_momentum_worker(
         self,
-        tickers: list[str],
-        start_date: date,
-        end_date: date,
-        cache_root: Path,
-        lookback: int,
-        skip: int,
-        costs_bps: float,
-        starting_capital: float,
-        bet_sizing_mode: str,
-        custom_bet_pct: float,
-        timeframe: str,
+        request: ClassicStrategyRunRequest,
         entry_signals: list[str],
         exit_signals: list[str],
-        execution_model: str,
-        execution_model_params: dict[str, object],
-        portfolio_cfg: dict[str, object],
-        governance_payload: dict[str, object],
-        stress_controls: dict[str, object],
-        scenario_packs: list[str],
-        run_mode: str,
     ) -> None:
         try:
-            controls = dict(stress_controls)
-            controls["run_mode"] = run_mode
-            if run_mode == "stress_only":
+            controls = dict(request.stress_controls)
+            controls["run_mode"] = request.run_mode
+            if request.run_mode == "stress_only":
                 controls["stress_only"] = True
             output_text = run_multi_signal_backtest(
-                tickers=tickers,
-                start_date=start_date,
-                end_date=end_date,
-                cache_root=cache_root,
-                lookback_days=lookback,
-                skip_days=skip,
-                costs_bps=costs_bps,
-                execution_model=execution_model,
-                execution_model_params=execution_model_params,
-                starting_capital=starting_capital,
-                bet_sizing_mode=bet_sizing_mode,
-                custom_bet_pct=custom_bet_pct,
-                timeframe=timeframe,
+                tickers=request.tickers,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                cache_root=request.artifact_routing.cache_root,
+                lookback_days=request.lookback,
+                skip_days=request.skip,
+                costs_bps=request.costs_bps,
+                execution_model=request.execution_model,
+                execution_model_params=request.execution_model_params,
+                starting_capital=request.starting_capital,
+                bet_sizing_mode=request.bet_sizing_mode,
+                custom_bet_pct=request.custom_bet_pct,
+                timeframe=request.timeframe,
                 entry_signals=entry_signals,
                 exit_signals=exit_signals,
-                **portfolio_cfg,
-                governance_metadata=dict(governance_payload),
+                **request.portfolio_cfg,
+                governance_metadata=dict(request.governance_payload),
                 stress_controls=controls,
-                scenario_packs=list(scenario_packs),
+                scenario_packs=list(request.selected_scenario_packs),
             )
-            output_text += "\nApplied stress profile: " + str(stress_controls.get("selected_profile", "Base")) + " | Scenario packs: " + (", ".join(scenario_packs) if scenario_packs else "none") + " | Run mode: " + run_mode
+            output_text += "\nApplied stress profile: " + str(request.stress_controls.get("selected_profile", "Base")) + " | Scenario packs: " + (", ".join(request.selected_scenario_packs) if request.selected_scenario_packs else "none") + " | Run mode: " + request.run_mode
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
         self.after(0, lambda: self._finish_backtest_run(output_text))
 
     def _run_trained_regime_worker(
         self,
-        tickers: list[str],
-        start_date: date,
-        end_date: date,
-        cache_root: Path,
-        timeframe: str,
-        contract: RegimeBacktestContract,
-        governance_payload: dict[str, object],
-        stress_controls: dict[str, object],
-        scenario_packs: list[str],
-        selected_test_suite: str,
-        suite_composition: dict[str, object],
+        request: TrainedRegimeReplayRunRequest,
     ) -> None:
         try:
             output_text = run_trained_regime_backtest(
-                tickers=tickers,
-                start_date=start_date,
-                end_date=end_date,
-                cache_root=cache_root,
-                timeframe=timeframe,
-                regime_contract=contract,
-                governance_metadata=dict(governance_payload),
-                stress_controls=dict(stress_controls),
-                scenario_packs=list(scenario_packs),
-                selected_test_suite=str(selected_test_suite),
-                suite_composition=dict(suite_composition),
+                tickers=request.tickers,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                cache_root=request.artifact_routing.cache_root,
+                timeframe=request.timeframe,
+                regime_contract=request.regime_contract,
+                governance_metadata=dict(request.governance_payload),
+                stress_controls=dict(request.stress_controls),
+                scenario_packs=list(request.selected_scenario_packs),
+                selected_test_suite=str(request.selected_suite_key),
+                suite_composition=dict(request.suite_composition),
             )
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
