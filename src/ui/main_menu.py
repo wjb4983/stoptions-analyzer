@@ -66,26 +66,34 @@ class MainMenu(ttk.Frame):
             width=30,
         ).grid(row=3, column=0, pady=10)
 
+
+        ttk.Button(
+            button_frame,
+            text="Intraday Replay",
+            command=lambda: controller.show_frame("IntradayReplayPage"),
+            width=30,
+        ).grid(row=4, column=0, pady=10)
+
         ttk.Button(
             button_frame,
             text="Backtesting",
             command=lambda: controller.show_frame("BacktestingPage"),
             width=30,
-        ).grid(row=4, column=0, pady=10)
+        ).grid(row=5, column=0, pady=10)
 
         ttk.Button(
             button_frame,
             text="Research Lab",
             command=lambda: controller.show_frame("ResearchLabPage"),
             width=30,
-        ).grid(row=5, column=0, pady=10)
+        ).grid(row=6, column=0, pady=10)
 
         ttk.Button(
             button_frame,
             text="Create Regime",
             command=self.open_create_regime_workspace,
             width=30,
-        ).grid(row=6, column=0, pady=10)
+        ).grid(row=7, column=0, pady=10)
 
     def open_create_regime_workspace(self) -> None:
         self.controller.show_frame("CreateRegimePage")
