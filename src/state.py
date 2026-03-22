@@ -66,6 +66,17 @@ def _migrate_leg_payload(raw_leg: object) -> dict[str, object] | None:
     return migrated
 
 
+
+
+def _migrate_remote_synced_runs(payload: object) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        return {}
+    migrated: dict[str, str] = {}
+    for key, value in payload.items():
+        if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
+            migrated[key.strip()] = value.strip()
+    return migrated
+
 def _migrate_regime_definitions(payload: object) -> dict[str, dict[str, object]]:
     if not isinstance(payload, dict) or not payload:
         return _baseline_regime_definitions()
@@ -110,6 +121,7 @@ class AppState:
     regime_definitions: dict[str, dict[str, object]] = field(default_factory=_baseline_regime_definitions)
     regime_training_runs: list[dict[str, object]] = field(default_factory=list)
     active_regime_id: str | None = None
+    remote_synced_runs: dict[str, str] = field(default_factory=dict)
 
     def save(self) -> None:
         payload = {
@@ -123,6 +135,7 @@ class AppState:
             "regime_definitions": _migrate_regime_definitions(self.regime_definitions),
             "regime_training_runs": self.regime_training_runs,
             "active_regime_id": self.active_regime_id,
+            "remote_synced_runs": _migrate_remote_synced_runs(self.remote_synced_runs),
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2))
 
@@ -149,4 +162,5 @@ class AppState:
             regime_definitions=_migrate_regime_definitions(payload.get("regime_definitions")),
             regime_training_runs=payload.get("regime_training_runs", []),
             active_regime_id=payload.get("active_regime_id"),
+            remote_synced_runs=_migrate_remote_synced_runs(payload.get("remote_synced_runs", {})),
         )

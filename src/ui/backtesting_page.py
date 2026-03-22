@@ -17,6 +17,7 @@ from execution import (
     JOB_BACKTEST_TRAINED_REGIME,
     JOB_BACKTEST_WALK_FORWARD,
 )
+from execution.artifact_sync import DEFAULT_REMOTE_NAMESPACE_PREFIX
 from backtesting.application_service import (
     BacktestRequestValidationError,
     BacktestingApplicationService,
@@ -1796,16 +1797,57 @@ class BacktestingPage(ttk.Frame):
         self._render_single_run(self.current_run_dirs[0])
 
     def _scan_backtest_output_runs(self) -> list[Path]:
-        if not BACKTEST_OUTPUT_DIR.exists():
-            return []
         candidates: list[Path] = []
-        for path in BACKTEST_OUTPUT_DIR.iterdir():
-            if not path.is_dir():
+        state_mapping = self._remote_synced_run_dirs()
+        if BACKTEST_OUTPUT_DIR.exists():
+            for path in BACKTEST_OUTPUT_DIR.iterdir():
+                if not path.is_dir():
+                    continue
+                prefix = f"{DEFAULT_REMOTE_NAMESPACE_PREFIX}__"
+                if path.name.startswith(prefix):
+                    remote_job_id = path.name[len(prefix):].strip()
+                    if remote_job_id and state_mapping.get(remote_job_id) != path:
+                        state_mapping[remote_job_id] = path
+                if (path / "leaderboard.json").exists() or (path / "metrics.json").exists() or (path / "aggregate_metrics.json").exists() or (path / "manifest.json").exists() or (path / "fold_summary.json").exists():
+                    candidates.append(path)
+
+        self._persist_remote_sync_mapping(state_mapping)
+        remote_mappings = self._remote_synced_run_dirs()
+        for mapped_path in remote_mappings.values():
+            if mapped_path.exists() and mapped_path.is_dir():
+                candidates.append(mapped_path)
+
+        deduped: list[Path] = []
+        seen: set[Path] = set()
+        for run_dir in candidates:
+            resolved = run_dir.resolve()
+            if resolved in seen:
                 continue
-            if (path / "leaderboard.json").exists() or (path / "metrics.json").exists() or (path / "aggregate_metrics.json").exists() or (path / "manifest.json").exists() or (path / "fold_summary.json").exists():
-                candidates.append(path)
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return candidates
+            seen.add(resolved)
+            deduped.append(run_dir)
+        deduped.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return deduped
+
+
+    def _persist_remote_sync_mapping(self, mapping: dict[str, Path]) -> None:
+        normalized = {job_id: str(path) for job_id, path in mapping.items() if job_id and str(path).strip()}
+        if normalized == self.controller.state.remote_synced_runs:
+            return
+        self.controller.state.remote_synced_runs = normalized
+        self.controller.persist_state()
+
+    def _remote_synced_run_dirs(self) -> dict[str, Path]:
+        raw_mapping = self.controller.state.remote_synced_runs if isinstance(self.controller.state.remote_synced_runs, dict) else {}
+        mapping: dict[str, Path] = {}
+        for remote_job_id, raw_path in raw_mapping.items():
+            if not isinstance(remote_job_id, str) or not isinstance(raw_path, str):
+                continue
+            cleaned_job_id = remote_job_id.strip()
+            cleaned_path = raw_path.strip()
+            if not cleaned_job_id or not cleaned_path:
+                continue
+            mapping[cleaned_job_id] = Path(cleaned_path)
+        return mapping
 
     def _register_run_dirs(self, run_dirs: list[Path]) -> None:
         merged: list[Path] = list(self.current_run_dirs)
@@ -1824,6 +1866,11 @@ class BacktestingPage(ttk.Frame):
 
     def _format_run_label(self, run_dir: Path) -> str:
         parts = [run_dir.name]
+        remote_mapping = self._remote_synced_run_dirs()
+        remote_job_id = next((job_id for job_id, mapped_path in remote_mapping.items() if mapped_path.exists() and mapped_path.resolve() == run_dir.resolve()), None)
+        if remote_job_id:
+            parts.insert(0, f"{DEFAULT_REMOTE_NAMESPACE_PREFIX}:{remote_job_id}")
+
         manifest = self._read_json(run_dir / "manifest.json")
         if isinstance(manifest, dict):
             strategy = manifest.get("strategy")

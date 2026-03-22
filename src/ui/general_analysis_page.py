@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import random
@@ -10,7 +11,7 @@ import threading
 import re
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, time as dt_time, timedelta
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -485,6 +486,13 @@ class GeneralAnalysisPage(ttk.Frame):
 
         analysis_slug = "combined" if len(report_labels) > 1 else report_labels[0]
         output_path = self._write_report(combined_report, output_dir, strategy, analysis_slug)
+        self._write_analysis_artifact_manifest(
+            output_path=output_path,
+            analysis_type=analysis_type,
+            strategy=strategy,
+            settings_payload=settings_payload,
+            run_started_at=run_started_at,
+        )
         self._latest_combined_report = combined_report
         self._latest_report_path = str(output_path)
         self._record_run(
@@ -500,6 +508,50 @@ class GeneralAnalysisPage(ttk.Frame):
             f"{analysis_type} {strategy.lower()} results written to:\n{output_path}",
         )
 
+
+
+    def _write_analysis_artifact_manifest(
+        self,
+        *,
+        output_path: Path,
+        analysis_type: str,
+        strategy: str,
+        settings_payload: dict[str, object],
+        run_started_at: datetime,
+    ) -> Path:
+        run_dir = output_path.parent
+        rel_report = output_path.relative_to(run_dir).as_posix()
+        report_stat = output_path.stat()
+        metadata = {
+            "analysis_type": analysis_type,
+            "strategy": strategy,
+            "started_at": run_started_at.astimezone(timezone.utc).isoformat(),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "settings_checksum": hashlib.sha256(
+                json.dumps(settings_payload, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest(),
+        }
+        artifact_manifest = {
+            "manifest_schema_version": "1.0",
+            "manifest_type": "artifact_inventory",
+            "workflow": "analysis",
+            "run_id": output_path.stem,
+            "run_dir": ".",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "artifact_count": 1,
+            "artifacts": [
+                {
+                    "path": rel_report,
+                    "size_bytes": int(report_stat.st_size),
+                    "modified_at": datetime.fromtimestamp(report_stat.st_mtime, tz=timezone.utc).isoformat(),
+                    "kind": "analysis_report",
+                }
+            ],
+            "metadata": metadata,
+        }
+        output_manifest = run_dir / f"{output_path.stem}.artifact_manifest.json"
+        output_manifest.write_text(json.dumps(artifact_manifest, indent=2, sort_keys=True), encoding="utf-8")
+        return output_manifest
 
     def _run_backend_callable(self, fn: object, **kwargs: object) -> object:
         backend = self.controller.execution_backend

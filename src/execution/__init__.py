@@ -17,6 +17,14 @@ from .backend import (
     build_execution_backend,
 )
 from .remote_ssh_backend import RemoteSSHExecutionBackend
+from .artifact_sync import (
+    ArtifactSyncResult,
+    sync_analysis_artifacts,
+    sync_backtest_artifacts,
+    sync_regime_training_artifacts,
+    sync_run_artifacts,
+    update_remote_sync_mapping,
+)
 
 __all__ = [
     "ExecutionBackend",
@@ -36,4 +44,10 @@ __all__ = [
     "JOB_BACKTEST_TRAINED_REGIME",
     "JOB_BACKTEST_WALK_FORWARD",
     "JOB_REGIME_TRAINING",
+    "ArtifactSyncResult",
+    "sync_run_artifacts",
+    "sync_backtest_artifacts",
+    "sync_analysis_artifacts",
+    "sync_regime_training_artifacts",
+    "update_remote_sync_mapping",
 ]
