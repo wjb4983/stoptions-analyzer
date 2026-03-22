@@ -9,7 +9,7 @@ import uuid
 import statistics
 import webbrowser
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -846,6 +846,34 @@ class ResearchLabPage(ttk.Frame):
 
         if manifest_path is not None and manifest_path.exists():
             shutil.copy2(manifest_path, pack_dir / "source_manifest.json")
+
+        artifact_rows: list[dict[str, Any]] = []
+        for artifact_path in sorted((item for item in pack_dir.rglob("*") if item.is_file()), key=lambda item: item.as_posix()):
+            if artifact_path.name == "artifact_manifest.json":
+                continue
+            stat = artifact_path.stat()
+            artifact_rows.append(
+                {
+                    "path": artifact_path.relative_to(pack_dir).as_posix(),
+                    "size_bytes": int(stat.st_size),
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                }
+            )
+        artifact_manifest = {
+            "manifest_schema_version": "1.0",
+            "manifest_type": "artifact_inventory",
+            "workflow": "research",
+            "run_id": pack_dir.name,
+            "run_dir": ".",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "artifact_count": len(artifact_rows),
+            "artifacts": artifact_rows,
+            "metadata": {
+                "source_manifest_path": "source_manifest.json" if (pack_dir / "source_manifest.json").exists() else None,
+                "task_id": task.task_id,
+            },
+        }
+        (pack_dir / "artifact_manifest.json").write_text(json.dumps(artifact_manifest, indent=2, sort_keys=True), encoding="utf-8")
         return pack_dir
 
     def _build_metrics_tables_payload(self, run_dir: Path | None, manifest_payload: dict[str, Any]) -> dict[str, Any]:

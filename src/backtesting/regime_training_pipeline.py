@@ -1275,6 +1275,52 @@ def _persist_cache_audit_report(request: RegimeTrainingRequest, run_dir: Path) -
     shutil.copyfile(source, target)
     return str(target)
 
+
+
+def _relative_artifact_paths(run_dir: Path, artifact_paths: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in artifact_paths.items():
+        if not isinstance(value, str):
+            normalized[key] = value
+            continue
+        path = Path(value)
+        if path.is_absolute():
+            try:
+                normalized[key] = path.resolve().relative_to(run_dir.resolve()).as_posix()
+                continue
+            except ValueError:
+                normalized[key] = value
+                continue
+        normalized[key] = value
+    return normalized
+
+
+def _write_artifact_manifest(*, run_dir: Path, run_id: str, metadata: dict[str, Any] | None = None) -> Path:
+    artifacts: list[dict[str, Any]] = []
+    for path in sorted((item for item in run_dir.rglob("*") if item.is_file()), key=lambda item: item.as_posix()):
+        if path.name == "artifact_manifest.json":
+            continue
+        stat = path.stat()
+        artifacts.append({
+            "path": path.relative_to(run_dir).as_posix(),
+            "size_bytes": int(stat.st_size),
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        })
+    payload = {
+        "manifest_schema_version": "1.0",
+        "manifest_type": "artifact_inventory",
+        "workflow": "regime_training",
+        "run_id": run_id,
+        "run_dir": ".",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "artifact_count": len(artifacts),
+        "artifacts": artifacts,
+        "metadata": dict(metadata or {}),
+    }
+    output_path = run_dir / "artifact_manifest.json"
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return output_path
+
 def write_regime_training_manifest(
     *,
     run_dir: Path,
@@ -1296,10 +1342,13 @@ def write_regime_training_manifest(
         "warnings": list(result.warnings),
         "errors": list(result.errors),
         "error_payload": result.error_payload,
-        "artifact_paths": {
-            **result.artifact_paths,
-            **({"regime_backtest_replay_payload": replay_payload_path} if replay_payload_path else {}),
-        },
+        "artifact_paths": _relative_artifact_paths(
+            run_dir,
+            {
+                **result.artifact_paths,
+                **({"regime_backtest_replay_payload": replay_payload_path} if replay_payload_path else {}),
+            },
+        ),
         "metadata": {
             **result.metadata,
             "reproducibility": reproducibility_payload,
@@ -1314,6 +1363,7 @@ def write_regime_training_manifest(
         "logs": list(result.logs),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    _write_artifact_manifest(run_dir=run_dir, run_id=result.run_id, metadata={"source_manifest": "manifest.json"})
     return manifest_path
 
 

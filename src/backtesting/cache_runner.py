@@ -2083,6 +2083,7 @@ def run_walk_forward_backtest(
         extra_fingerprint_payload={"lineage_parent_manifest": lineage_parent_manifest},
     )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    _write_artifact_manifest(run_dir=run_dir, workflow="walk_forward", metadata={"source_manifest": "manifest.json"})
     _append_experiment_index(
         {
             "timestamp": manifest["created_at"],
@@ -2377,6 +2378,7 @@ def run_strategy_optimization(
         extra_fingerprint_payload={"best_trials": result.get("pareto_trials", []), "cancellation": cancellation.snapshot()},
     )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    _write_artifact_manifest(run_dir=run_dir, workflow="optimizer", metadata={"source_manifest": "manifest.json"})
     (run_dir / "artifact_metadata.json").write_text(json.dumps({
         "schema_version": "1.0",
         "run_type": "optimization",
@@ -2914,6 +2916,7 @@ def _persist_sweep_outputs(
         metric_tables=metric_tables,
     )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    _write_artifact_manifest(run_dir=run_dir, workflow="parameter_sweep", metadata={"source_manifest": "manifest.json"})
 
     _append_experiment_index(
         {
@@ -4406,6 +4409,7 @@ def _persist_backtest_outputs(
         },
     )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    _write_artifact_manifest(run_dir=run_dir, workflow="backtest", metadata={"source_manifest": "manifest.json"})
     (run_dir / "artifact_metadata.json").write_text(json.dumps({
         "schema_version": "1.0",
         "run_type": "backtest",
@@ -4715,6 +4719,34 @@ def _collect_feature_hashes(parameters: dict[str, Any], data_snapshot: dict[str,
             for key, value in sorted(data_fingerprint.items(), key=lambda item: str(item[0])):
                 feature_hashes[f"data_fingerprint.{key}"] = _stable_fingerprint({"name": key, "value": value})
     return feature_hashes
+
+
+def _write_artifact_manifest(*, run_dir: Path, workflow: str, metadata: dict[str, Any] | None = None) -> Path:
+    files: list[dict[str, Any]] = []
+    for path in sorted((item for item in run_dir.rglob("*") if item.is_file()), key=lambda item: item.as_posix()):
+        if path.name == "artifact_manifest.json":
+            continue
+        rel_path = path.relative_to(run_dir).as_posix()
+        stat = path.stat()
+        files.append({
+            "path": rel_path,
+            "size_bytes": int(stat.st_size),
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        })
+    payload = {
+        "manifest_schema_version": "1.0",
+        "manifest_type": "artifact_inventory",
+        "workflow": workflow,
+        "run_id": run_dir.name,
+        "run_dir": ".",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "artifact_count": len(files),
+        "artifacts": files,
+        "metadata": dict(metadata or {}),
+    }
+    output_path = run_dir / "artifact_manifest.json"
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    return output_path
 
 
 def _collect_artifact_inventory(run_dir: Path) -> dict[str, list[str]]:
