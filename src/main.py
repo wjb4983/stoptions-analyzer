@@ -8,9 +8,11 @@ for _path in (str(_PROJECT_ROOT), str(_SRC_ROOT)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+import os
 import tkinter as tk
 from tkinter import ttk
 
+from execution import build_execution_backend
 from state import AppState
 from ui import (
     AnalysisPage,
@@ -35,6 +37,8 @@ class StoptionsApp(tk.Tk):
         self._maximize_window()
         self.state = AppState.load()
         self.api_key = load_api_key()
+        backend_mode = os.getenv("STOPTIONS_EXECUTION_BACKEND", "local")
+        self.execution_backend = build_execution_backend(mode=backend_mode)
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True)

@@ -10,12 +10,12 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from analysis.prompt_pack import write_prompt_pack
-from backtesting.cache_runner import (
-    run_multi_signal_backtest,
-    run_strategy_optimization,
-    run_time_series_momentum_backtest,
-    run_trained_regime_backtest,
-    run_walk_forward_backtest,
+from execution import (
+    JOB_BACKTEST_MULTI_SIGNAL,
+    JOB_BACKTEST_OPTIMIZATION,
+    JOB_BACKTEST_TIME_SERIES,
+    JOB_BACKTEST_TRAINED_REGIME,
+    JOB_BACKTEST_WALK_FORWARD,
 )
 from backtesting.application_service import (
     BacktestRequestValidationError,
@@ -4515,7 +4515,7 @@ class BacktestingPage(ttk.Frame):
                 "skip_days": [int(skip)],
                 "costs_bps": [float(costs_bps)],
             }
-            output_text = run_strategy_optimization(
+            output_text = self._run_backend_job(JOB_BACKTEST_OPTIMIZATION, dict(
                 tickers=tickers,
                 start_date=start_date,
                 end_date=end_date,
@@ -4541,7 +4541,7 @@ class BacktestingPage(ttk.Frame):
                 overfitting_penalty=None if overfitting_penalty is None else dict(overfitting_penalty),
                 governance_metadata=dict(governance_payload),
                 stress_controls=dict(stress_controls),
-            )
+            ))
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
         self.after(0, lambda: self._finish_backtest_run(output_text))
@@ -4578,7 +4578,7 @@ class BacktestingPage(ttk.Frame):
                 "skip_days": [int(skip)],
                 "costs_bps": [float(costs_bps)],
             }
-            output_text = run_walk_forward_backtest(
+            output_text = self._run_backend_job(JOB_BACKTEST_WALK_FORWARD, dict(
                 tickers=tickers,
                 start_date=start_date,
                 end_date=end_date,
@@ -4609,7 +4609,7 @@ class BacktestingPage(ttk.Frame):
                 prior_strategy_keys=None if wf_payload.get("prior_strategy_keys") is None else list(wf_payload["prior_strategy_keys"]),
                 governance_metadata=dict(governance_payload),
                 stress_controls=dict(stress_controls),
-            )
+            ))
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
         self.after(0, lambda: self._finish_backtest_run(output_text))
@@ -4625,7 +4625,7 @@ class BacktestingPage(ttk.Frame):
             controls["run_mode"] = request.run_mode
             if request.run_mode == "stress_only":
                 controls["stress_only"] = True
-            output_text = run_multi_signal_backtest(
+            output_text = self._run_backend_job(JOB_BACKTEST_MULTI_SIGNAL, dict(
                 tickers=request.tickers,
                 start_date=request.start_date,
                 end_date=request.end_date,
@@ -4645,7 +4645,7 @@ class BacktestingPage(ttk.Frame):
                 governance_metadata=dict(request.governance_payload),
                 stress_controls=controls,
                 scenario_packs=list(request.selected_scenario_packs),
-            )
+            ))
             output_text += "\nApplied stress profile: " + str(request.stress_controls.get("selected_profile", "Base")) + " | Scenario packs: " + (", ".join(request.selected_scenario_packs) if request.selected_scenario_packs else "none") + " | Run mode: " + request.run_mode
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
@@ -4656,7 +4656,7 @@ class BacktestingPage(ttk.Frame):
         request: TrainedRegimeReplayRunRequest,
     ) -> None:
         try:
-            output_text = run_trained_regime_backtest(
+            output_text = self._run_backend_job(JOB_BACKTEST_TRAINED_REGIME, dict(
                 tickers=request.tickers,
                 start_date=request.start_date,
                 end_date=request.end_date,
@@ -4668,7 +4668,7 @@ class BacktestingPage(ttk.Frame):
                 scenario_packs=list(request.selected_scenario_packs),
                 selected_test_suite=str(request.selected_suite_key),
                 suite_composition=dict(request.suite_composition),
-            )
+            ))
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
         self.after(0, lambda: self._finish_backtest_run(output_text))
@@ -4711,7 +4711,7 @@ class BacktestingPage(ttk.Frame):
         overfitting_penalty: dict[str, float] | None,
     ) -> None:
         try:
-            output_text = run_time_series_momentum_backtest(
+            output_text = self._run_backend_job(JOB_BACKTEST_TIME_SERIES, dict(
                 tickers=tickers,
                 start_date=start_date,
                 end_date=end_date,
@@ -4733,10 +4733,24 @@ class BacktestingPage(ttk.Frame):
                 **portfolio_cfg,
                 governance_metadata=dict(governance_payload),
                 stress_controls=dict(stress_controls),
-            )
+            ))
         except Exception as exc:
             output_text = f"Backtest failed: {exc}"
         self.after(0, lambda: self._finish_backtest_run(output_text))
+
+
+    def _run_backend_job(self, job_type: str, payload: dict[str, object]) -> object:
+        backend = self.controller.execution_backend
+        job_id = backend.submit_job(job_type, payload)
+        while True:
+            status = backend.get_status(job_id)
+            if status in {"succeeded", "failed"}:
+                break
+            threading.Event().wait(0.1)
+        if status == "failed":
+            logs = backend.stream_logs(job_id)
+            raise RuntimeError(logs[-1] if logs else f"{job_type} failed")
+        return backend.get_result(job_id) if hasattr(backend, "get_result") else ""
 
     def _set_run_controls_state(self, state: str) -> None:
         if hasattr(self, "run_stress_only_button"):

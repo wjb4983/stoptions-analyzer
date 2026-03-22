@@ -18,9 +18,11 @@ from typing import Any, Callable
 from backtesting.cache_runner import (
     CancellationToken,
     TaskCancellationError,
-    run_multi_signal_backtest,
-    run_strategy_optimization,
-    run_walk_forward_backtest,
+)
+from execution import (
+    JOB_BACKTEST_MULTI_SIGNAL,
+    JOB_BACKTEST_OPTIMIZATION,
+    JOB_BACKTEST_WALK_FORWARD,
 )
 from backtesting.chain_runner import build_default_research_execution_chain
 from backtesting.scenario_toolkit import list_scenario_pack_templates
@@ -3317,7 +3319,7 @@ class ResearchLabPage(ttk.Frame):
 
     def _run_walk_forward_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
         entry_grid, exit_grid, core_grid = self._build_signal_grids(context, config)
-        return run_walk_forward_backtest(
+        return self._run_backend_job(JOB_BACKTEST_WALK_FORWARD, dict(
             tickers=list(context["tickers"]),
             start_date=context["start_date"],
             end_date=context["end_date"],
@@ -3351,11 +3353,11 @@ class ResearchLabPage(ttk.Frame):
             benchmarks=list(config.benchmark_selection),
             cancellation_token=cancellation_token,
             run_namespace=str(context.get("run_namespace", "")).strip() or None,
-        )
+        ))
 
     def _run_optimization_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
         entry_grid, exit_grid, core_grid = self._build_signal_grids(context, config)
-        return run_strategy_optimization(
+        return self._run_backend_job(JOB_BACKTEST_OPTIMIZATION, dict(
             tickers=list(context["tickers"]),
             start_date=context["start_date"],
             end_date=context["end_date"],
@@ -3389,7 +3391,7 @@ class ResearchLabPage(ttk.Frame):
             benchmarks=list(config.benchmark_selection),
             cancellation_token=cancellation_token,
             run_namespace=str(context.get("run_namespace", "")).strip() or None,
-        )
+        ))
 
     def _run_stress_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
         controls = dict(config.stress_controls)
@@ -3397,7 +3399,7 @@ class ResearchLabPage(ttk.Frame):
         controls["run_mode"] = run_mode
         if run_mode == "stress_only":
             controls["stress_only"] = True
-        output = run_multi_signal_backtest(
+        output = self._run_backend_job(JOB_BACKTEST_MULTI_SIGNAL, dict(
             tickers=list(context["tickers"]),
             start_date=context["start_date"],
             end_date=context["end_date"],
@@ -3423,8 +3425,22 @@ class ResearchLabPage(ttk.Frame):
             benchmarks=list(config.benchmark_selection),
             cancellation_token=cancellation_token,
             run_namespace=str(context.get("run_namespace", "")).strip() or None,
-        )
+        ))
         return output + "\nApplied stress profile: " + config.stress_profile + " | Scenario packs: " + (", ".join(config.scenario_packs) if config.scenario_packs else "none") + " | Run mode: " + run_mode
+
+    def _run_backend_job(self, job_type: str, payload: dict[str, object]) -> str:
+        backend = self.controller.execution_backend
+        job_id = backend.submit_job(job_type, payload)
+        while True:
+            status = backend.get_status(job_id)
+            if status in {"succeeded", "failed"}:
+                break
+            threading.Event().wait(0.1)
+        if status == "failed":
+            logs = backend.stream_logs(job_id)
+            raise RuntimeError(logs[-1] if logs else f"{job_type} failed")
+        result = backend.get_result(job_id) if hasattr(backend, "get_result") else ""
+        return str(result)
 
     def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
         self._research_lab_dir.mkdir(parents=True, exist_ok=True)
