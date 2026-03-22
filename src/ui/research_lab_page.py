@@ -3457,18 +3457,24 @@ class ResearchLabPage(ttk.Frame):
         return output + "\nApplied stress profile: " + config.stress_profile + " | Scenario packs: " + (", ".join(config.scenario_packs) if config.scenario_packs else "none") + " | Run mode: " + run_mode
 
     def _run_backend_job(self, job_type: str, payload: dict[str, object]) -> str:
-        backend = self.controller.execution_backend
-        job_id = backend.submit_job(job_type, payload)
-        while True:
-            status = backend.get_status(job_id)
-            if status in {"succeeded", "failed"}:
-                break
-            threading.Event().wait(0.1)
-        if status == "failed":
-            logs = backend.stream_logs(job_id)
-            raise RuntimeError(logs[-1] if logs else f"{job_type} failed")
-        result = backend.get_result(job_id) if hasattr(backend, "get_result") else ""
-        return str(result)
+        def _on_update(metadata: dict[str, object]) -> None:
+            self._append_output(
+                "[job] "
+                + f"{metadata.get('job_id', '')[:12]} status={metadata.get('status', 'queued')} | "
+                + f"host={metadata.get('server_hostname', 'unknown')} | "
+                + f"start={metadata.get('started_at') or '-'} | end={metadata.get('ended_at') or '-'} | "
+                + f"sync={metadata.get('artifact_sync_status', 'not_started')}"
+            )
+
+        outcome = self.controller.job_manager.run_job_and_wait(
+            job_type=job_type,
+            payload=payload,
+            source_page='research_lab',
+            on_update=lambda metadata: self._schedule_ui_update(lambda data=metadata: _on_update(data)),
+        )
+        if outcome.error_message:
+            raise RuntimeError(outcome.error_message)
+        return str(outcome.result if outcome.result is not None else "")
 
     def _run_hypothesis_pipeline_workflow(self, context: dict[str, Any], config: ResearchWorkflowConfig, cancellation_token: CancellationToken) -> str:
         self._research_lab_dir.mkdir(parents=True, exist_ok=True)

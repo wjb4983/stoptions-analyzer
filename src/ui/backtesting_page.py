@@ -4811,17 +4811,25 @@ class BacktestingPage(ttk.Frame):
 
 
     def _run_backend_job(self, job_type: str, payload: dict[str, object]) -> object:
-        backend = self.controller.execution_backend
-        job_id = backend.submit_job(job_type, payload)
-        while True:
-            status = backend.get_status(job_id)
-            if status in {"succeeded", "failed"}:
-                break
-            threading.Event().wait(0.1)
-        if status == "failed":
-            logs = backend.stream_logs(job_id)
-            raise RuntimeError(logs[-1] if logs else f"{job_type} failed")
-        return backend.get_result(job_id) if hasattr(backend, "get_result") else ""
+        def _on_update(metadata: dict[str, object]) -> None:
+            line = (
+                f"[job] {metadata.get('job_id', '')[:12]} status={metadata.get('status', 'queued')} | "
+                f"host={metadata.get('server_hostname', 'unknown')} | "
+                f"start={metadata.get('started_at') or '-'} | end={metadata.get('ended_at') or '-'} | "
+                f"sync={metadata.get('artifact_sync_status', 'not_started')}"
+            )
+            self.logs_text.delete('1.0', tk.END)
+            self.logs_text.insert('1.0', line + '\n')
+
+        result = self.controller.job_manager.run_job_and_wait(
+            job_type=job_type,
+            payload=payload,
+            source_page='backtesting',
+            on_update=lambda metadata: self.after(0, lambda data=metadata: _on_update(data)),
+        )
+        if result.error_message:
+            raise RuntimeError(result.error_message)
+        return result.result if result.result is not None else ""
 
     def _set_run_controls_state(self, state: str) -> None:
         if hasattr(self, "run_stress_only_button"):

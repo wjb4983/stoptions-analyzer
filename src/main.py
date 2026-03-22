@@ -27,6 +27,7 @@ from ui import (
     TickerSelectPage,
 )
 from ui.helpers import load_api_key, load_remote_secrets
+from ui.job_manager import JobManager
 
 class StoptionsApp(tk.Tk):
     def __init__(self) -> None:
@@ -40,6 +41,7 @@ class StoptionsApp(tk.Tk):
             mode=str(self.state.remote_execution_settings.get("mode", "local")),
             remote_settings=self._effective_remote_settings(),
         )
+        self.job_manager = JobManager(controller=self)
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
@@ -80,6 +82,7 @@ class StoptionsApp(tk.Tk):
             mode=str(self.state.remote_execution_settings.get("mode", "local")),
             remote_settings=self._effective_remote_settings(),
         )
+        self.job_manager = JobManager(controller=self)
 
     def _effective_remote_settings(self) -> dict[str, object]:
         merged = dict(self.state.remote_execution_settings)
