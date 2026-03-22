@@ -27,6 +27,13 @@ JOB_BACKTEST_CACHE = "backtesting.cache"
 JOB_REGIME_TRAINING = "regime.training"
 JOB_ANALYSIS_CALLABLE = "analysis.callable"
 
+# Remote envelope-friendly aliases
+JOB_BACKTEST = "backtest"
+JOB_WALK_FORWARD = "walk_forward"
+JOB_OPTIMIZER = "optimizer"
+JOB_REGIME_TRAINING_ALIAS = "regime_training"
+JOB_GENERAL_ANALYSIS = "general_analysis"
+
 
 class ExecutionBackend:
     def submit_job(self, job_type: str, payload: dict[str, Any]) -> str:
@@ -39,6 +46,9 @@ class ExecutionBackend:
         raise NotImplementedError
 
     def fetch_artifacts(self, job_id: str, target_dir: str | Path) -> Path:
+        raise NotImplementedError
+
+    def cancel_job(self, job_id: str) -> None:
         raise NotImplementedError
 
 
@@ -104,6 +114,15 @@ class LocalExecutionBackend(ExecutionBackend):
     def get_error(self, job_id: str) -> str | None:
         return self._get_job(job_id).error
 
+    def cancel_job(self, job_id: str) -> None:
+        record = self._get_job(job_id)
+        if record.status in {"succeeded", "failed", "canceled"}:
+            return
+        record.status = "canceled"
+        record.error = "Canceled by user"
+        record.logs.append("Cancellation requested")
+        record.completed_at = time.time()
+
     def _get_job(self, job_id: str) -> _JobRecord:
         with self._lock:
             record = self._jobs.get(job_id)
@@ -113,6 +132,8 @@ class LocalExecutionBackend(ExecutionBackend):
 
     def _run_job(self, job_id: str) -> None:
         record = self._get_job(job_id)
+        if record.status == "canceled":
+            return
         record.status = "running"
         record.started_at = time.time()
         record.logs.append(f"Started {record.job_type}")
@@ -156,5 +177,8 @@ def build_execution_backend(*, mode: str = "local") -> ExecutionBackend:
     normalized = str(mode).strip().lower()
     if normalized in {"", "local"}:
         return LocalExecutionBackend()
-    # Remote backend to be added in follow-up implementation.
-    return LocalExecutionBackend()
+    if normalized in {"remote", "ssh", "remote_ssh", "ssh_remote"}:
+        from .remote_ssh_backend import build_remote_backend_from_env
+
+        return build_remote_backend_from_env()
+    raise ValueError(f"Unsupported execution backend mode: {mode}")
