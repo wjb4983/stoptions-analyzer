@@ -173,12 +173,12 @@ class LocalExecutionBackend(ExecutionBackend):
         raise ValueError(f"Unsupported job_type: {job_type}")
 
 
-def build_execution_backend(*, mode: str = "local") -> ExecutionBackend:
+def build_execution_backend(*, mode: str = "local", remote_settings: dict[str, object] | None = None) -> ExecutionBackend:
     normalized = str(mode).strip().lower()
     if normalized in {"", "local"}:
         return LocalExecutionBackend()
     if normalized in {"remote", "ssh", "remote_ssh", "ssh_remote"}:
-        from .remote_ssh_backend import build_remote_backend_from_env
+        from .remote_ssh_backend import build_remote_backend_from_settings
 
-        return build_remote_backend_from_env()
+        return build_remote_backend_from_settings(remote_settings or {})
     raise ValueError(f"Unsupported execution backend mode: {mode}")

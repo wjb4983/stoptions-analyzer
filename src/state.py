@@ -6,9 +6,11 @@ from config import (
     DEFAULT_GENERAL_ANALYSIS_SETTINGS,
     DEFAULT_REGIME_CONFIDENCE_THRESHOLDS,
     DEFAULT_REGIME_GLOBAL_RISK_LIMITS,
+    DEFAULT_REMOTE_EXECUTION_SETTINGS,
     DEFAULT_REGIME_TRAINING_WINDOW,
     DEFAULT_REGIME_TRAINING_DATA_SETTINGS,
     STATE_PATH,
+    merged_remote_execution_settings,
 )
 
 REGIME_DEFINITION_SCHEMA_VERSION = 3
@@ -122,6 +124,9 @@ class AppState:
     regime_training_runs: list[dict[str, object]] = field(default_factory=list)
     active_regime_id: str | None = None
     remote_synced_runs: dict[str, str] = field(default_factory=dict)
+    remote_execution_settings: dict[str, object] = field(
+        default_factory=lambda: dict(DEFAULT_REMOTE_EXECUTION_SETTINGS)
+    )
 
     def save(self) -> None:
         payload = {
@@ -136,6 +141,7 @@ class AppState:
             "regime_training_runs": self.regime_training_runs,
             "active_regime_id": self.active_regime_id,
             "remote_synced_runs": _migrate_remote_synced_runs(self.remote_synced_runs),
+            "remote_execution_settings": merged_remote_execution_settings(self.remote_execution_settings),
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2))
 
@@ -163,4 +169,5 @@ class AppState:
             regime_training_runs=payload.get("regime_training_runs", []),
             active_regime_id=payload.get("active_regime_id"),
             remote_synced_runs=_migrate_remote_synced_runs(payload.get("remote_synced_runs", {})),
+            remote_execution_settings=merged_remote_execution_settings(payload.get("remote_execution_settings", {})),
         )

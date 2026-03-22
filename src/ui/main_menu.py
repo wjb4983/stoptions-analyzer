@@ -3,8 +3,9 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from config import API_KEY_PATH
-from ui.helpers import save_api_key
+from config import API_KEY_PATH, DEFAULT_REMOTE_EXECUTION_SETTINGS, validate_remote_execution_settings
+from execution.remote_ssh_backend import build_remote_backend_from_settings
+from ui.helpers import load_remote_secrets, save_api_key, save_remote_secrets
 
 
 class MainMenu(ttk.Frame):
@@ -34,6 +35,8 @@ class MainMenu(ttk.Frame):
         ttk.Button(api_frame, text="Save Key", command=self.save_api_key).grid(
             row=0, column=2, padx=10, pady=8
         )
+
+        self._build_remote_backend_section()
 
         button_frame = ttk.Frame(self)
         button_frame.pack(pady=40)
@@ -100,6 +103,7 @@ class MainMenu(ttk.Frame):
 
     def refresh(self) -> None:
         self.api_key_var.set(self.controller.api_key)
+        self._load_remote_settings_into_form()
 
     def save_api_key(self) -> None:
         key = self.api_key_var.get().strip()
@@ -111,3 +115,155 @@ class MainMenu(ttk.Frame):
         messagebox.showinfo(
             "Saved", f"API key saved to {API_KEY_PATH} (not tracked in git)."
         )
+
+    def _build_remote_backend_section(self) -> None:
+        remote_frame = ttk.LabelFrame(self, text="Remote Backend")
+        remote_frame.pack(pady=12, padx=40, fill="x")
+        remote_frame.columnconfigure(1, weight=1)
+        remote_frame.columnconfigure(3, weight=1)
+
+        settings = dict(DEFAULT_REMOTE_EXECUTION_SETTINGS)
+        settings.update(getattr(self.controller.state, "remote_execution_settings", {}))
+        secrets = load_remote_secrets()
+
+        self.remote_mode_var = tk.StringVar(value=str(settings.get("mode", "local")))
+        self.remote_host_var = tk.StringVar(value=str(settings.get("ssh_host", "")))
+        self.remote_port_var = tk.StringVar(value=str(settings.get("ssh_port", "22")))
+        self.remote_user_var = tk.StringVar(value=str(settings.get("ssh_user", "")))
+        self.remote_project_path_var = tk.StringVar(value=str(settings.get("remote_project_path", "~/stoptions_jobs")))
+        self.remote_python_command_var = tk.StringVar(value=str(settings.get("remote_python_command", "python")))
+        self.remote_venv_path_var = tk.StringVar(value=str(settings.get("remote_venv_path", "")))
+        self.remote_scheduler_enabled_var = tk.BooleanVar(value=bool(settings.get("scheduler_enabled", False)))
+        self.remote_scheduler_name_var = tk.StringVar(value=str(settings.get("scheduler_name", "")))
+        self.remote_scheduler_queue_var = tk.StringVar(value=str(settings.get("scheduler_queue", "")))
+        self.remote_scheduler_max_jobs_var = tk.StringVar(value=str(settings.get("scheduler_max_concurrent_jobs", "1")))
+        self.remote_scheduler_poll_var = tk.StringVar(value=str(settings.get("scheduler_poll_seconds", "1.5")))
+        self.remote_api_key_policy_var = tk.StringVar(value=str(settings.get("api_key_policy", "server_only")))
+        self.remote_ssh_options_var = tk.StringVar(value=str(secrets.get("ssh_options", "")))
+        self.remote_ssh_identity_var = tk.StringVar(value=str(secrets.get("ssh_identity_file", "")))
+
+        row = 0
+        ttk.Label(remote_frame, text="Mode").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Combobox(remote_frame, textvariable=self.remote_mode_var, values=["local", "remote"], state="readonly", width=16).grid(row=row, column=1, sticky="w", padx=8, pady=4)
+        ttk.Label(remote_frame, text="API key policy").grid(row=row, column=2, sticky="w", padx=8, pady=4)
+        ttk.Combobox(
+            remote_frame,
+            textvariable=self.remote_api_key_policy_var,
+            values=["server_only"],
+            state="readonly",
+            width=20,
+        ).grid(row=row, column=3, sticky="w", padx=8, pady=4)
+
+        row += 1
+        ttk.Label(remote_frame, text="SSH host").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_host_var).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+        ttk.Label(remote_frame, text="SSH port").grid(row=row, column=2, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_port_var).grid(row=row, column=3, sticky="ew", padx=8, pady=4)
+
+        row += 1
+        ttk.Label(remote_frame, text="SSH user").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_user_var).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+        ttk.Label(remote_frame, text="Remote root").grid(row=row, column=2, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_project_path_var).grid(row=row, column=3, sticky="ew", padx=8, pady=4)
+
+        row += 1
+        ttk.Label(remote_frame, text="Python command").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_python_command_var).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+        ttk.Label(remote_frame, text="Virtualenv path").grid(row=row, column=2, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_venv_path_var).grid(row=row, column=3, sticky="ew", padx=8, pady=4)
+
+        row += 1
+        ttk.Checkbutton(remote_frame, text="Use scheduler", variable=self.remote_scheduler_enabled_var).grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(remote_frame, text="Scheduler name").grid(row=row, column=2, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_scheduler_name_var).grid(row=row, column=3, sticky="ew", padx=8, pady=4)
+
+        row += 1
+        ttk.Label(remote_frame, text="Scheduler queue").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_scheduler_queue_var).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+        ttk.Label(remote_frame, text="Max concurrent jobs").grid(row=row, column=2, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_scheduler_max_jobs_var).grid(row=row, column=3, sticky="ew", padx=8, pady=4)
+
+        row += 1
+        ttk.Label(remote_frame, text="Poll seconds").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_scheduler_poll_var).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+        ttk.Label(remote_frame, text="SSH options (secret)").grid(row=row, column=2, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_ssh_options_var).grid(row=row, column=3, sticky="ew", padx=8, pady=4)
+
+        row += 1
+        ttk.Label(remote_frame, text="SSH identity file (secret)").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_ssh_identity_var).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+        action_row = ttk.Frame(remote_frame)
+        action_row.grid(row=row, column=3, sticky="e", padx=8, pady=4)
+        ttk.Button(action_row, text="Validate connection", command=self.validate_remote_connection).pack(side="left", padx=(0, 8))
+        ttk.Button(action_row, text="Save remote settings", command=self.save_remote_settings).pack(side="left")
+
+    def _collect_remote_settings(self) -> dict[str, object]:
+        return {
+            "mode": self.remote_mode_var.get().strip().lower() or "local",
+            "ssh_host": self.remote_host_var.get().strip(),
+            "ssh_port": self.remote_port_var.get().strip() or "22",
+            "ssh_user": self.remote_user_var.get().strip(),
+            "remote_project_path": self.remote_project_path_var.get().strip(),
+            "remote_python_command": self.remote_python_command_var.get().strip(),
+            "remote_venv_path": self.remote_venv_path_var.get().strip(),
+            "scheduler_enabled": bool(self.remote_scheduler_enabled_var.get()),
+            "scheduler_name": self.remote_scheduler_name_var.get().strip(),
+            "scheduler_queue": self.remote_scheduler_queue_var.get().strip(),
+            "scheduler_max_concurrent_jobs": self.remote_scheduler_max_jobs_var.get().strip() or "1",
+            "scheduler_poll_seconds": self.remote_scheduler_poll_var.get().strip() or "1.5",
+            "api_key_policy": self.remote_api_key_policy_var.get().strip().lower() or "server_only",
+        }
+
+    def _load_remote_settings_into_form(self) -> None:
+        settings = dict(DEFAULT_REMOTE_EXECUTION_SETTINGS)
+        settings.update(getattr(self.controller.state, "remote_execution_settings", {}))
+        self.remote_mode_var.set(str(settings.get("mode", "local")))
+        self.remote_host_var.set(str(settings.get("ssh_host", "")))
+        self.remote_port_var.set(str(settings.get("ssh_port", "22")))
+        self.remote_user_var.set(str(settings.get("ssh_user", "")))
+        self.remote_project_path_var.set(str(settings.get("remote_project_path", "~/stoptions_jobs")))
+        self.remote_python_command_var.set(str(settings.get("remote_python_command", "python")))
+        self.remote_venv_path_var.set(str(settings.get("remote_venv_path", "")))
+        self.remote_scheduler_enabled_var.set(bool(settings.get("scheduler_enabled", False)))
+        self.remote_scheduler_name_var.set(str(settings.get("scheduler_name", "")))
+        self.remote_scheduler_queue_var.set(str(settings.get("scheduler_queue", "")))
+        self.remote_scheduler_max_jobs_var.set(str(settings.get("scheduler_max_concurrent_jobs", "1")))
+        self.remote_scheduler_poll_var.set(str(settings.get("scheduler_poll_seconds", "1.5")))
+        self.remote_api_key_policy_var.set(str(settings.get("api_key_policy", "server_only")))
+
+    def save_remote_settings(self) -> None:
+        settings = self._collect_remote_settings()
+        errors = validate_remote_execution_settings(settings)
+        if errors:
+            messagebox.showerror("Remote settings invalid", "\n• " + "\n• ".join(errors))
+            return
+        self.controller.state.remote_execution_settings = settings
+        save_remote_secrets(
+            {
+                "ssh_options": self.remote_ssh_options_var.get().strip(),
+                "ssh_identity_file": self.remote_ssh_identity_var.get().strip(),
+            }
+        )
+        self.controller.configure_execution_backend()
+        self.controller.persist_state()
+        messagebox.showinfo("Saved", "Remote backend settings saved.")
+
+    def validate_remote_connection(self) -> None:
+        settings = self._collect_remote_settings()
+        errors = validate_remote_execution_settings(settings)
+        if errors:
+            messagebox.showerror("Remote settings invalid", "\n• " + "\n• ".join(errors))
+            return
+        if str(settings.get("mode", "local")).strip().lower() != "remote":
+            messagebox.showinfo("Validation", "Mode is local; no remote connection check needed.")
+            return
+        try:
+            backend = build_remote_backend_from_settings(settings)
+            ok, detail = backend.validate_connection()
+        except Exception as exc:
+            messagebox.showerror("Connection failed", str(exc))
+            return
+        if ok:
+            messagebox.showinfo("Connection successful", detail)
+        else:
+            messagebox.showerror("Connection failed", detail)

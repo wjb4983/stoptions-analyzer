@@ -128,3 +128,26 @@ def test_migrate_regime_leg_model_type_aliases_to_canonical_family(tmp_path, mon
     leg = loaded.regime_definitions["legacy"]["legs"][0]
 
     assert leg["model_type"] == "cross_asset_macro_conditioned"
+
+
+def test_remote_execution_settings_roundtrip_and_defaults(tmp_path, monkeypatch) -> None:
+    app_state_path = tmp_path / "remote_state.json"
+    monkeypatch.setattr(state, "STATE_PATH", app_state_path)
+
+    original = AppState(
+        remote_execution_settings={
+            "mode": "remote",
+            "ssh_host": "example.internal",
+            "ssh_port": "2222",
+            "ssh_user": "quant",
+            "remote_project_path": "/srv/stoptions/jobs",
+            "remote_python_command": "/usr/bin/python3",
+            "api_key_policy": "server_only",
+        }
+    )
+    original.save()
+    loaded = AppState.load()
+    assert loaded.remote_execution_settings["mode"] == "remote"
+    assert loaded.remote_execution_settings["ssh_host"] == "example.internal"
+    assert loaded.remote_execution_settings["ssh_port"] == "2222"
+    assert loaded.remote_execution_settings["api_key_policy"] == "server_only"

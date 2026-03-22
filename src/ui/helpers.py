@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+import json
 
-from config import API_KEY_PATH, CONFIG_DIR
+from config import API_KEY_PATH, CONFIG_DIR, REMOTE_SECRETS_PATH
 from data_access.cache import _safe_ticker_name
 
 
@@ -16,10 +17,40 @@ def load_api_key() -> str:
 
 
 def save_api_key(key: str) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_config_dir()
     API_KEY_PATH.write_text(key.strip())
     try:
         API_KEY_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
+def load_remote_secrets() -> dict[str, str]:
+    if not REMOTE_SECRETS_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(REMOTE_SECRETS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): str(value) for key, value in payload.items()}
+
+
+def save_remote_secrets(payload: dict[str, str]) -> None:
+    _ensure_config_dir()
+    safe_payload = {str(key): str(value) for key, value in payload.items() if str(value).strip()}
+    REMOTE_SECRETS_PATH.write_text(json.dumps(safe_payload, indent=2), encoding="utf-8")
+    try:
+        REMOTE_SECRETS_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _ensure_config_dir() -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        CONFIG_DIR.chmod(0o700)
     except OSError:
         pass
 

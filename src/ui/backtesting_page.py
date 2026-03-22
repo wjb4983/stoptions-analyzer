@@ -33,6 +33,7 @@ from backtesting.regime_backtest_adapter import (
 )
 from backtesting.scenario_toolkit import list_scenario_pack_templates
 from config import BACKTEST_CACHE_DIR, BACKTEST_OUTPUT_DIR, BACKTEST_STRATEGY_PRESETS, BACKTEST_TEST_SUITE_PRESETS, DEFAULT_BACKTEST_SETTINGS
+from config import validate_remote_execution_settings
 from ui.backtesting_insights import (
     aggregate_regime_market_stress,
     build_guardrails,
@@ -3806,6 +3807,9 @@ class BacktestingPage(ttk.Frame):
             messagebox.showinfo("Validation warning", "Resolve validation hints before running the backtest.")
             return
 
+        if not self._validate_backend_submission_settings():
+            return
+
         tickers = list(self.controller.state.tickers)
         if not tickers:
             messagebox.showinfo("No tickers", "Add tickers before running a backtest.")
@@ -4233,6 +4237,26 @@ class BacktestingPage(ttk.Frame):
 
         thread = threading.Thread(target=worker_target, args=worker_args, daemon=True)
         thread.start()
+
+    def _validate_backend_submission_settings(self) -> bool:
+        remote_settings = getattr(self.controller.state, "remote_execution_settings", {})
+        errors = validate_remote_execution_settings(remote_settings)
+        if errors:
+            messagebox.showerror(
+                "Remote backend settings invalid",
+                "Fix backend settings in Main Menu → Remote Backend before running:\n\n• " + "\n• ".join(errors),
+            )
+            return False
+        mode = str(remote_settings.get("mode", "local")).strip().lower()
+        if mode == "remote":
+            policy = str(remote_settings.get("api_key_policy", "server_only")).strip().lower()
+            if policy == "server_only":
+                self.logs_text.insert(
+                    tk.END,
+                    "[backend] API keys are server-provisioned in remote mode; no per-job forwarding occurs.\n",
+                )
+                self.logs_text.see(tk.END)
+        return True
 
     def _validate_common_inputs(self) -> tuple[str, int, int, float, float, float] | None:
         strategy = self.strategy_var.get().strip() or "momentum"
