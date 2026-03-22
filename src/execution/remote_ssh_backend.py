@@ -158,6 +158,21 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         self._run_ssh(f"mkdir -p {shlex.quote(record.remote_dir)} && touch {shlex.quote(record.remote_dir + '/cancel.requested')}")
         record.status = "canceling"
 
+    def register_existing_job(self, *, job_id: str, job_type: str = "unknown") -> None:
+        cleaned = str(job_id).strip()
+        if not cleaned or cleaned in self._jobs:
+            return
+        remote_dir = f"{self._remote_root.rstrip('/')}/{cleaned}"
+        local_dir = self._local_root / cleaned
+        local_dir.mkdir(parents=True, exist_ok=True)
+        self._jobs[cleaned] = _RemoteJobRecord(
+            job_id=cleaned,
+            job_type=str(job_type or "unknown"),
+            local_dir=local_dir,
+            remote_dir=remote_dir,
+            status="queued",
+        )
+
     def get_result(self, job_id: str) -> Any:
         record = self._get_record(job_id)
         result_text = self._read_remote_text(record.remote_dir, "result.json")

@@ -79,6 +79,34 @@ def _migrate_remote_synced_runs(payload: object) -> dict[str, str]:
             migrated[key.strip()] = value.strip()
     return migrated
 
+def _migrate_active_jobs(payload: object) -> dict[str, dict[str, object]]:
+    if not isinstance(payload, dict):
+        return {}
+    migrated: dict[str, dict[str, object]] = {}
+    for raw_job_id, raw_meta in payload.items():
+        if not isinstance(raw_job_id, str) or not raw_job_id.strip() or not isinstance(raw_meta, dict):
+            continue
+        job_id = raw_job_id.strip()
+        migrated[job_id] = {
+            "job_id": job_id,
+            "job_type": str(raw_meta.get("job_type", "")).strip() or "unknown",
+            "source_page": str(raw_meta.get("source_page", "")).strip() or "unknown",
+            "status": str(raw_meta.get("status", "queued")).strip() or "queued",
+            "submitted_at": str(raw_meta.get("submitted_at", "")).strip() or None,
+            "started_at": str(raw_meta.get("started_at", "")).strip() or None,
+            "ended_at": str(raw_meta.get("ended_at", "")).strip() or None,
+            "server_hostname": str(raw_meta.get("server_hostname", "")).strip() or "unknown",
+            "artifact_sync_status": str(raw_meta.get("artifact_sync_status", "not_started")).strip() or "not_started",
+            "poll_interval_seconds": float(raw_meta.get("poll_interval_seconds", 0.8) or 0.8),
+            "transport_retries": int(raw_meta.get("transport_retries", 0) or 0),
+            "max_transport_retries": int(raw_meta.get("max_transport_retries", 4) or 4),
+            "retryable_transport_failure": bool(raw_meta.get("retryable_transport_failure", False)),
+            "error_kind": str(raw_meta.get("error_kind", "")).strip() or None,
+            "error_message": str(raw_meta.get("error_message", "")).strip() or None,
+        }
+    return migrated
+
+
 def _migrate_regime_definitions(payload: object) -> dict[str, dict[str, object]]:
     if not isinstance(payload, dict) or not payload:
         return _baseline_regime_definitions()
@@ -127,6 +155,7 @@ class AppState:
     remote_execution_settings: dict[str, object] = field(
         default_factory=lambda: dict(DEFAULT_REMOTE_EXECUTION_SETTINGS)
     )
+    active_jobs: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def save(self) -> None:
         payload = {
@@ -142,6 +171,7 @@ class AppState:
             "active_regime_id": self.active_regime_id,
             "remote_synced_runs": _migrate_remote_synced_runs(self.remote_synced_runs),
             "remote_execution_settings": merged_remote_execution_settings(self.remote_execution_settings),
+            "active_jobs": _migrate_active_jobs(self.active_jobs),
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2))
 
@@ -170,4 +200,5 @@ class AppState:
             active_regime_id=payload.get("active_regime_id"),
             remote_synced_runs=_migrate_remote_synced_runs(payload.get("remote_synced_runs", {})),
             remote_execution_settings=merged_remote_execution_settings(payload.get("remote_execution_settings", {})),
+            active_jobs=_migrate_active_jobs(payload.get("active_jobs", {})),
         )
