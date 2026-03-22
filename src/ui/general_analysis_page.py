@@ -33,6 +33,7 @@ from analysis.time_series import (
     TimeSeriesSettings,
     compute_time_series_momentum,
 )
+from execution import JOB_ANALYSIS_CALLABLE
 from config import (
     ANALYSIS_OUTPUT_DIR,
     API_KEY_PATH,
@@ -500,6 +501,19 @@ class GeneralAnalysisPage(ttk.Frame):
         )
 
 
+    def _run_backend_callable(self, fn: object, **kwargs: object) -> object:
+        backend = self.controller.execution_backend
+        job_id = backend.submit_job(JOB_ANALYSIS_CALLABLE, {"callable": fn, "kwargs": kwargs})
+        while True:
+            status = backend.get_status(job_id)
+            if status in {"succeeded", "failed"}:
+                break
+            threading.Event().wait(0.05)
+        if status == "failed":
+            logs = backend.stream_logs(job_id)
+            raise RuntimeError(logs[-1] if logs else "analysis backend job failed")
+        return backend.get_result(job_id) if hasattr(backend, "get_result") else None
+
     def _summarize_key_metrics(self, combined_report: str) -> str:
         metrics: list[str] = []
         metric_patterns = [
@@ -662,8 +676,11 @@ class GeneralAnalysisPage(ttk.Frame):
                 use_residual=settings_payload["momentum_use_residual"],
                 use_multi_horizon=settings_payload["momentum_use_multi_horizon"],
             )
-            result = compute_cross_sectional_momentum(
-                price_history, fundamentals_by_ticker, momentum_settings
+            result = self._run_backend_callable(
+                compute_cross_sectional_momentum,
+                price_history=price_history,
+                fundamentals_by_ticker=fundamentals_by_ticker,
+                settings=momentum_settings,
             )
         else:
             spec = STRATEGY_REGISTRY.get(strategy, STRATEGY_REGISTRY["Value"])
@@ -696,7 +713,12 @@ class GeneralAnalysisPage(ttk.Frame):
             factor_settings = CrossSectionalSettings(
                 top_quantile=top_quantile, bottom_quantile=bottom_quantile
             )
-            result = spec.compute(price_history, fundamentals_by_ticker, factor_settings)
+            result = self._run_backend_callable(
+                spec.compute,
+                price_history=price_history,
+                fundamentals_by_ticker=fundamentals_by_ticker,
+                settings=factor_settings,
+            )
         result.skipped.update(fetch_skipped)
         result.skipped.update(fundamentals_skipped)
 
@@ -736,8 +758,11 @@ class GeneralAnalysisPage(ttk.Frame):
                 use_zscore=settings_payload["time_series_use_zscore"],
                 winsorize_sigma=settings_payload["time_series_winsorize_sigma"],
             )
-            result = compute_time_series_momentum(
-                price_history, fundamentals_by_ticker, momentum_settings
+            result = self._run_backend_callable(
+                compute_time_series_momentum,
+                price_history=price_history,
+                fundamentals_by_ticker=fundamentals_by_ticker,
+                settings=momentum_settings,
             )
         else:
             spec = TIME_SERIES_STRATEGY_REGISTRY.get(
@@ -780,7 +805,12 @@ class GeneralAnalysisPage(ttk.Frame):
                 use_zscore=settings_payload["time_series_use_zscore"],
                 winsorize_sigma=settings_payload["time_series_winsorize_sigma"],
             )
-            result = spec.compute(price_history, fundamentals_by_ticker, factor_settings)
+            result = self._run_backend_callable(
+                spec.compute,
+                price_history=price_history,
+                fundamentals_by_ticker=fundamentals_by_ticker,
+                settings=factor_settings,
+            )
         result.skipped.update(fetch_skipped)
         result.skipped.update(fundamentals_skipped)
 

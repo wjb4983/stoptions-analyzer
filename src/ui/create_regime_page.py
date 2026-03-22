@@ -12,9 +12,8 @@ from backtesting.regime_training_pipeline import (
     RegimeLegTrainingConfig,
     RegimeTrainingRequest,
     RegimeTrainingResult,
-    execute_regime_training_pipeline,
 )
-from backtesting.cache_runner import run_backtest_cache
+from execution import JOB_BACKTEST_CACHE, JOB_REGIME_TRAINING
 from data_access.cache_audit import audit_universe_history
 from backtesting.regime_export_service import export_regime_training_bundle
 from models.regime_catalog import ModelDescriptor, get_model_descriptor, list_models_for_leg
@@ -2415,7 +2414,7 @@ class CreateRegimePage(ttk.Frame):
                 artifact_path = str(cache_report.get("artifact_path", "")).strip()
                 if artifact_path:
                     request.training_data_settings["cache_audit_report"] = artifact_path
-                result = execute_regime_training_pipeline(request)
+                result = self._run_backend_job(JOB_REGIME_TRAINING, {"request": request})
                 metadata = dict(result.metadata)
                 if cache_report.get("artifact_path"):
                     metadata["cache_audit_report"] = str(cache_report["artifact_path"])
@@ -2502,12 +2501,15 @@ class CreateRegimePage(ttk.Frame):
 
         end_date = date.today()
         start_date = end_date - timedelta(days=365 * required_years + 7)
-        run_backtest_cache(
-            tickers=failing_symbols,
-            start_date=start_date,
-            end_date=end_date,
-            cache_root=cache_root,
-            api_key=self.controller.api_key,
+        self._run_backend_job(
+            JOB_BACKTEST_CACHE,
+            {
+                "tickers": failing_symbols,
+                "start_date": start_date,
+                "end_date": end_date,
+                "cache_root": cache_root,
+                "api_key": self.controller.api_key,
+            },
         )
         return {
             "note": (
@@ -2517,6 +2519,19 @@ class CreateRegimePage(ttk.Frame):
             "failing_details": report.get("failing_details", {}),
             "artifact_path": str(report_path),
         }
+
+    def _run_backend_job(self, job_type: str, payload: dict[str, Any]) -> Any:
+        backend = self.controller.execution_backend
+        job_id = backend.submit_job(job_type, payload)
+        while True:
+            status = backend.get_status(job_id)
+            if status in {"succeeded", "failed"}:
+                break
+            threading.Event().wait(0.1)
+        if status == "failed":
+            logs = backend.stream_logs(job_id)
+            raise RuntimeError(logs[-1] if logs else f"{job_type} failed")
+        return backend.get_result(job_id) if hasattr(backend, "get_result") else None
 
     def _on_training_result_failed(self, result: RegimeTrainingResult) -> None:
         self._is_training = False
