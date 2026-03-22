@@ -253,6 +253,33 @@ def test_main_menu_and_research_navigation(monkeypatch):
     assert controller.frames[-1] == "BacktestingPage"
 
 
+def test_main_menu_remote_settings_validation(monkeypatch):
+    errors = []
+    monkeypatch.setattr(main_menu.messagebox, "showerror", lambda title, msg: errors.append((title, msg)))
+
+    controller = FakeController(AppState(), api_key="")
+    menu = main_menu.MainMenu.__new__(main_menu.MainMenu)
+    menu.controller = controller
+    menu.remote_mode_var = Var("remote")
+    menu.remote_host_var = Var("")
+    menu.remote_port_var = Var("22")
+    menu.remote_user_var = Var("")
+    menu.remote_project_path_var = Var("~/jobs")
+    menu.remote_python_command_var = Var("python")
+    menu.remote_venv_path_var = Var("")
+    menu.remote_scheduler_enabled_var = Var(False)
+    menu.remote_scheduler_name_var = Var("")
+    menu.remote_scheduler_queue_var = Var("")
+    menu.remote_scheduler_max_jobs_var = Var("1")
+    menu.remote_scheduler_poll_var = Var("1.5")
+    menu.remote_api_key_policy_var = Var("server_only")
+    menu.remote_ssh_options_var = Var("")
+    menu.remote_ssh_identity_var = Var("")
+
+    menu.save_remote_settings()
+    assert errors and errors[-1][0] == "Remote settings invalid"
+
+
 def test_research_lab_validation_no_signal_and_invalid_dates():
     lab = research_lab_page.ResearchLabPage.__new__(research_lab_page.ResearchLabPage)
     lab.wizard_data_universe_var = Var("AAPL")

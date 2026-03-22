@@ -8,7 +8,6 @@ for _path in (str(_PROJECT_ROOT), str(_SRC_ROOT)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-import os
 import tkinter as tk
 from tkinter import ttk
 
@@ -27,7 +26,7 @@ from ui import (
     TickerEntryPage,
     TickerSelectPage,
 )
-from ui.helpers import load_api_key
+from ui.helpers import load_api_key, load_remote_secrets
 
 class StoptionsApp(tk.Tk):
     def __init__(self) -> None:
@@ -37,8 +36,10 @@ class StoptionsApp(tk.Tk):
         self._maximize_window()
         self.state = AppState.load()
         self.api_key = load_api_key()
-        backend_mode = os.getenv("STOPTIONS_EXECUTION_BACKEND", "local")
-        self.execution_backend = build_execution_backend(mode=backend_mode)
+        self.execution_backend = build_execution_backend(
+            mode=str(self.state.remote_execution_settings.get("mode", "local")),
+            remote_settings=self._effective_remote_settings(),
+        )
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
@@ -73,6 +74,17 @@ class StoptionsApp(tk.Tk):
 
     def persist_state(self) -> None:
         self.state.save()
+
+    def configure_execution_backend(self) -> None:
+        self.execution_backend = build_execution_backend(
+            mode=str(self.state.remote_execution_settings.get("mode", "local")),
+            remote_settings=self._effective_remote_settings(),
+        )
+
+    def _effective_remote_settings(self) -> dict[str, object]:
+        merged = dict(self.state.remote_execution_settings)
+        merged.update(load_remote_secrets())
+        return merged
 
     def _maximize_window(self) -> None:
         self.update_idletasks()

@@ -4,10 +4,28 @@ from pathlib import Path
 STATE_PATH = Path(__file__).resolve().parent / "app_state.txt"
 CONFIG_DIR = Path.home() / ".stoptions_analyzer"
 API_KEY_PATH = CONFIG_DIR / "api_key.txt"
+REMOTE_SECRETS_PATH = CONFIG_DIR / "remote_secrets.json"
 HYPOTHESIS_RUBRIC_TEMPLATES_PATH = CONFIG_DIR / "hypothesis_rubric_templates.json"
 RESEARCH_LAB_PRESETS_PATH = Path(__file__).resolve().parent.parent / "config" / "research_lab_presets.json"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
+REMOTE_EXECUTION_MODES = ("local", "remote")
+API_KEY_POLICIES = ("server_only", "forward_per_job")
+DEFAULT_REMOTE_EXECUTION_SETTINGS = {
+    "mode": "local",
+    "ssh_host": "",
+    "ssh_port": "22",
+    "ssh_user": "",
+    "remote_project_path": "~/stoptions_jobs",
+    "remote_python_command": "python",
+    "remote_venv_path": "",
+    "scheduler_enabled": False,
+    "scheduler_name": "",
+    "scheduler_queue": "",
+    "scheduler_max_concurrent_jobs": "1",
+    "scheduler_poll_seconds": "1.5",
+    "api_key_policy": "server_only",
+}
 HORIZON_CONFIGS = [
     ("Day", 1, 10, "10m"),
     ("3 Day", 3, 30, "30m"),
@@ -415,3 +433,69 @@ DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES = {
         },
     },
 }
+
+
+def merged_remote_execution_settings(payload: object) -> dict[str, object]:
+    merged = dict(DEFAULT_REMOTE_EXECUTION_SETTINGS)
+    if isinstance(payload, dict):
+        for key in merged:
+            if key in payload:
+                merged[key] = payload[key]
+    merged["mode"] = str(merged.get("mode", "local")).strip().lower() or "local"
+    merged["api_key_policy"] = str(merged.get("api_key_policy", "server_only")).strip().lower() or "server_only"
+    return merged
+
+
+def validate_remote_execution_settings(payload: object) -> list[str]:
+    settings = merged_remote_execution_settings(payload)
+    errors: list[str] = []
+    mode = str(settings.get("mode", "local")).strip().lower()
+    if mode not in set(REMOTE_EXECUTION_MODES):
+        errors.append("Execution mode must be either 'local' or 'remote'.")
+        return errors
+    if mode != "remote":
+        return errors
+
+    host = str(settings.get("ssh_host", "")).strip()
+    if not host:
+        errors.append("Remote SSH host is required when mode is 'remote'.")
+
+    try:
+        port = int(str(settings.get("ssh_port", "")).strip() or "22")
+    except ValueError:
+        errors.append("Remote SSH port must be an integer.")
+    else:
+        if port < 1 or port > 65535:
+            errors.append("Remote SSH port must be between 1 and 65535.")
+
+    remote_project_path = str(settings.get("remote_project_path", "")).strip()
+    if not remote_project_path:
+        errors.append("Remote project path is required when mode is 'remote'.")
+
+    remote_python_command = str(settings.get("remote_python_command", "")).strip()
+    remote_venv_path = str(settings.get("remote_venv_path", "")).strip()
+    if not remote_python_command and not remote_venv_path:
+        errors.append("Provide a remote python command or remote virtualenv path.")
+
+    policy = str(settings.get("api_key_policy", "server_only")).strip().lower()
+    if policy not in set(API_KEY_POLICIES):
+        errors.append("API key policy must be 'server_only' or 'forward_per_job'.")
+    elif policy == "forward_per_job":
+        errors.append("Per-job API key forwarding is not enabled in this build; choose 'server_only'.")
+
+    try:
+        poll_seconds = float(str(settings.get("scheduler_poll_seconds", "")).strip() or "1.5")
+    except ValueError:
+        errors.append("Scheduler poll interval must be numeric.")
+    else:
+        if poll_seconds <= 0:
+            errors.append("Scheduler poll interval must be greater than zero.")
+
+    try:
+        max_jobs = int(str(settings.get("scheduler_max_concurrent_jobs", "")).strip() or "1")
+    except ValueError:
+        errors.append("Scheduler max concurrent jobs must be an integer.")
+    else:
+        if max_jobs <= 0:
+            errors.append("Scheduler max concurrent jobs must be at least 1.")
+    return errors

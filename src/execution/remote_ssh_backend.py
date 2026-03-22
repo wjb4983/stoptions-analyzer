@@ -56,6 +56,13 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         self._local_root = Path(tempfile.gettempdir()) / "stoptions_remote_jobs"
         self._local_root.mkdir(parents=True, exist_ok=True)
 
+    def validate_connection(self) -> tuple[bool, str]:
+        try:
+            output = self._run_ssh(f"{shlex.quote(self._python_bin)} --version")
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+        return True, output.strip() or "Remote python is reachable."
+
     def submit_job(self, job_type: str, payload: dict[str, Any]) -> str:
         job_id = uuid4().hex
         created_at = datetime.now(timezone.utc).isoformat()
@@ -224,17 +231,29 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         local_path.write_bytes(base64.b64decode(output))
 
 
-def build_remote_backend_from_env() -> RemoteSSHExecutionBackend:
-    host = os.getenv("STOPTIONS_REMOTE_HOST", "").strip()
+def build_remote_backend_from_settings(settings: dict[str, object]) -> RemoteSSHExecutionBackend:
+    host = str(settings.get("ssh_host", "")).strip()
     if not host:
-        raise ValueError("STOPTIONS_REMOTE_HOST is required for remote backend mode")
-    user = os.getenv("STOPTIONS_REMOTE_USER", "").strip() or None
-    port_raw = os.getenv("STOPTIONS_REMOTE_PORT", "").strip()
+        host = os.getenv("STOPTIONS_REMOTE_HOST", "").strip()
+    if not host:
+        raise ValueError("Remote host is required for remote backend mode")
+    user = str(settings.get("ssh_user", "")).strip() or os.getenv("STOPTIONS_REMOTE_USER", "").strip() or None
+    port_raw = str(settings.get("ssh_port", "")).strip() or os.getenv("STOPTIONS_REMOTE_PORT", "").strip()
     port = int(port_raw) if port_raw else None
-    python_bin = os.getenv("STOPTIONS_REMOTE_PYTHON", "python")
-    remote_root = os.getenv("STOPTIONS_REMOTE_ROOT", DEFAULT_REMOTE_ROOT)
-    ssh_options = os.getenv("STOPTIONS_REMOTE_SSH_OPTIONS", "")
-    poll_interval = float(os.getenv("STOPTIONS_REMOTE_POLL_SECONDS", str(_STATUS_POLL_SECONDS)))
+    remote_venv_path = str(settings.get("remote_venv_path", "")).strip()
+    python_from_venv = f"{remote_venv_path.rstrip('/')}/bin/python" if remote_venv_path else ""
+    python_bin = (
+        str(settings.get("remote_python_command", "")).strip()
+        or python_from_venv
+        or os.getenv("STOPTIONS_REMOTE_PYTHON", "python")
+    )
+    remote_root = str(settings.get("remote_project_path", "")).strip() or os.getenv("STOPTIONS_REMOTE_ROOT", DEFAULT_REMOTE_ROOT)
+    ssh_options = str(settings.get("ssh_options", "")).strip() or os.getenv("STOPTIONS_REMOTE_SSH_OPTIONS", "")
+    identity_file = str(settings.get("ssh_identity_file", "")).strip()
+    if identity_file:
+        ssh_options = f"{ssh_options} -i {shlex.quote(identity_file)}".strip()
+    poll_raw = str(settings.get("scheduler_poll_seconds", "")).strip() or os.getenv("STOPTIONS_REMOTE_POLL_SECONDS", str(_STATUS_POLL_SECONDS))
+    poll_interval = float(poll_raw)
     return RemoteSSHExecutionBackend(
         host=host,
         user=user,
