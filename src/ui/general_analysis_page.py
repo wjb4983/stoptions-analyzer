@@ -35,6 +35,7 @@ from analysis.time_series import (
     compute_time_series_momentum,
 )
 from execution import JOB_ANALYSIS_CALLABLE
+from execution.contracts import JobState, SubmitJobRequest
 from config import (
     ANALYSIS_OUTPUT_DIR,
     API_KEY_PATH,
@@ -554,17 +555,17 @@ class GeneralAnalysisPage(ttk.Frame):
         return output_manifest
 
     def _run_backend_callable(self, fn: object, **kwargs: object) -> object:
-        backend = self.controller.execution_backend
-        job_id = backend.submit_job(JOB_ANALYSIS_CALLABLE, {"callable": fn, "kwargs": kwargs})
-        while True:
-            status = backend.get_status(job_id)
-            if status in {"succeeded", "failed"}:
-                break
-            threading.Event().wait(0.05)
-        if status == "failed":
-            logs = backend.stream_logs(job_id)
+        result = self.controller.job_manager.run_job_and_wait(
+            request=SubmitJobRequest(
+                job_type=JOB_ANALYSIS_CALLABLE,
+                payload={"callable": fn, "kwargs": kwargs},
+            ),
+            source_page="general_analysis",
+        )
+        if result.status == JobState.FAILED.value:
+            logs = result.logs or []
             raise RuntimeError(logs[-1] if logs else "analysis backend job failed")
-        return backend.get_result(job_id) if hasattr(backend, "get_result") else None
+        return result.result
 
     def _summarize_key_metrics(self, combined_report: str) -> str:
         metrics: list[str] = []

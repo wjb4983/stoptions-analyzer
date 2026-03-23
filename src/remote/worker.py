@@ -29,6 +29,7 @@ from execution.backend import (
     JOB_BACKTEST_WALK_FORWARD,
     JOB_REGIME_TRAINING,
 )
+from execution.contracts import SCHEMA_VERSION, ensure_schema_compatible, normalize_job_state
 from execution.remote_payloads import deserialize_from_json, serialize_for_json
 
 
@@ -48,12 +49,13 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _status_payload(*, envelope: dict[str, Any], status: str, started_at: str, completed_at: str | None = None, error: str | None = None) -> dict[str, Any]:
+    normalized_status = normalize_job_state(status).value
     return {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "job_id": envelope.get("job_id") or envelope.get("run_id"),
         "run_id": envelope.get("run_id"),
         "job_type": envelope.get("job_type"),
-        "status": status,
+        "status": normalized_status,
         "timestamps": {
             "created_at": envelope.get("timestamps", {}).get("created_at"),
             "submitted_at": envelope.get("timestamps", {}).get("submitted_at"),
@@ -115,6 +117,7 @@ def _dispatch(job_type: str, payload: dict[str, Any], cancellation_token: Cancel
 
 def _run_worker(job_file: Path) -> int:
     envelope = json.loads(job_file.read_text(encoding="utf-8"))
+    ensure_schema_compatible(int(envelope.get("schema_version", 1)), source="remote worker envelope")
     job_dir = job_file.parent
     status_path = job_dir / "status.json"
     logs_path = job_dir / "logs.txt"

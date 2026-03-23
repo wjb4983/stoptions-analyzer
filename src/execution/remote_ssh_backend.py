@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from .backend import ExecutionBackend
+from .contracts import SCHEMA_VERSION, ensure_schema_compatible, normalize_job_state
 from .remote_payloads import deserialize_from_json, serialize_for_json
 
 
@@ -71,7 +72,7 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         local_dir.mkdir(parents=True, exist_ok=True)
 
         envelope = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "run_id": job_id,
             "job_id": job_id,
             "job_type": str(job_type),
@@ -120,7 +121,8 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         except json.JSONDecodeError:
             return record.status
         record.status_payload = payload
-        record.status = str(payload.get("status", record.status))
+        ensure_schema_compatible(int(payload.get("schema_version", 1)), source="remote status payload")
+        record.status = normalize_job_state(str(payload.get("status", record.status))).value
         return record.status
 
     def stream_logs(self, job_id: str) -> list[str]:

@@ -24,6 +24,7 @@ from execution import (
     JOB_BACKTEST_OPTIMIZATION,
     JOB_BACKTEST_WALK_FORWARD,
 )
+from execution.contracts import SubmitJobRequest
 from backtesting.chain_runner import build_default_research_execution_chain
 from backtesting.scenario_toolkit import list_scenario_pack_templates
 from config import (
@@ -3467,8 +3468,7 @@ class ResearchLabPage(ttk.Frame):
             )
 
         outcome = self.controller.job_manager.run_job_and_wait(
-            job_type=job_type,
-            payload=payload,
+            request=SubmitJobRequest(job_type=job_type, payload=payload),
             source_page='research_lab',
             on_update=lambda metadata: self._schedule_ui_update(lambda data=metadata: _on_update(data)),
         )
