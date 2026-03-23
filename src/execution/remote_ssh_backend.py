@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import subprocess
 import tempfile
 import time
 from typing import Any
@@ -15,9 +14,11 @@ from uuid import uuid4
 from .backend import ExecutionBackend
 from .contracts import SCHEMA_VERSION, ensure_schema_compatible, normalize_job_state
 from .remote_payloads import deserialize_from_json, serialize_for_json
+from .ssh_transport import SSHTransport, SSHTransportConfig
 
 
 DEFAULT_REMOTE_ROOT = "~/stoptions_jobs"
+REMOTE_REGISTRY_FILENAME = "registry.jsonl"
 _STATUS_POLL_SECONDS = 1.5
 
 
@@ -42,6 +43,9 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         python_bin: str = "python",
         remote_root: str = DEFAULT_REMOTE_ROOT,
         ssh_options: str = "",
+        ssh_identity_file: str | None = None,
+        ssh_known_hosts_file: str | None = None,
+        strict_host_key_checking: bool = True,
         poll_interval_seconds: float = _STATUS_POLL_SECONDS,
     ) -> None:
         self._host = host.strip()
@@ -56,10 +60,21 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         self._jobs: dict[str, _RemoteJobRecord] = {}
         self._local_root = Path(tempfile.gettempdir()) / "stoptions_remote_jobs"
         self._local_root.mkdir(parents=True, exist_ok=True)
+        self._transport = SSHTransport(
+            SSHTransportConfig(
+                host=self._host,
+                user=self._user,
+                port=self._port,
+                identity_file=(ssh_identity_file or "").strip() or None,
+                known_hosts_file=(ssh_known_hosts_file or "").strip() or None,
+                strict_host_key_checking=bool(strict_host_key_checking),
+                extra_options=self._ssh_options,
+            )
+        )
 
     def validate_connection(self) -> tuple[bool, str]:
         try:
-            output = self._run_ssh(f"{shlex.quote(self._python_bin)} --version")
+            output = self._transport.run(f"{shlex.quote(self._python_bin)} --version")
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
         return True, output.strip() or "Remote python is reachable."
@@ -77,23 +92,74 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
             "job_id": job_id,
             "job_type": str(job_type),
             "params": serialize_for_json(payload),
-            "requested_outputs": ["status.json", "logs.txt", "artifacts.json", "result.json"],
+            "requested_outputs": ["status.json", "logs.txt", "summary.json", "result.json"],
             "timestamps": {
                 "created_at": created_at,
                 "submitted_at": created_at,
             },
         }
         envelope_text = json.dumps(envelope, indent=2)
-        (local_dir / "job.json").write_text(envelope_text, encoding="utf-8")
+        (local_dir / "job_request.json").write_text(envelope_text, encoding="utf-8")
 
         escaped_remote_dir = shlex.quote(remote_dir)
-        launch_cmd = (
-            f"mkdir -p {escaped_remote_dir} && "
-            f"cat > {escaped_remote_dir}/job.json <<'JSON'\n{envelope_text}\nJSON\n"
-            f"nohup {shlex.quote(self._python_bin)} -m remote.worker --job-file {escaped_remote_dir}/job.json "
-            f">> {escaped_remote_dir}/launcher.log 2>&1 & echo $! > {escaped_remote_dir}/worker.pid"
+        self._transport.run(f"mkdir -p {escaped_remote_dir}")
+        self._transport.write_text(f"{remote_dir}/job_request.json", envelope_text)
+        self._transport.write_text(
+            f"{remote_dir}/status.json",
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "job_id": job_id,
+                    "job_type": str(job_type),
+                    "status": "queued",
+                    "timestamps": {"created_at": created_at, "submitted_at": created_at, "started_at": None, "completed_at": None},
+                    "error": None,
+                },
+                indent=2,
+            ),
         )
-        self._run_ssh(launch_cmd)
+        self._transport.write_text(f"{remote_dir}/logs.txt", "")
+        self._transport.write_text(
+            f"{remote_dir}/summary.json",
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "job_id": job_id,
+                    "job_type": str(job_type),
+                    "status": "queued",
+                    "timestamps": {"created_at": created_at, "submitted_at": created_at, "started_at": None, "completed_at": None},
+                },
+                indent=2,
+            ),
+        )
+
+        launched_at = datetime.now(timezone.utc).isoformat()
+        launch_output = self._transport.run(
+            f"cd {escaped_remote_dir} && nohup {shlex.quote(self._python_bin)} -m remote.worker "
+            f"--job-file {escaped_remote_dir}/job_request.json "
+            ">> logs.txt 2>&1 & echo $!"
+        ).strip()
+        child_pid = int(launch_output.splitlines()[-1]) if launch_output else None
+        launch_metadata = {
+            "schema_version": SCHEMA_VERSION,
+            "job_id": job_id,
+            "job_type": str(job_type),
+            "started_at": launched_at,
+            "child_pid": child_pid,
+            "remote_dir": remote_dir,
+        }
+        self._transport.write_text(f"{remote_dir}/launch_metadata.json", json.dumps(launch_metadata, indent=2))
+        self._append_registry_entry(
+            {
+                "event": "submitted",
+                "job_id": job_id,
+                "job_type": str(job_type),
+                "remote_dir": remote_dir,
+                "submitted_at": created_at,
+                "started_at": launched_at,
+                "child_pid": child_pid,
+            }
+        )
 
         self._jobs[job_id] = _RemoteJobRecord(
             job_id=job_id,
@@ -112,7 +178,7 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         if now - record.last_status_at < self._poll_interval_seconds:
             return record.status
 
-        status_json = self._read_remote_text(record.remote_dir, "status.json")
+        status_json = self._transport.read_text(f"{record.remote_dir}/status.json")
         record.last_status_at = now
         if status_json is None:
             return record.status
@@ -127,7 +193,7 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
 
     def stream_logs(self, job_id: str) -> list[str]:
         record = self._get_record(job_id)
-        text = self._read_remote_text(record.remote_dir, "logs.txt")
+        text = self._transport.read_text(f"{record.remote_dir}/logs.txt")
         if text is None:
             return []
         return text.splitlines()
@@ -137,8 +203,8 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         target_root = Path(target_dir).expanduser() / job_id
         target_root.mkdir(parents=True, exist_ok=True)
 
-        for fixed_name in ("job.json", "status.json", "logs.txt", "artifacts.json", "result.json"):
-            self._download_remote_file(record.remote_dir, fixed_name, target_root / fixed_name)
+        for fixed_name in ("job_request.json", "status.json", "logs.txt", "summary.json", "artifacts.json", "result.json", "launch_metadata.json"):
+            self._transport.download_file(f"{record.remote_dir}/{fixed_name}", target_root / fixed_name)
 
         manifest_path = target_root / "artifacts.json"
         if manifest_path.exists():
@@ -152,12 +218,12 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
                     continue
                 destination = target_root / rel_path
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                self._download_remote_file(record.remote_dir, rel_path, destination)
+                self._transport.download_file(f"{record.remote_dir}/{rel_path}", destination)
         return target_root
 
     def cancel_job(self, job_id: str) -> None:
         record = self._get_record(job_id)
-        self._run_ssh(f"mkdir -p {shlex.quote(record.remote_dir)} && touch {shlex.quote(record.remote_dir + '/cancel.requested')}")
+        self._transport.run(f"mkdir -p {shlex.quote(record.remote_dir)} && touch {shlex.quote(record.remote_dir + '/cancel.requested')}")
         record.status = "canceling"
 
     def register_existing_job(self, *, job_id: str, job_type: str = "unknown") -> None:
@@ -177,7 +243,7 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
 
     def get_result(self, job_id: str) -> Any:
         record = self._get_record(job_id)
-        result_text = self._read_remote_text(record.remote_dir, "result.json")
+        result_text = self._transport.read_text(f"{record.remote_dir}/result.json")
         if not result_text:
             return None
         payload = json.loads(result_text)
@@ -189,63 +255,14 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
             raise KeyError(f"Unknown job_id: {job_id}")
         return record
 
-    def _build_ssh_target(self) -> str:
-        if self._user:
-            return f"{self._user}@{self._host}"
-        return self._host
-
-    def _build_ssh_args(self, remote_command: str) -> list[str]:
-        args = ["ssh"]
-        if self._port:
-            args.extend(["-p", str(self._port)])
-        if self._ssh_options:
-            args.extend(shlex.split(self._ssh_options))
-        args.append(self._build_ssh_target())
-        args.append(remote_command)
-        return args
-
-    def _run_ssh(self, remote_command: str, *, allow_failure: bool = False) -> str:
-        cmd = self._build_ssh_args(remote_command)
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)
-        if proc.returncode != 0 and not allow_failure:
-            stderr = proc.stderr.strip()
-            stdout = proc.stdout.strip()
-            detail = stderr or stdout or f"exit={proc.returncode}"
-            raise RuntimeError(f"SSH command failed: {detail}")
-        return proc.stdout
-
-    def _read_remote_text(self, remote_dir: str, rel_path: str) -> str | None:
-        remote_file = f"{remote_dir.rstrip('/')}/{rel_path.lstrip('/')}"
+    def _append_registry_entry(self, payload: dict[str, Any]) -> None:
+        entry = json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), **payload}, default=str)
+        remote_registry = f"{self._remote_root.rstrip('/')}/{REMOTE_REGISTRY_FILENAME}"
         command = (
-            "python - <<'PY'\n"
-            "from pathlib import Path\n"
-            f"p = Path({remote_file!r}).expanduser()\n"
-            "if p.exists():\n"
-            "    print(p.read_text(encoding='utf-8'))\n"
-            "PY"
+            f"mkdir -p {shlex.quote(self._remote_root)} && "
+            f"cat >> {shlex.quote(remote_registry)} <<'JSON'\n{entry}\nJSON"
         )
-        output = self._run_ssh(command, allow_failure=True)
-        if not output.strip():
-            return None
-        return output
-
-    def _download_remote_file(self, remote_dir: str, rel_path: str, local_path: Path) -> None:
-        remote_file = f"{remote_dir.rstrip('/')}/{rel_path.lstrip('/')}"
-        command = (
-            "python - <<'PY'\n"
-            "import base64\n"
-            "from pathlib import Path\n"
-            f"p = Path({remote_file!r}).expanduser()\n"
-            "if p.exists() and p.is_file():\n"
-            "    print(base64.b64encode(p.read_bytes()).decode('ascii'))\n"
-            "PY"
-        )
-        output = self._run_ssh(command, allow_failure=True).strip()
-        if not output:
-            return
-        import base64
-
-        local_path.write_bytes(base64.b64decode(output))
+        self._transport.run(command)
 
 
 def build_remote_backend_from_settings(settings: dict[str, object]) -> RemoteSSHExecutionBackend:
@@ -266,9 +283,9 @@ def build_remote_backend_from_settings(settings: dict[str, object]) -> RemoteSSH
     )
     remote_root = str(settings.get("remote_project_path", "")).strip() or os.getenv("STOPTIONS_REMOTE_ROOT", DEFAULT_REMOTE_ROOT)
     ssh_options = str(settings.get("ssh_options", "")).strip() or os.getenv("STOPTIONS_REMOTE_SSH_OPTIONS", "")
-    identity_file = str(settings.get("ssh_identity_file", "")).strip()
-    if identity_file:
-        ssh_options = f"{ssh_options} -i {shlex.quote(identity_file)}".strip()
+    identity_file = str(settings.get("ssh_identity_file", "")).strip() or os.getenv("STOPTIONS_REMOTE_IDENTITY_FILE", "").strip() or None
+    known_hosts_file = str(settings.get("ssh_known_hosts_file", "")).strip() or os.getenv("STOPTIONS_REMOTE_KNOWN_HOSTS_FILE", "").strip() or None
+    strict_host_key_checking = str(settings.get("ssh_strict_host_key_checking", "true")).strip().lower() not in {"0", "false", "no", "off"}
     poll_raw = str(settings.get("scheduler_poll_seconds", "")).strip() or os.getenv("STOPTIONS_REMOTE_POLL_SECONDS", str(_STATUS_POLL_SECONDS))
     poll_interval = float(poll_raw)
     return RemoteSSHExecutionBackend(
@@ -278,5 +295,8 @@ def build_remote_backend_from_settings(settings: dict[str, object]) -> RemoteSSH
         python_bin=python_bin,
         remote_root=remote_root,
         ssh_options=ssh_options,
+        ssh_identity_file=identity_file,
+        ssh_known_hosts_file=known_hosts_file,
+        strict_host_key_checking=strict_host_key_checking,
         poll_interval_seconds=poll_interval,
     )

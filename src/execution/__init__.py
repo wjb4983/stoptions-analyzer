@@ -17,6 +17,7 @@ from .backend import (
     build_execution_backend,
 )
 from .remote_ssh_backend import RemoteSSHExecutionBackend
+from .ssh_transport import SSHTransport, SSHTransportConfig
 from .artifact_sync import (
     ArtifactSyncResult,
     sync_analysis_artifacts,
@@ -30,6 +31,8 @@ __all__ = [
     "ExecutionBackend",
     "LocalExecutionBackend",
     "RemoteSSHExecutionBackend",
+    "SSHTransport",
+    "SSHTransportConfig",
     "build_execution_backend",
     "JOB_ANALYSIS_CALLABLE",
     "JOB_BACKTEST",

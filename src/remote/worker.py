@@ -66,9 +66,33 @@ def _status_payload(*, envelope: dict[str, Any], status: str, started_at: str, c
     }
 
 
+def _summary_payload(*, envelope: dict[str, Any], status: str, started_at: str, completed_at: str | None = None, error: str | None = None) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "job_id": envelope.get("job_id") or envelope.get("run_id"),
+        "job_type": envelope.get("job_type"),
+        "status": normalize_job_state(status).value,
+        "timestamps": {
+            "created_at": envelope.get("timestamps", {}).get("created_at"),
+            "submitted_at": envelope.get("timestamps", {}).get("submitted_at"),
+            "started_at": started_at,
+            "completed_at": completed_at,
+        },
+        "error": error,
+    }
+
+
+def _append_registry_event(job_dir: Path, payload: dict[str, Any]) -> None:
+    registry_path = job_dir.parent / "registry.jsonl"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    with registry_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"timestamp": _now(), **payload}, default=str))
+        handle.write("\n")
+
+
 def _artifact_manifest(job_dir: Path) -> dict[str, Any]:
     tracked = [
-        "job.json",
+        "job_request.json",
         "status.json",
         "logs.txt",
         "result.json",
@@ -121,6 +145,7 @@ def _run_worker(job_file: Path) -> int:
     job_dir = job_file.parent
     status_path = job_dir / "status.json"
     logs_path = job_dir / "logs.txt"
+    summary_path = job_dir / "summary.json"
     artifacts_path = job_dir / "artifacts.json"
     result_path = job_dir / "result.json"
     cancel_path = job_dir / "cancel.requested"
@@ -129,6 +154,8 @@ def _run_worker(job_file: Path) -> int:
     started_at = _now()
     _append_log(logs_path, f"Worker starting for {envelope.get('job_type')} ({envelope.get('job_id')})")
     _write_json(status_path, _status_payload(envelope=envelope, status="running", started_at=started_at))
+    _write_json(summary_path, _summary_payload(envelope=envelope, status="running", started_at=started_at))
+    _append_registry_event(job_dir, {"event": "running", "job_id": envelope.get("job_id") or envelope.get("run_id"), "job_type": envelope.get("job_type")})
 
     stop_flag = threading.Event()
 
@@ -161,6 +188,8 @@ def _run_worker(job_file: Path) -> int:
                 completed_at=completed_at,
             ),
         )
+        _write_json(summary_path, _summary_payload(envelope=envelope, status="succeeded", started_at=started_at, completed_at=completed_at))
+        _append_registry_event(job_dir, {"event": "completed", "job_id": envelope.get("job_id") or envelope.get("run_id"), "job_type": envelope.get("job_type"), "status": "succeeded"})
         _write_json(artifacts_path, _artifact_manifest(job_dir))
         return 0
     except TaskCancellationError as exc:
@@ -176,6 +205,8 @@ def _run_worker(job_file: Path) -> int:
                 error=str(exc),
             ),
         )
+        _write_json(summary_path, _summary_payload(envelope=envelope, status="canceled", started_at=started_at, completed_at=completed_at, error=str(exc)))
+        _append_registry_event(job_dir, {"event": "completed", "job_id": envelope.get("job_id") or envelope.get("run_id"), "job_type": envelope.get("job_type"), "status": "canceled", "error": str(exc)})
         _write_json(artifacts_path, _artifact_manifest(job_dir))
         return 2
     except Exception as exc:  # noqa: BLE001
@@ -192,6 +223,8 @@ def _run_worker(job_file: Path) -> int:
                 error=str(exc),
             ),
         )
+        _write_json(summary_path, _summary_payload(envelope=envelope, status="failed", started_at=started_at, completed_at=completed_at, error=str(exc)))
+        _append_registry_event(job_dir, {"event": "completed", "job_id": envelope.get("job_id") or envelope.get("run_id"), "job_type": envelope.get("job_type"), "status": "failed", "error": str(exc)})
         _write_json(artifacts_path, _artifact_manifest(job_dir))
         return 1
     finally:
