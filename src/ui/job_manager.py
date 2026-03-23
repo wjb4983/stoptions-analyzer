@@ -145,6 +145,14 @@ class JobManager:
             try:
                 backend_status = str(backend.get_status(job_id)).strip().lower() or JobState.QUEUED.value
                 status = normalize_job_state(backend_status).value
+                if hasattr(backend, "get_status_payload"):
+                    raw_payload = backend.get_status_payload(job_id)
+                    if isinstance(raw_payload, dict):
+                        blocked_by = raw_payload.get("blocked_by")
+                        if blocked_by:
+                            metadata["blocked_by"] = str(blocked_by)
+                        else:
+                            metadata.pop("blocked_by", None)
             except Exception as exc:  # noqa: BLE001
                 if self._is_transient_error(exc) and transport_retries < self._max_retries:
                     transport_retries += 1

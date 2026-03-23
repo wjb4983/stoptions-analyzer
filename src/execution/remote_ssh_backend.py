@@ -72,6 +72,14 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
             )
         )
 
+    def _run_scheduler_tick(self) -> None:
+        escaped_remote_root = shlex.quote(self._remote_root)
+        self._transport.run(
+            f"mkdir -p {escaped_remote_root} && "
+            f"cd {escaped_remote_root} && "
+            f"{shlex.quote(self._python_bin)} -m remote.scheduler --remote-root {escaped_remote_root}"
+        )
+
     def validate_connection(self) -> tuple[bool, str]:
         try:
             output = self._transport.run(f"{shlex.quote(self._python_bin)} --version")
@@ -112,6 +120,7 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
                     "job_id": job_id,
                     "job_type": str(job_type),
                     "status": "queued",
+                    "blocked_by": None,
                     "timestamps": {"created_at": created_at, "submitted_at": created_at, "started_at": None, "completed_at": None},
                     "error": None,
                 },
@@ -127,25 +136,19 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
                     "job_id": job_id,
                     "job_type": str(job_type),
                     "status": "queued",
+                    "blocked_by": None,
                     "timestamps": {"created_at": created_at, "submitted_at": created_at, "started_at": None, "completed_at": None},
                 },
                 indent=2,
             ),
         )
 
-        launched_at = datetime.now(timezone.utc).isoformat()
-        launch_output = self._transport.run(
-            f"cd {escaped_remote_dir} && nohup {shlex.quote(self._python_bin)} -m remote.worker "
-            f"--job-file {escaped_remote_dir}/job_request.json "
-            ">> logs.txt 2>&1 & echo $!"
-        ).strip()
-        child_pid = int(launch_output.splitlines()[-1]) if launch_output else None
         launch_metadata = {
             "schema_version": SCHEMA_VERSION,
             "job_id": job_id,
             "job_type": str(job_type),
-            "started_at": launched_at,
-            "child_pid": child_pid,
+            "started_at": None,
+            "child_pid": None,
             "remote_dir": remote_dir,
         }
         self._transport.write_text(f"{remote_dir}/launch_metadata.json", json.dumps(launch_metadata, indent=2))
@@ -156,10 +159,9 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
                 "job_type": str(job_type),
                 "remote_dir": remote_dir,
                 "submitted_at": created_at,
-                "started_at": launched_at,
-                "child_pid": child_pid,
             }
         )
+        self._run_scheduler_tick()
 
         self._jobs[job_id] = _RemoteJobRecord(
             job_id=job_id,
@@ -171,25 +173,29 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         return job_id
 
     def get_status(self, job_id: str) -> str:
+        payload = self.get_status_payload(job_id)
+        return normalize_job_state(str(payload.get("status", "queued"))).value
+
+    def get_status_payload(self, job_id: str) -> dict[str, Any]:
         record = self._get_record(job_id)
         now = time.monotonic()
         if record.status in {"succeeded", "failed", "canceled"}:
-            return record.status
+            return dict(record.status_payload)
         if now - record.last_status_at < self._poll_interval_seconds:
-            return record.status
+            return dict(record.status_payload)
 
         status_json = self._transport.read_text(f"{record.remote_dir}/status.json")
         record.last_status_at = now
         if status_json is None:
-            return record.status
+            return dict(record.status_payload)
         try:
             payload = json.loads(status_json)
         except json.JSONDecodeError:
-            return record.status
+            return dict(record.status_payload)
         record.status_payload = payload
         ensure_schema_compatible(int(payload.get("schema_version", 1)), source="remote status payload")
         record.status = normalize_job_state(str(payload.get("status", record.status))).value
-        return record.status
+        return dict(record.status_payload)
 
     def stream_logs(self, job_id: str) -> list[str]:
         record = self._get_record(job_id)
@@ -225,6 +231,8 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         record = self._get_record(job_id)
         self._transport.run(f"mkdir -p {shlex.quote(record.remote_dir)} && touch {shlex.quote(record.remote_dir + '/cancel.requested')}")
         record.status = "canceling"
+        self._append_registry_entry({"event": "cancel_requested", "job_id": job_id, "job_type": record.job_type})
+        self._run_scheduler_tick()
 
     def register_existing_job(self, *, job_id: str, job_type: str = "unknown") -> None:
         cleaned = str(job_id).strip()

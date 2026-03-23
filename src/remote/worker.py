@@ -31,6 +31,7 @@ from execution.backend import (
 )
 from execution.contracts import SCHEMA_VERSION, ensure_schema_compatible, normalize_job_state
 from execution.remote_payloads import deserialize_from_json, serialize_for_json
+from remote.scheduler import tick_scheduler
 
 
 def _now() -> str:
@@ -48,7 +49,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
 
-def _status_payload(*, envelope: dict[str, Any], status: str, started_at: str, completed_at: str | None = None, error: str | None = None) -> dict[str, Any]:
+def _status_payload(*, envelope: dict[str, Any], status: str, started_at: str, completed_at: str | None = None, error: str | None = None, blocked_by: str | None = None) -> dict[str, Any]:
     normalized_status = normalize_job_state(status).value
     return {
         "schema_version": SCHEMA_VERSION,
@@ -56,6 +57,7 @@ def _status_payload(*, envelope: dict[str, Any], status: str, started_at: str, c
         "run_id": envelope.get("run_id"),
         "job_type": envelope.get("job_type"),
         "status": normalized_status,
+        "blocked_by": blocked_by,
         "timestamps": {
             "created_at": envelope.get("timestamps", {}).get("created_at"),
             "submitted_at": envelope.get("timestamps", {}).get("submitted_at"),
@@ -66,12 +68,13 @@ def _status_payload(*, envelope: dict[str, Any], status: str, started_at: str, c
     }
 
 
-def _summary_payload(*, envelope: dict[str, Any], status: str, started_at: str, completed_at: str | None = None, error: str | None = None) -> dict[str, Any]:
+def _summary_payload(*, envelope: dict[str, Any], status: str, started_at: str, completed_at: str | None = None, error: str | None = None, blocked_by: str | None = None) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "job_id": envelope.get("job_id") or envelope.get("run_id"),
         "job_type": envelope.get("job_type"),
         "status": normalize_job_state(status).value,
+        "blocked_by": blocked_by,
         "timestamps": {
             "created_at": envelope.get("timestamps", {}).get("created_at"),
             "submitted_at": envelope.get("timestamps", {}).get("submitted_at"),
@@ -229,6 +232,10 @@ def _run_worker(job_file: Path) -> int:
         return 1
     finally:
         stop_flag.set()
+        try:
+            tick_scheduler(job_file.parent.parent)
+        except Exception:  # noqa: BLE001
+            _append_log(logs_path, "Scheduler tick failed during worker finalization.")
 
 
 def main() -> int:
