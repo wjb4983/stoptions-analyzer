@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from execution.contracts import SubmitJobRequest
 from state import AppState
 from ui.job_manager import JobManager
 
@@ -30,10 +31,21 @@ class FlakyBackend:
         return {"ok": True}
 
 
+class RecoveryBackend:
+    def __init__(self) -> None:
+        self.registered: list[str] = []
+
+    def register_existing_job(self, *, job_id: str, job_type: str = "unknown") -> None:
+        self.registered.append(job_id)
+
+    def get_status(self, job_id: str) -> str:
+        return "running"
+
+
 @dataclass
 class FakeController:
     state: AppState
-    execution_backend: FlakyBackend
+    execution_backend: object
 
     def __post_init__(self) -> None:
         self.persist_count = 0
@@ -46,12 +58,34 @@ def test_job_manager_retries_transient_status_errors_and_persists_metadata() -> 
     controller = FakeController(state=AppState(), execution_backend=FlakyBackend())
     manager = JobManager(controller=controller, poll_interval_seconds=0.01, max_retries=2)
 
-    result = manager.run_job_and_wait(job_type="backtesting.multi_signal", payload={}, source_page="test")
+    result = manager.run_job_and_wait(
+        request=SubmitJobRequest(job_type="backtesting.multi_signal", payload={}),
+        source_page="test",
+    )
 
     assert result.status == "succeeded"
     assert result.result == {"ok": True}
     assert "job-1" in controller.state.active_jobs
     assert controller.state.active_jobs["job-1"]["transport_retries"] == 1
+
+
+def test_recover_active_jobs_repolls_remote_status() -> None:
+    state = AppState(
+        active_jobs={
+            "job-9": {
+                "job_id": "job-9",
+                "job_type": "backtesting.multi_signal",
+                "status": "queued",
+            }
+        }
+    )
+    backend = RecoveryBackend()
+    controller = FakeController(state=state, execution_backend=backend)
+
+    JobManager(controller=controller)
+
+    assert backend.registered == ["job-9"]
+    assert controller.state.active_jobs["job-9"]["status"] == "running"
 
 
 def test_active_job_state_roundtrip_includes_new_fields(tmp_path, monkeypatch) -> None:

@@ -258,13 +258,30 @@ class JobManager:
             status = str(payload.get("status", "")).lower()
             if status in TERMINAL_JOB_STATES:
                 continue
+            recovered = False
             if hasattr(backend, "register_existing_job"):
                 try:
                     backend.register_existing_job(job_id=job_id, job_type=str(payload.get("job_type", "unknown")))
+                    recovered = True
                 except Exception:
                     payload["retryable_transport_failure"] = True
                     payload["error_kind"] = "transport_failure"
                     payload["error_message"] = "Unable to recover remote job handle; use retry transport action."
+            if recovered and hasattr(backend, "get_status"):
+                try:
+                    refreshed = normalize_job_state(str(backend.get_status(job_id))).value
+                    payload["status"] = refreshed
+                    if refreshed == JobState.RUNNING.value and payload.get("started_at") is None:
+                        payload["started_at"] = now_utc_iso()
+                    if refreshed in TERMINAL_JOB_STATES and payload.get("ended_at") is None:
+                        payload["ended_at"] = now_utc_iso()
+                    payload["retryable_transport_failure"] = False
+                    payload["error_kind"] = None
+                    payload["error_message"] = None
+                except Exception as exc:  # noqa: BLE001
+                    payload["retryable_transport_failure"] = True
+                    payload["error_kind"] = "transport_failure"
+                    payload["error_message"] = self._build_error_message("transport_failure", exc)
             self._active_jobs[job_id] = payload
         self.controller.persist_state()
 
