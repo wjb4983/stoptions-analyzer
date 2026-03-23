@@ -17,6 +17,7 @@ from execution import (
     JOB_BACKTEST_TRAINED_REGIME,
     JOB_BACKTEST_WALK_FORWARD,
 )
+from execution.contracts import SubmitJobRequest
 from execution.artifact_sync import DEFAULT_REMOTE_NAMESPACE_PREFIX
 from backtesting.application_service import (
     BacktestRequestValidationError,
@@ -4822,8 +4823,7 @@ class BacktestingPage(ttk.Frame):
             self.logs_text.insert('1.0', line + '\n')
 
         result = self.controller.job_manager.run_job_and_wait(
-            job_type=job_type,
-            payload=payload,
+            request=SubmitJobRequest(job_type=job_type, payload=payload),
             source_page='backtesting',
             on_update=lambda metadata: self.after(0, lambda data=metadata: _on_update(data)),
         )

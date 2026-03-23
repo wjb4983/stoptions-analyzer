@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import socket
 import threading
 import time
 from typing import Any, Callable
+
+from execution.contracts import (
+    CancelJobRequest,
+    CancelJobResponse,
+    JobState,
+    JobStatusResponse,
+    JobSummaryResponse,
+    SubmitJobRequest,
+    SubmitJobResponse,
+    ensure_schema_compatible,
+    normalize_job_state,
+    now_utc_iso,
+)
 
 
 TERMINAL_JOB_STATES = {"succeeded", "failed", "canceled", "completed"}
@@ -24,12 +36,19 @@ TRANSIENT_ERROR_HINTS = (
 
 @dataclass
 class JobRunResult:
-    job_id: str
-    status: str
+    summary: JobSummaryResponse
     result: Any = None
     logs: list[str] | None = None
     error_kind: str | None = None
     error_message: str | None = None
+
+    @property
+    def job_id(self) -> str:
+        return self.summary.job_id
+
+    @property
+    def status(self) -> str:
+        return self.summary.state.value
 
 
 class JobManager:
@@ -51,25 +70,44 @@ class JobManager:
     def run_job_and_wait(
         self,
         *,
-        job_type: str,
-        payload: dict[str, Any],
+        request: SubmitJobRequest,
         source_page: str,
         on_update: Callable[[dict[str, object]], None] | None = None,
     ) -> JobRunResult:
         backend = self.controller.execution_backend
+        ensure_schema_compatible(request.schema_version, source="client request")
         job_id: str | None = None
         submit_attempt = 0
         server_host = self._server_hostname()
+        submitted_at = now_utc_iso()
+        submit_response: SubmitJobResponse | None = None
 
         while submit_attempt <= self._max_retries:
             try:
-                job_id = backend.submit_job(job_type, payload)
+                job_id = backend.submit_job(request.job_type, request.payload)
+                submit_response = SubmitJobResponse(
+                    job_id=job_id,
+                    job_type=request.job_type,
+                    state=JobState.QUEUED,
+                    submitted_at=submitted_at,
+                    schema_version=request.schema_version,
+                )
                 break
             except Exception as exc:  # noqa: BLE001
                 if not self._is_transient_error(exc) or submit_attempt >= self._max_retries:
                     return JobRunResult(
-                        job_id=job_id or "",
-                        status="failed",
+                        summary=JobSummaryResponse(
+                            job_id=job_id or "",
+                            job_type=request.job_type,
+                            state=JobState.FAILED,
+                            submitted_at=submitted_at,
+                            started_at=None,
+                            ended_at=now_utc_iso(),
+                            server_run_dir=None,
+                            summary_payload={},
+                            summary_paths={},
+                            schema_version=request.schema_version,
+                        ),
                         error_kind="submission_failure",
                         error_message=self._build_error_message("submission_failure", exc),
                     )
@@ -79,13 +117,17 @@ class JobManager:
         assert job_id is not None
         metadata = {
             "job_id": job_id,
-            "job_type": job_type,
+            "job_type": request.job_type,
             "source_page": source_page,
-            "status": "queued",
-            "submitted_at": self._iso_now(),
+            "status": submit_response.state.value if submit_response else "queued",
+            "submitted_at": submit_response.submitted_at if submit_response else submitted_at,
             "started_at": None,
             "ended_at": None,
             "server_hostname": server_host,
+            "server_run_dir": None,
+            "summary_paths": {},
+            "summary_payload": {},
+            "schema_version": request.schema_version,
             "artifact_sync_status": "not_started",
             "poll_interval_seconds": self._poll_interval_seconds,
             "transport_retries": 0,
@@ -97,11 +139,12 @@ class JobManager:
         self._store_metadata(job_id, metadata)
         self._emit_update(on_update, metadata)
 
-        status = "queued"
+        status = JobState.QUEUED.value
         transport_retries = 0
         while True:
             try:
-                status = str(backend.get_status(job_id)).strip().lower() or "queued"
+                backend_status = str(backend.get_status(job_id)).strip().lower() or JobState.QUEUED.value
+                status = normalize_job_state(backend_status).value
             except Exception as exc:  # noqa: BLE001
                 if self._is_transient_error(exc) and transport_retries < self._max_retries:
                     transport_retries += 1
@@ -114,24 +157,23 @@ class JobManager:
                     time.sleep(self._backoff_seconds(transport_retries))
                     continue
                 metadata["status"] = "failed"
-                metadata["ended_at"] = self._iso_now()
+                metadata["ended_at"] = now_utc_iso()
                 metadata["error_kind"] = "transport_failure"
                 metadata["error_message"] = self._build_error_message("transport_failure", exc)
                 metadata["retryable_transport_failure"] = True
                 self._store_metadata(job_id, metadata)
                 self._emit_update(on_update, metadata)
                 return JobRunResult(
-                    job_id=job_id,
-                    status="failed",
+                    summary=self._build_summary(metadata),
                     error_kind="transport_failure",
                     error_message=str(metadata["error_message"]),
                 )
 
             metadata["status"] = status
-            if status in {"running"} and metadata.get("started_at") is None:
-                metadata["started_at"] = self._iso_now()
+            if status == JobState.RUNNING.value and metadata.get("started_at") is None:
+                metadata["started_at"] = now_utc_iso()
             if status in TERMINAL_JOB_STATES:
-                metadata["ended_at"] = self._iso_now()
+                metadata["ended_at"] = now_utc_iso()
             self._store_metadata(job_id, metadata)
             self._emit_update(on_update, metadata)
 
@@ -140,22 +182,40 @@ class JobManager:
             time.sleep(self._poll_interval_seconds)
 
         logs = backend.stream_logs(job_id) if hasattr(backend, "stream_logs") else []
+        metadata["summary_payload"] = {
+            "log_line_count": len(logs),
+            "error_kind": metadata.get("error_kind"),
+        }
+        self._store_metadata(job_id, metadata)
         if status in {"failed", "canceled"}:
-            error_message = logs[-1] if logs else f"{job_type} failed"
+            error_message = logs[-1] if logs else f"{request.job_type} failed"
             metadata["error_kind"] = "remote_runtime_failure"
             metadata["error_message"] = self._build_error_message("remote_runtime_failure", RuntimeError(error_message))
             self._store_metadata(job_id, metadata)
             self._emit_update(on_update, metadata)
             return JobRunResult(
-                job_id=job_id,
-                status=status,
+                summary=self._build_summary(metadata),
                 logs=logs,
                 error_kind="remote_runtime_failure",
                 error_message=str(metadata["error_message"]),
             )
 
         result = backend.get_result(job_id) if hasattr(backend, "get_result") else None
-        return JobRunResult(job_id=job_id, status=status, result=result, logs=logs)
+        if isinstance(result, dict):
+            metadata["summary_payload"] = {**metadata.get("summary_payload", {}), **result}
+        self._store_metadata(job_id, metadata)
+        return JobRunResult(summary=self._build_summary(metadata), result=result, logs=logs)
+
+    def cancel_job(self, request: CancelJobRequest) -> CancelJobResponse:
+        ensure_schema_compatible(request.schema_version, source="cancel request")
+        backend = self.controller.execution_backend
+        backend.cancel_job(request.job_id)
+        return CancelJobResponse(
+            job_id=request.job_id,
+            state=JobState.CANCELED,
+            canceled_at=now_utc_iso(),
+            schema_version=request.schema_version,
+        )
 
     def mark_artifact_sync(self, job_id: str, *, status: str, error: Exception | None = None) -> None:
         with self._lock:
@@ -226,8 +286,31 @@ class JobManager:
         return socket.gethostname()
 
     @staticmethod
-    def _iso_now() -> str:
-        return datetime.now(timezone.utc).isoformat()
+    def _build_summary(metadata: dict[str, object]) -> JobSummaryResponse:
+        ensure_schema_compatible(int(metadata.get("schema_version", 1)), source="job metadata")
+        status = str(metadata.get("status", JobState.QUEUED.value))
+        status_response = JobStatusResponse(
+            job_id=str(metadata.get("job_id", "")),
+            job_type=str(metadata.get("job_type", "")),
+            state=normalize_job_state(status),
+            submitted_at=str(metadata.get("submitted_at")) if metadata.get("submitted_at") is not None else None,
+            started_at=str(metadata.get("started_at")) if metadata.get("started_at") is not None else None,
+            ended_at=str(metadata.get("ended_at")) if metadata.get("ended_at") is not None else None,
+            server_run_dir=str(metadata.get("server_run_dir")) if metadata.get("server_run_dir") else None,
+            schema_version=int(metadata.get("schema_version", 1)),
+        )
+        return JobSummaryResponse(
+            job_id=status_response.job_id,
+            job_type=status_response.job_type,
+            state=status_response.state,
+            submitted_at=status_response.submitted_at,
+            started_at=status_response.started_at,
+            ended_at=status_response.ended_at,
+            server_run_dir=status_response.server_run_dir,
+            summary_paths=dict(metadata.get("summary_paths", {})) if isinstance(metadata.get("summary_paths"), dict) else {},
+            summary_payload=dict(metadata.get("summary_payload", {})) if isinstance(metadata.get("summary_payload"), dict) else {},
+            schema_version=status_response.schema_version,
+        )
 
     def _backoff_seconds(self, retry_index: int) -> float:
         base = self._poll_interval_seconds

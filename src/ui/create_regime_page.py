@@ -14,6 +14,7 @@ from backtesting.regime_training_pipeline import (
     RegimeTrainingResult,
 )
 from execution import JOB_BACKTEST_CACHE, JOB_REGIME_TRAINING
+from execution.contracts import SubmitJobRequest
 from data_access.cache_audit import audit_universe_history
 from backtesting.regime_export_service import export_regime_training_bundle
 from models.regime_catalog import ModelDescriptor, get_model_descriptor, list_models_for_leg
@@ -2533,8 +2534,7 @@ class CreateRegimePage(ttk.Frame):
             )
 
         result = self.controller.job_manager.run_job_and_wait(
-            job_type=job_type,
-            payload=payload,
+            request=SubmitJobRequest(job_type=job_type, payload=payload),
             source_page='create_regime',
             on_update=lambda metadata: self.after(0, lambda data=metadata: _on_update(data)),
         )
