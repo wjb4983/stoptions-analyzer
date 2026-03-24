@@ -695,6 +695,13 @@ class CreateRegimePage(ttk.Frame):
         self._load_selected_leg_into_form()
         self._update_validation_and_actions()
 
+    def refresh(self) -> None:
+        """Reload the editor from the currently active regime definition."""
+        self._load_editor_state_from_definition()
+        self._refresh_legs_list()
+        self._load_selected_leg_into_form()
+        self._update_validation_and_actions()
+
     def _theme_background_color(self) -> str:
         """Return a Tk-compatible background color for labels embedded in ttk frames."""
         style = ttk.Style()

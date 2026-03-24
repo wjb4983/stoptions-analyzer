@@ -715,6 +715,44 @@ def test_create_regime_change_selection_initializes_expected_controls_defaults()
     assert float(leg["controls"]["max_position_pct"]) == 0.05
     assert float(leg["controls"]["max_drawdown_stop"]) == 0.08
 
+
+def test_create_regime_refresh_reloads_active_definition_legs() -> None:
+    controller = FakeController(
+        AppState(
+            regime_definitions={
+                "baseline": {
+                    "label": "Baseline",
+                    "legs": [
+                        {
+                            "name": "Saved Leg",
+                            "model_type": "Trend Following",
+                            "controls": {
+                                "lookback_days": 123,
+                                "entry_zscore": 2.2,
+                            },
+                        }
+                    ],
+                }
+            },
+            active_regime_id="baseline",
+        )
+    )
+    page = _build_create_regime_logic_page()
+    page.controller = controller
+    page.regime_legs = [create_regime_page.CreateRegimePage._build_default_leg(page, "Trend Following")]
+
+    page._refresh_legs_list = lambda: None
+    page._load_selected_leg_into_form = lambda: None
+    page._update_validation_and_actions = lambda: None
+
+    page.refresh()
+
+    leg = page._selected_leg()
+    assert leg["name"] == "Saved Leg"
+    assert float(leg["controls"]["lookback_days"]) == 123.0
+    assert float(leg["controls"]["entry_zscore"]) == 2.2
+
+
 def test_create_regime_unknown_leg_mapping_blocks_training() -> None:
     page = _build_create_regime_logic_page()
     page.regime_legs[0]["model_type"] = "Not A Leg"
