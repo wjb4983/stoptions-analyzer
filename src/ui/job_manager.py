@@ -67,6 +67,14 @@ class JobManager:
         self.controller.state.active_jobs = {}
         return self.controller.state.active_jobs
 
+    @property
+    def _remote_jobs(self) -> dict[str, dict[str, object]]:
+        jobs = getattr(self.controller.state, "remote_jobs", None)
+        if isinstance(jobs, dict):
+            return jobs
+        self.controller.state.remote_jobs = {}
+        return self.controller.state.remote_jobs
+
     def run_job_and_wait(
         self,
         *,
@@ -224,6 +232,93 @@ class JobManager:
         self._store_metadata(job_id, metadata)
         return JobRunResult(summary=self._build_summary(metadata), result=result, logs=logs)
 
+    def rehydrate_remote_jobs(self) -> None:
+        backend = self.controller.execution_backend
+        dirty = False
+        for job_id, payload in list(self._remote_jobs.items()):
+            if not isinstance(payload, dict):
+                continue
+            state = str(payload.get("last_known_state", "")).strip().lower()
+            if state in TERMINAL_JOB_STATES:
+                continue
+            if hasattr(backend, "register_existing_job"):
+                try:
+                    backend.register_existing_job(job_id=job_id, job_type=str(payload.get("job_type", "unknown")))
+                except Exception as exc:  # noqa: BLE001
+                    payload["last_known_state"] = "failed"
+                    payload["error_message"] = self._build_error_message("transport_failure", exc)
+                    self._remote_jobs[job_id] = payload
+                    dirty = True
+                    continue
+            try:
+                refreshed = normalize_job_state(str(backend.get_status(job_id))).value
+                payload["last_known_state"] = refreshed
+                self._remote_jobs[job_id] = payload
+                active = dict(self._active_jobs.get(job_id, {}))
+                active["job_id"] = job_id
+                active["job_type"] = str(payload.get("job_type", active.get("job_type", "unknown")))
+                active["status"] = refreshed
+                active.setdefault("submitted_at", payload.get("submitted_at"))
+                active["server_hostname"] = str(payload.get("server_host", active.get("server_hostname", "unknown")))
+                self._active_jobs[job_id] = active
+                dirty = True
+            except Exception:
+                continue
+        if dirty:
+            self.controller.persist_state()
+
+    def reattach_job(self, job_id: str) -> bool:
+        backend = self.controller.execution_backend
+        payload = dict(self._remote_jobs.get(job_id, {}))
+        if not payload:
+            return False
+        if hasattr(backend, "register_existing_job"):
+            try:
+                backend.register_existing_job(job_id=job_id, job_type=str(payload.get("job_type", "unknown")))
+            except Exception:
+                return False
+        return self.refresh_job_status(job_id)
+
+    def refresh_job_status(self, job_id: str) -> bool:
+        backend = self.controller.execution_backend
+        try:
+            state = normalize_job_state(str(backend.get_status(job_id))).value
+        except Exception:
+            return False
+        active = dict(self._active_jobs.get(job_id, {}))
+        active["job_id"] = job_id
+        active["status"] = state
+        if state in TERMINAL_JOB_STATES:
+            active["ended_at"] = active.get("ended_at") or now_utc_iso()
+        self._store_metadata(job_id, active)
+        return True
+
+    def refresh_job_summary(self, job_id: str) -> bool:
+        backend = self.controller.execution_backend
+        if not self.refresh_job_status(job_id):
+            return False
+        metadata = dict(self._active_jobs.get(job_id, {}))
+        if str(metadata.get("status", "")).strip().lower() not in TERMINAL_JOB_STATES:
+            return False
+        if not hasattr(backend, "get_result"):
+            return False
+        try:
+            result = backend.get_result(job_id)
+        except Exception:
+            return False
+        if isinstance(result, dict):
+            metadata["summary_payload"] = {**metadata.get("summary_payload", {}), **result}
+            if result.get("server_run_dir"):
+                metadata["server_run_dir"] = str(result.get("server_run_dir"))
+                metadata["summary_cache_path"] = str(result.get("server_run_dir"))
+            summary_files = result.get("summary_files")
+            if isinstance(summary_files, list):
+                metadata["summary_paths"] = {str(idx): str(path) for idx, path in enumerate(summary_files)}
+                if summary_files:
+                    metadata["summary_cache_path"] = str(summary_files[0])
+        self._store_metadata(job_id, metadata)
+        return True
+
     def cancel_job(self, request: CancelJobRequest) -> CancelJobResponse:
         ensure_schema_compatible(request.schema_version, source="cancel request")
         backend = self.controller.execution_backend
@@ -301,11 +396,35 @@ class JobManager:
                     payload["error_kind"] = "transport_failure"
                     payload["error_message"] = self._build_error_message("transport_failure", exc)
             self._active_jobs[job_id] = payload
+            self._remote_jobs[job_id] = {
+                "job_id": job_id,
+                "job_type": str(payload.get("job_type", "unknown")).strip() or "unknown",
+                "submitted_at": str(payload.get("submitted_at", "")).strip() or None,
+                "last_known_state": str(payload.get("status", "queued")).strip() or "queued",
+                "server_host": str(payload.get("server_hostname", "unknown")).strip() or "unknown",
+                "summary_cache_path": str(
+                    payload.get("summary_cache_path")
+                    or payload.get("server_run_dir")
+                    or ""
+                ).strip() or None,
+            }
         self.controller.persist_state()
 
     def _store_metadata(self, job_id: str, metadata: dict[str, object]) -> None:
         with self._lock:
             self._active_jobs[job_id] = dict(metadata)
+            self._remote_jobs[job_id] = {
+                "job_id": job_id,
+                "job_type": str(metadata.get("job_type", "unknown")).strip() or "unknown",
+                "submitted_at": str(metadata.get("submitted_at", "")).strip() or None,
+                "last_known_state": str(metadata.get("status", "queued")).strip() or "queued",
+                "server_host": str(metadata.get("server_hostname", "unknown")).strip() or "unknown",
+                "summary_cache_path": str(
+                    metadata.get("summary_cache_path")
+                    or metadata.get("server_run_dir")
+                    or ""
+                ).strip() or None,
+            }
         self.controller.persist_state()
 
     def _emit_update(self, on_update: Callable[[dict[str, object]], None] | None, metadata: dict[str, object]) -> None:

@@ -124,6 +124,27 @@ def _migrate_active_jobs(payload: object) -> dict[str, dict[str, object]]:
     return migrated
 
 
+def _migrate_remote_jobs(payload: object) -> dict[str, dict[str, object]]:
+    if not isinstance(payload, dict):
+        return {}
+    migrated: dict[str, dict[str, object]] = {}
+    for raw_job_id, raw_meta in payload.items():
+        if not isinstance(raw_job_id, str) or not raw_job_id.strip():
+            continue
+        if not isinstance(raw_meta, dict):
+            continue
+        job_id = raw_job_id.strip()
+        migrated[job_id] = {
+            "job_id": job_id,
+            "job_type": str(raw_meta.get("job_type", "")).strip() or "unknown",
+            "submitted_at": str(raw_meta.get("submitted_at", "")).strip() or None,
+            "last_known_state": str(raw_meta.get("last_known_state", raw_meta.get("status", "queued"))).strip() or "queued",
+            "server_host": str(raw_meta.get("server_host", raw_meta.get("server_hostname", "unknown"))).strip() or "unknown",
+            "summary_cache_path": str(raw_meta.get("summary_cache_path", "")).strip() or None,
+        }
+    return migrated
+
+
 def _migrate_regime_definitions(payload: object) -> dict[str, dict[str, object]]:
     if not isinstance(payload, dict) or not payload:
         return _baseline_regime_definitions()
@@ -173,6 +194,7 @@ class AppState:
         default_factory=lambda: dict(DEFAULT_REMOTE_EXECUTION_SETTINGS)
     )
     active_jobs: dict[str, dict[str, object]] = field(default_factory=dict)
+    remote_jobs: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def save(self) -> None:
         payload = {
@@ -189,6 +211,7 @@ class AppState:
             "remote_synced_runs": _migrate_remote_synced_runs(self.remote_synced_runs),
             "remote_execution_settings": _migrate_remote_execution_settings(self.remote_execution_settings),
             "active_jobs": _migrate_active_jobs(self.active_jobs),
+            "remote_jobs": _migrate_remote_jobs(self.remote_jobs),
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2))
 
@@ -218,4 +241,5 @@ class AppState:
             remote_synced_runs=_migrate_remote_synced_runs(payload.get("remote_synced_runs", {})),
             remote_execution_settings=_migrate_remote_execution_settings(payload.get("remote_execution_settings", {})),
             active_jobs=_migrate_active_jobs(payload.get("active_jobs", {})),
+            remote_jobs=_migrate_remote_jobs(payload.get("remote_jobs", payload.get("active_jobs", {}))),
         )

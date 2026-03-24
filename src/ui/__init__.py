@@ -5,6 +5,7 @@ from ui.create_regime_page import CreateRegimePage
 from ui.general_analysis_page import GeneralAnalysisPage
 from ui.intraday_replay_page import IntradayReplayPage
 from ui.main_menu import MainMenu
+from ui.remote_jobs_page import RemoteJobsPage
 from ui.research_lab_page import ResearchLabPage
 from ui.spread_analysis_page import SpreadAnalysisPage
 from ui.ticker_entry_page import TickerEntryPage
@@ -18,6 +19,7 @@ __all__ = [
     "GeneralAnalysisPage",
     "IntradayReplayPage",
     "MainMenu",
+    "RemoteJobsPage",
     "ResearchLabPage",
     "SpreadAnalysisPage",
     "TickerEntryPage",

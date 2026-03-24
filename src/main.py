@@ -21,6 +21,7 @@ from ui import (
     GeneralAnalysisPage,
     IntradayReplayPage,
     MainMenu,
+    RemoteJobsPage,
     ResearchLabPage,
     SpreadAnalysisPage,
     TickerEntryPage,
@@ -51,6 +52,7 @@ class StoptionsApp(tk.Tk):
         self.frames: dict[str, ttk.Frame] = {}
         for frame_cls in (
             MainMenu,
+            RemoteJobsPage,
             ResearchLabPage,
             BacktestingPage,
             TickerEntryPage,
@@ -67,6 +69,7 @@ class StoptionsApp(tk.Tk):
             frame.grid(row=0, column=0, sticky="nsew")
 
         self.show_frame("MainMenu")
+        self.after(10, self._rehydrate_remote_jobs_on_startup)
 
     def show_frame(self, name: str) -> None:
         frame = self.frames[name]
@@ -98,6 +101,15 @@ class StoptionsApp(tk.Tk):
             self.state("zoomed")
         except tk.TclError:
             self.attributes("-fullscreen", True)
+
+    def _rehydrate_remote_jobs_on_startup(self) -> None:
+        self.job_manager.rehydrate_remote_jobs()
+        for frame in self.frames.values():
+            if hasattr(frame, "refresh"):
+                try:
+                    frame.refresh()
+                except Exception:
+                    continue
 
 
 if __name__ == "__main__":
