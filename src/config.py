@@ -10,7 +10,7 @@ RESEARCH_LAB_PRESETS_PATH = Path(__file__).resolve().parent.parent / "config" / 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 API_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io")
 REMOTE_EXECUTION_MODES = ("local", "remote")
-API_KEY_POLICIES = ("server_only", "forward_per_job")
+API_POLICIES = ("server_managed", "forward_from_client")
 DEFAULT_REMOTE_EXECUTION_SETTINGS = {
     "mode": "local",
     "ssh_host": "",
@@ -24,7 +24,8 @@ DEFAULT_REMOTE_EXECUTION_SETTINGS = {
     "scheduler_queue": "",
     "scheduler_max_concurrent_jobs": "1",
     "scheduler_poll_seconds": "1.5",
-    "api_key_policy": "server_only",
+    "api_policy": "server_managed",
+    "server_api_key_file": "",
     "ssh_identity_file": "",
     "ssh_known_hosts_file": "",
     "ssh_strict_host_key_checking": True,
@@ -441,11 +442,18 @@ DEFAULT_HYPOTHESIS_RUBRIC_TEMPLATES = {
 def merged_remote_execution_settings(payload: object) -> dict[str, object]:
     merged = dict(DEFAULT_REMOTE_EXECUTION_SETTINGS)
     if isinstance(payload, dict):
+        legacy_policy = payload.get("api_key_policy")
+        if "api_policy" not in payload and legacy_policy is not None:
+            if str(legacy_policy).strip().lower() == "server_only":
+                payload = {**payload, "api_policy": "server_managed"}
+            elif str(legacy_policy).strip().lower() == "forward_per_job":
+                payload = {**payload, "api_policy": "forward_from_client"}
         for key in merged:
             if key in payload:
                 merged[key] = payload[key]
     merged["mode"] = str(merged.get("mode", "local")).strip().lower() or "local"
-    merged["api_key_policy"] = str(merged.get("api_key_policy", "server_only")).strip().lower() or "server_only"
+    merged["api_policy"] = str(merged.get("api_policy", "server_managed")).strip().lower() or "server_managed"
+    merged["server_api_key_file"] = str(merged.get("server_api_key_file", "")).strip()
     return merged
 
 
@@ -494,11 +502,9 @@ def validate_remote_execution_settings(payload: object) -> list[str]:
     if not known_hosts_file:
         errors.append("SSH known hosts file is required for strict host-key validation.")
 
-    policy = str(settings.get("api_key_policy", "server_only")).strip().lower()
-    if policy not in set(API_KEY_POLICIES):
-        errors.append("API key policy must be 'server_only' or 'forward_per_job'.")
-    elif policy == "forward_per_job":
-        errors.append("Per-job API key forwarding is not enabled in this build; choose 'server_only'.")
+    policy = str(settings.get("api_policy", "server_managed")).strip().lower()
+    if policy not in set(API_POLICIES):
+        errors.append("API policy must be 'server_managed' or 'forward_from_client'.")
 
     try:
         poll_seconds = float(str(settings.get("scheduler_poll_seconds", "")).strip() or "1.5")
