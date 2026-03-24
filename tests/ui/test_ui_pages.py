@@ -87,6 +87,14 @@ class FakeBindableWidget:
         return list(self._children)
 
 
+class FakeNotebook:
+    def __init__(self, selected_tab: str):
+        self._selected_tab = selected_tab
+
+    def select(self):
+        return self._selected_tab
+
+
 class FakeFrameWidget(FakeWidget):
     def __init__(self):
         super().__init__()
@@ -824,6 +832,38 @@ def test_create_regime_mousewheel_binding_supports_middle_button_drag_scroll() -
     root.bindings["<B2-Motion>"](drag_event)
 
     assert scroll_calls[-1] == (-5, "units")
+
+
+def test_create_regime_global_scroll_handlers_scroll_active_tab_from_any_child() -> None:
+    page = create_regime_page.CreateRegimePage.__new__(create_regime_page.CreateRegimePage)
+    page._global_middle_drag_y = None
+    scroll_calls: list[tuple[int, str]] = []
+    class _Container:
+        def __init__(self, callback):
+            self._callback = callback
+
+        def _scroll_units_command(self, amount, units):
+            self._callback(amount, units)
+
+    page.basics_tab = "basics"
+    page.advanced_tab = "advanced"
+    page.validation_tab = "validation"
+    page.basics_form_container = _Container(lambda amount, units: scroll_calls.append((amount, units)))
+    page.advanced_form_container = _Container(lambda *_args: None)
+    page.validation_form_container = _Container(lambda *_args: None)
+    page.form_notebook = FakeNotebook(selected_tab="basics")
+
+    child_widget = type("Widget", (), {})()
+    child_widget.master = page
+    wheel_event = type("Event", (), {"widget": child_widget, "delta": 120, "num": None})()
+    assert page._on_global_mousewheel(wheel_event) == "break"
+    assert scroll_calls[-1] == (-1, "units")
+
+    middle_press = type("Event", (), {"widget": child_widget, "y_root": 100})()
+    middle_drag = type("Event", (), {"widget": child_widget, "y_root": 112})()
+    assert page._on_global_middle_press(middle_press) == "break"
+    assert page._on_global_middle_drag(middle_drag) == "break"
+    assert scroll_calls[-1] == (-6, "units")
 
 
 def test_create_regime_unknown_leg_mapping_blocks_training() -> None:
