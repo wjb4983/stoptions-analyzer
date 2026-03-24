@@ -1655,6 +1655,19 @@ class BacktestingPage(ttk.Frame):
         self.equity_canvas.create_text(8, margin_top + plot_h - 10, anchor="nw", text=f"{min_v:.2f}", fill="#666")
         self.chart_status_var.set(f"Showing overlap for {len(curves)} run(s).")
 
+    def _resolve_artifact_path(self, run_dir: Path, relative_path: str) -> Path | None:
+        primary = run_dir / relative_path
+        if primary.exists():
+            return primary
+        summary_fallback = run_dir / "summary" / relative_path
+        if summary_fallback.exists():
+            return summary_fallback
+        basename = Path(relative_path).name
+        flat_summary = run_dir / "summary" / basename
+        if flat_summary.exists():
+            return flat_summary
+        return None
+
     def _safe_float(self, value: object) -> float | None:
         try:
             if value is None or value == "":
@@ -1664,10 +1677,10 @@ class BacktestingPage(ttk.Frame):
             return None
 
     def _load_metric_map(self, run_dir: Path) -> dict[str, float]:
-        metrics_path = run_dir / "metrics.json"
-        if not metrics_path.exists():
-            metrics_path = run_dir / "aggregate_metrics.json"
-            if metrics_path.exists():
+        metrics_path = self._resolve_artifact_path(run_dir, "metrics.json")
+        if metrics_path is None:
+            metrics_path = self._resolve_artifact_path(run_dir, "aggregate_metrics.json")
+            if metrics_path is not None:
                 parsed = self._read_json(metrics_path)
                 if isinstance(parsed, dict):
                     return {str(k): float(v) for k, v in parsed.items() if isinstance(v, (int, float))}
@@ -1686,13 +1699,13 @@ class BacktestingPage(ttk.Frame):
         return output
 
     def _load_rows(self, run_dir: Path, stem: str) -> list[dict[str, object]]:
-        json_path = run_dir / f"{stem}.json"
-        if json_path.exists():
+        json_path = self._resolve_artifact_path(run_dir, f"{stem}.json")
+        if json_path is not None:
             parsed = self._read_json(json_path)
             if isinstance(parsed, list):
                 return [row for row in parsed if isinstance(row, dict)]
-        csv_path = run_dir / f"{stem}.csv"
-        if csv_path.exists():
+        csv_path = self._resolve_artifact_path(run_dir, f"{stem}.csv")
+        if csv_path is not None:
             with csv_path.open("r", newline="") as handle:
                 reader = csv.DictReader(handle)
                 return [dict(row) for row in reader]

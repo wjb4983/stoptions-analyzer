@@ -22,11 +22,14 @@ def test_write_artifact_manifest_uses_relative_paths(tmp_path: Path) -> None:
     assert payload["artifacts"][0]["path"] == "sub/metrics.json"
 
 
-def test_sync_run_artifacts_summary_then_full(tmp_path: Path) -> None:
+def test_sync_run_artifacts_summary_selected_and_full_modes(tmp_path: Path) -> None:
     source = tmp_path / "remote"
     source.mkdir()
     (source / "manifest.json").write_text("{}", encoding="utf-8")
     (source / "metrics.json").write_text("{}", encoding="utf-8")
+    summary_dir = source / "summary"
+    summary_dir.mkdir()
+    (summary_dir / "leaderboard_stats.json").write_text("{}", encoding="utf-8")
     (source / "huge_blob.bin").write_bytes(b"x" * 4096)
 
     target_root = tmp_path / "local"
@@ -34,16 +37,25 @@ def test_sync_run_artifacts_summary_then_full(tmp_path: Path) -> None:
         remote_job_id="job123",
         remote_run_dir=source,
         local_output_root=target_root,
-        mode="summary",
+        mode="summary_only",
     )
-    assert (summary_result.local_synced_run_dir / "manifest.json").exists()
+    assert (summary_result.local_synced_run_dir / "summary" / "leaderboard_stats.json").exists()
     assert not (summary_result.local_synced_run_dir / "huge_blob.bin").exists()
+
+    selected_result = sync_run_artifacts(
+        remote_job_id="job123",
+        remote_run_dir=source,
+        local_output_root=target_root,
+        mode="selected_files",
+        include_files=["metrics.json"],
+    )
+    assert (selected_result.local_synced_run_dir / "metrics.json").exists()
 
     full_result = sync_run_artifacts(
         remote_job_id="job123",
         remote_run_dir=source,
         local_output_root=target_root,
-        mode="full",
+        mode="full_artifacts",
     )
     assert (full_result.local_synced_run_dir / "huge_blob.bin").exists()
 

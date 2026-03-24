@@ -45,7 +45,15 @@ class ExecutionBackend:
     def stream_logs(self, job_id: str) -> list[str]:
         raise NotImplementedError
 
-    def fetch_artifacts(self, job_id: str, target_dir: str | Path) -> Path:
+    def fetch_artifacts(
+        self,
+        job_id: str,
+        target_dir: str | Path,
+        *,
+        fetch_mode: str = "summary_only",
+        selected_files: list[str] | None = None,
+        allow_full_artifacts: bool = False,
+    ) -> Path:
         raise NotImplementedError
 
     def cancel_job(self, job_id: str) -> None:
@@ -86,7 +94,15 @@ class LocalExecutionBackend(ExecutionBackend):
     def stream_logs(self, job_id: str) -> list[str]:
         return list(self._get_job(job_id).logs)
 
-    def fetch_artifacts(self, job_id: str, target_dir: str | Path) -> Path:
+    def fetch_artifacts(
+        self,
+        job_id: str,
+        target_dir: str | Path,
+        *,
+        fetch_mode: str = "summary_only",
+        selected_files: list[str] | None = None,
+        allow_full_artifacts: bool = False,
+    ) -> Path:
         record = self._get_job(job_id)
         artifact_dir = Path(target_dir).expanduser() / job_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -99,6 +115,9 @@ class LocalExecutionBackend(ExecutionBackend):
             "error": record.error,
             "started_at": record.started_at,
             "completed_at": record.completed_at,
+            "fetch_mode": fetch_mode,
+            "selected_files": list(selected_files or []),
+            "allow_full_artifacts": bool(allow_full_artifacts),
         }
         (artifact_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 

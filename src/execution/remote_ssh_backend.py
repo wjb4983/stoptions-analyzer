@@ -204,7 +204,15 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
             return []
         return text.splitlines()
 
-    def fetch_artifacts(self, job_id: str, target_dir: str | Path) -> Path:
+    def fetch_artifacts(
+        self,
+        job_id: str,
+        target_dir: str | Path,
+        *,
+        fetch_mode: str = "summary_only",
+        selected_files: list[str] | None = None,
+        allow_full_artifacts: bool = False,
+    ) -> Path:
         record = self._get_record(job_id)
         target_root = Path(target_dir).expanduser() / job_id
         target_root.mkdir(parents=True, exist_ok=True)
@@ -213,18 +221,33 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
             self._transport.download_file(f"{record.remote_dir}/{fixed_name}", target_root / fixed_name)
 
         manifest_path = target_root / "artifacts.json"
+        manifest: dict[str, Any] = {}
         if manifest_path.exists():
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 manifest = {}
-            for artifact in manifest.get("artifacts", []):
-                rel_path = str(artifact.get("path", "")).strip()
-                if not rel_path:
-                    continue
-                destination = target_root / rel_path
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                self._transport.download_file(f"{record.remote_dir}/{rel_path}", destination)
+
+        mode = str(fetch_mode).strip().lower() or "summary_only"
+        candidate_paths = [str(item.get("path", "")).strip() for item in manifest.get("artifacts", []) if isinstance(item, dict)]
+        if mode in {"summary_only", "summary"}:
+            paths = [path for path in candidate_paths if path.startswith("summary/")]
+        elif mode == "selected_files":
+            requested = {str(path).strip().replace("\\", "/") for path in (selected_files or []) if str(path).strip()}
+            paths = [path for path in candidate_paths if path in requested]
+        elif mode == "full_artifacts":
+            if not allow_full_artifacts:
+                raise ValueError("full_artifacts mode requires allow_full_artifacts=True")
+            paths = candidate_paths
+        else:
+            raise ValueError("fetch_mode must be summary_only, selected_files, or full_artifacts")
+
+        for rel_path in paths:
+            if not rel_path:
+                continue
+            destination = target_root / rel_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            self._transport.download_file(f"{record.remote_dir}/{rel_path}", destination)
         return target_root
 
     def cancel_job(self, job_id: str) -> None:
