@@ -151,3 +151,41 @@ def test_remote_execution_settings_roundtrip_and_defaults(tmp_path, monkeypatch)
     assert loaded.remote_execution_settings["ssh_host"] == "example.internal"
     assert loaded.remote_execution_settings["ssh_port"] == "2222"
     assert loaded.remote_execution_settings["api_key_policy"] == "server_only"
+
+
+def test_remote_jobs_roundtrip_and_backfill_from_active_jobs(tmp_path, monkeypatch) -> None:
+    app_state_path = tmp_path / "remote_jobs_state.json"
+    monkeypatch.setattr(state, "STATE_PATH", app_state_path)
+
+    original = AppState(
+        remote_jobs={
+            "job-1": {
+                "job_id": "job-1",
+                "job_type": "backtest",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "last_known_state": "running",
+                "server_host": "quant-host",
+                "summary_cache_path": "/tmp/job-1-summary.json",
+            }
+        }
+    )
+    original.save()
+    loaded = AppState.load()
+    assert loaded.remote_jobs["job-1"]["server_host"] == "quant-host"
+    assert loaded.remote_jobs["job-1"]["summary_cache_path"] == "/tmp/job-1-summary.json"
+
+    legacy_payload = {
+        "active_jobs": {
+            "job-9": {
+                "job_id": "job-9",
+                "job_type": "backtest",
+                "status": "completed",
+                "submitted_at": "2026-01-02T00:00:00Z",
+                "server_hostname": "legacy-host",
+            }
+        }
+    }
+    app_state_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    legacy_loaded = AppState.load()
+    assert legacy_loaded.remote_jobs["job-9"]["last_known_state"] == "completed"
+    assert legacy_loaded.remote_jobs["job-9"]["server_host"] == "legacy-host"

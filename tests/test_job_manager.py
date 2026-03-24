@@ -41,6 +41,12 @@ class RecoveryBackend:
     def get_status(self, job_id: str) -> str:
         return "running"
 
+    def stream_logs(self, job_id: str) -> list[str]:
+        return ["done"]
+
+    def get_result(self, job_id: str) -> object:
+        return {"artifact": "ok"}
+
 
 @dataclass
 class FakeController:
@@ -86,6 +92,7 @@ def test_recover_active_jobs_repolls_remote_status() -> None:
 
     assert backend.registered == ["job-9"]
     assert controller.state.active_jobs["job-9"]["status"] == "running"
+    assert controller.state.remote_jobs["job-9"]["last_known_state"] == "running"
 
 
 def test_active_job_state_roundtrip_includes_new_fields(tmp_path, monkeypatch) -> None:
@@ -101,3 +108,24 @@ def test_active_job_state_roundtrip_includes_new_fields(tmp_path, monkeypatch) -
     assert "abc" in loaded.active_jobs
     assert loaded.active_jobs["abc"]["job_type"] == "backtest"
     assert loaded.active_jobs["abc"]["status"] == "running"
+
+
+def test_refresh_job_summary_persists_summary_cache_path() -> None:
+    state = AppState(
+        active_jobs={
+            "job-1": {
+                "job_id": "job-1",
+                "job_type": "backtesting.multi_signal",
+                "status": "completed",
+                "server_hostname": "remote",
+            }
+        }
+    )
+    backend = RecoveryBackend()
+    controller = FakeController(state=state, execution_backend=backend)
+    manager = JobManager(controller=controller)
+
+    summary_path = manager.refresh_job_summary("job-1")
+
+    assert summary_path is not None
+    assert controller.state.remote_jobs["job-1"]["summary_cache_path"] == summary_path

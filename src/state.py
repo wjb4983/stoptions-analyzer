@@ -124,6 +124,44 @@ def _migrate_active_jobs(payload: object) -> dict[str, dict[str, object]]:
     return migrated
 
 
+def _migrate_remote_jobs(payload: object) -> dict[str, dict[str, object]]:
+    if not isinstance(payload, dict):
+        return {}
+    migrated: dict[str, dict[str, object]] = {}
+    for raw_job_id, raw_meta in payload.items():
+        if not isinstance(raw_job_id, str) or not raw_job_id.strip() or not isinstance(raw_meta, dict):
+            continue
+        job_id = raw_job_id.strip()
+        migrated[job_id] = {
+            "job_id": job_id,
+            "job_type": str(raw_meta.get("job_type", "unknown")).strip() or "unknown",
+            "submitted_at": str(raw_meta.get("submitted_at", "")).strip() or None,
+            "last_known_state": str(raw_meta.get("last_known_state", "queued")).strip() or "queued",
+            "server_host": str(raw_meta.get("server_host", "unknown")).strip() or "unknown",
+            "summary_cache_path": str(raw_meta.get("summary_cache_path", "")).strip() or None,
+        }
+    return migrated
+
+
+def _derive_remote_jobs_from_active_jobs(active_jobs: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    derived: dict[str, dict[str, object]] = {}
+    for job_id, meta in active_jobs.items():
+        if not isinstance(meta, dict):
+            continue
+        cleaned_job_id = str(job_id).strip()
+        if not cleaned_job_id:
+            continue
+        derived[cleaned_job_id] = {
+            "job_id": cleaned_job_id,
+            "job_type": str(meta.get("job_type", "unknown")).strip() or "unknown",
+            "submitted_at": str(meta.get("submitted_at", "")).strip() or None,
+            "last_known_state": str(meta.get("status", "queued")).strip() or "queued",
+            "server_host": str(meta.get("server_hostname", "unknown")).strip() or "unknown",
+            "summary_cache_path": None,
+        }
+    return derived
+
+
 def _migrate_regime_definitions(payload: object) -> dict[str, dict[str, object]]:
     if not isinstance(payload, dict) or not payload:
         return _baseline_regime_definitions()
@@ -172,6 +210,7 @@ class AppState:
     remote_execution_settings: dict[str, object] = field(
         default_factory=lambda: dict(DEFAULT_REMOTE_EXECUTION_SETTINGS)
     )
+    remote_jobs: dict[str, dict[str, object]] = field(default_factory=dict)
     active_jobs: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def save(self) -> None:
@@ -188,6 +227,7 @@ class AppState:
             "active_regime_id": self.active_regime_id,
             "remote_synced_runs": _migrate_remote_synced_runs(self.remote_synced_runs),
             "remote_execution_settings": _migrate_remote_execution_settings(self.remote_execution_settings),
+            "remote_jobs": _migrate_remote_jobs(self.remote_jobs),
             "active_jobs": _migrate_active_jobs(self.active_jobs),
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2))
@@ -200,6 +240,10 @@ class AppState:
             payload = json.loads(STATE_PATH.read_text())
         except json.JSONDecodeError:
             return cls()
+        active_jobs = _migrate_active_jobs(payload.get("active_jobs", {}))
+        remote_jobs = _migrate_remote_jobs(payload.get("remote_jobs", {}))
+        if not remote_jobs and active_jobs:
+            remote_jobs = _derive_remote_jobs_from_active_jobs(active_jobs)
         return cls(
             tickers=payload.get("tickers", []),
             selected_ticker=payload.get("selected_ticker"),
@@ -217,5 +261,6 @@ class AppState:
             active_regime_id=payload.get("active_regime_id"),
             remote_synced_runs=_migrate_remote_synced_runs(payload.get("remote_synced_runs", {})),
             remote_execution_settings=_migrate_remote_execution_settings(payload.get("remote_execution_settings", {})),
-            active_jobs=_migrate_active_jobs(payload.get("active_jobs", {})),
+            remote_jobs=remote_jobs,
+            active_jobs=active_jobs,
         )

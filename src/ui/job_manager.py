@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import socket
 import threading
 import time
@@ -18,6 +19,7 @@ from execution.contracts import (
     normalize_job_state,
     now_utc_iso,
 )
+from config import BACKTEST_CACHE_DIR
 
 
 TERMINAL_JOB_STATES = {"succeeded", "failed", "canceled", "completed"}
@@ -58,6 +60,7 @@ class JobManager:
         self._max_retries = max(0, int(max_retries))
         self._lock = threading.Lock()
         self._recover_active_jobs()
+        self.rehydrate_non_terminal_jobs()
 
     @property
     def _active_jobs(self) -> dict[str, dict[str, object]]:
@@ -66,6 +69,14 @@ class JobManager:
             return jobs
         self.controller.state.active_jobs = {}
         return self.controller.state.active_jobs
+
+    @property
+    def _remote_jobs(self) -> dict[str, dict[str, object]]:
+        jobs = getattr(self.controller.state, "remote_jobs", None)
+        if isinstance(jobs, dict):
+            return jobs
+        self.controller.state.remote_jobs = {}
+        return self.controller.state.remote_jobs
 
     def run_job_and_wait(
         self,
@@ -137,6 +148,7 @@ class JobManager:
             "error_message": None,
         }
         self._store_metadata(job_id, metadata)
+        self._update_remote_job_index(metadata)
         self._emit_update(on_update, metadata)
 
         status = JobState.QUEUED.value
@@ -161,6 +173,7 @@ class JobManager:
                     metadata["error_kind"] = "transport_failure"
                     metadata["error_message"] = self._build_error_message("transport_failure", exc)
                     self._store_metadata(job_id, metadata)
+                    self._update_remote_job_index(metadata)
                     self._emit_update(on_update, metadata)
                     time.sleep(self._backoff_seconds(transport_retries))
                     continue
@@ -170,6 +183,7 @@ class JobManager:
                 metadata["error_message"] = self._build_error_message("transport_failure", exc)
                 metadata["retryable_transport_failure"] = True
                 self._store_metadata(job_id, metadata)
+                self._update_remote_job_index(metadata)
                 self._emit_update(on_update, metadata)
                 return JobRunResult(
                     summary=self._build_summary(metadata),
@@ -183,6 +197,7 @@ class JobManager:
             if status in TERMINAL_JOB_STATES:
                 metadata["ended_at"] = now_utc_iso()
             self._store_metadata(job_id, metadata)
+            self._update_remote_job_index(metadata)
             self._emit_update(on_update, metadata)
 
             if status in TERMINAL_JOB_STATES:
@@ -195,11 +210,13 @@ class JobManager:
             "error_kind": metadata.get("error_kind"),
         }
         self._store_metadata(job_id, metadata)
+        self._update_remote_job_index(metadata)
         if status in {"failed", "canceled"}:
             error_message = logs[-1] if logs else f"{request.job_type} failed"
             metadata["error_kind"] = "remote_runtime_failure"
             metadata["error_message"] = self._build_error_message("remote_runtime_failure", RuntimeError(error_message))
             self._store_metadata(job_id, metadata)
+            self._update_remote_job_index(metadata)
             self._emit_update(on_update, metadata)
             return JobRunResult(
                 summary=self._build_summary(metadata),
@@ -222,6 +239,7 @@ class JobManager:
             if idx >= 0:
                 metadata["server_run_dir"] = result[idx + len(marker):].strip().splitlines()[0].strip()
         self._store_metadata(job_id, metadata)
+        self._update_remote_job_index(metadata)
         return JobRunResult(summary=self._build_summary(metadata), result=result, logs=logs)
 
     def cancel_job(self, request: CancelJobRequest) -> CancelJobResponse:
@@ -301,12 +319,185 @@ class JobManager:
                     payload["error_kind"] = "transport_failure"
                     payload["error_message"] = self._build_error_message("transport_failure", exc)
             self._active_jobs[job_id] = payload
+            self._update_remote_job_index(payload, persist=False)
         self.controller.persist_state()
+
+    def rehydrate_non_terminal_jobs(self) -> None:
+        backend = self.controller.execution_backend
+        changed = False
+        with self._lock:
+            active_snapshot = list(self._active_jobs.items())
+        for job_id, payload in active_snapshot:
+            if not isinstance(payload, dict):
+                continue
+            cached_state = str(payload.get("status", "queued")).strip().lower() or "queued"
+            if cached_state in TERMINAL_JOB_STATES:
+                continue
+            try:
+                if hasattr(backend, "register_existing_job"):
+                    backend.register_existing_job(job_id=job_id, job_type=str(payload.get("job_type", "unknown")))
+                canonical_state = normalize_job_state(str(backend.get_status(job_id))).value
+            except Exception as exc:  # noqa: BLE001
+                payload["retryable_transport_failure"] = True
+                payload["error_kind"] = "transport_failure"
+                payload["error_message"] = self._build_error_message("transport_failure", exc)
+            else:
+                payload["status"] = canonical_state
+                payload["retryable_transport_failure"] = False
+                payload["error_kind"] = None
+                payload["error_message"] = None
+                if canonical_state == JobState.RUNNING.value and payload.get("started_at") is None:
+                    payload["started_at"] = now_utc_iso()
+                if canonical_state in TERMINAL_JOB_STATES and payload.get("ended_at") is None:
+                    payload["ended_at"] = now_utc_iso()
+            with self._lock:
+                self._active_jobs[job_id] = payload
+            self._update_remote_job_index(payload, persist=False)
+            changed = True
+        if changed:
+            self.controller.persist_state()
+
+    def refresh_job_status(self, job_id: str) -> dict[str, object] | None:
+        with self._lock:
+            metadata = dict(self._active_jobs.get(job_id, {}))
+        if not metadata:
+            return None
+        backend = self.controller.execution_backend
+        try:
+            if hasattr(backend, "register_existing_job"):
+                backend.register_existing_job(job_id=job_id, job_type=str(metadata.get("job_type", "unknown")))
+            metadata["status"] = normalize_job_state(str(backend.get_status(job_id))).value
+            metadata["error_kind"] = None
+            metadata["error_message"] = None
+            metadata["retryable_transport_failure"] = False
+        except Exception as exc:  # noqa: BLE001
+            metadata["retryable_transport_failure"] = True
+            metadata["error_kind"] = "transport_failure"
+            metadata["error_message"] = self._build_error_message("transport_failure", exc)
+        if metadata.get("status") in TERMINAL_JOB_STATES and metadata.get("ended_at") is None:
+            metadata["ended_at"] = now_utc_iso()
+        self._store_metadata(job_id, metadata)
+        self._update_remote_job_index(metadata)
+        return metadata
+
+    def refresh_job_summary(self, job_id: str) -> str | None:
+        with self._lock:
+            metadata = dict(self._active_jobs.get(job_id, {}))
+        if not metadata:
+            return None
+        if str(metadata.get("status", "")).lower() not in TERMINAL_JOB_STATES:
+            return None
+        backend = self.controller.execution_backend
+        try:
+            if hasattr(backend, "register_existing_job"):
+                backend.register_existing_job(job_id=job_id, job_type=str(metadata.get("job_type", "unknown")))
+            logs = backend.stream_logs(job_id) if hasattr(backend, "stream_logs") else []
+            result = backend.get_result(job_id) if hasattr(backend, "get_result") else None
+        except Exception as exc:  # noqa: BLE001
+            metadata["error_kind"] = "transport_failure"
+            metadata["error_message"] = self._build_error_message("transport_failure", exc)
+            self._store_metadata(job_id, metadata)
+            self._update_remote_job_index(metadata)
+            return None
+
+        summary_payload = {
+            "refreshed_at": now_utc_iso(),
+            "log_line_count": len(logs),
+        }
+        if isinstance(result, dict):
+            summary_payload.update(result)
+        elif result is not None:
+            summary_payload["result"] = result
+        metadata["summary_payload"] = summary_payload
+
+        summary_path = self._write_summary_cache(job_id, metadata)
+        self._store_metadata(job_id, metadata)
+        self._update_remote_job_index(metadata, summary_cache_path=summary_path)
+        return summary_path
+
+    def reattach_job(self, job_id: str) -> bool:
+        with self._lock:
+            metadata = dict(self._active_jobs.get(job_id, {}))
+        if not metadata:
+            return False
+        backend = self.controller.execution_backend
+        if not hasattr(backend, "register_existing_job"):
+            return False
+        try:
+            backend.register_existing_job(job_id=job_id, job_type=str(metadata.get("job_type", "unknown")))
+            metadata["status"] = normalize_job_state(str(backend.get_status(job_id))).value
+        except Exception as exc:  # noqa: BLE001
+            metadata["error_kind"] = "transport_failure"
+            metadata["error_message"] = self._build_error_message("transport_failure", exc)
+            self._store_metadata(job_id, metadata)
+            self._update_remote_job_index(metadata)
+            return False
+        self._store_metadata(job_id, metadata)
+        self._update_remote_job_index(metadata)
+        return True
+
+    def list_remote_jobs(self) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        with self._lock:
+            snapshot = dict(self._remote_jobs)
+        for job_id, payload in snapshot.items():
+            if not isinstance(payload, dict):
+                continue
+            row = dict(payload)
+            row["job_id"] = job_id
+            rows.append(row)
+        rows.sort(key=lambda item: str(item.get("submitted_at") or ""), reverse=True)
+        return rows
 
     def _store_metadata(self, job_id: str, metadata: dict[str, object]) -> None:
         with self._lock:
             self._active_jobs[job_id] = dict(metadata)
         self.controller.persist_state()
+
+    def _update_remote_job_index(
+        self,
+        metadata: dict[str, object],
+        *,
+        summary_cache_path: str | None = None,
+        persist: bool = True,
+    ) -> None:
+        job_id = str(metadata.get("job_id", "")).strip()
+        if not job_id:
+            return
+        with self._lock:
+            existing = dict(self._remote_jobs.get(job_id, {}))
+            summary_path = summary_cache_path
+            if summary_path is None:
+                summary_path = str(existing.get("summary_cache_path", "")).strip() or None
+            remote_record = {
+                "job_id": job_id,
+                "job_type": str(metadata.get("job_type", existing.get("job_type", "unknown"))).strip() or "unknown",
+                "submitted_at": str(metadata.get("submitted_at", existing.get("submitted_at", ""))).strip() or None,
+                "last_known_state": str(metadata.get("status", existing.get("last_known_state", "queued"))).strip() or "queued",
+                "server_host": str(metadata.get("server_hostname", existing.get("server_host", "unknown"))).strip() or "unknown",
+                "summary_cache_path": summary_path,
+            }
+            self._remote_jobs[job_id] = remote_record
+        if persist:
+            self.controller.persist_state()
+
+    def _write_summary_cache(self, job_id: str, metadata: dict[str, object]) -> str:
+        cache_dir = BACKTEST_CACHE_DIR / "remote_job_summaries"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{job_id}.json"
+        payload = {
+            "job_id": job_id,
+            "job_type": metadata.get("job_type"),
+            "status": metadata.get("status"),
+            "submitted_at": metadata.get("submitted_at"),
+            "started_at": metadata.get("started_at"),
+            "ended_at": metadata.get("ended_at"),
+            "server_hostname": metadata.get("server_hostname"),
+            "summary_payload": metadata.get("summary_payload", {}),
+            "summary_paths": metadata.get("summary_paths", {}),
+        }
+        cache_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        return str(cache_path)
 
     def _emit_update(self, on_update: Callable[[dict[str, object]], None] | None, metadata: dict[str, object]) -> None:
         if on_update is None:

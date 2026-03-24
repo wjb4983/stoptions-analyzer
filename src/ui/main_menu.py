@@ -98,6 +98,13 @@ class MainMenu(ttk.Frame):
             width=30,
         ).grid(row=7, column=0, pady=10)
 
+        ttk.Button(
+            button_frame,
+            text="Remote Jobs",
+            command=lambda: controller.show_frame("RemoteJobsPage"),
+            width=30,
+        ).grid(row=8, column=0, pady=10)
+
     def open_create_regime_workspace(self) -> None:
         self.controller.show_frame("CreateRegimePage")
 
