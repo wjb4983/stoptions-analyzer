@@ -75,6 +75,18 @@ class FakeWidget:
         self.config(**kwargs)
 
 
+class FakeBindableWidget:
+    def __init__(self, children=None):
+        self._children = list(children or [])
+        self.bindings = {}
+
+    def bind(self, event_name, callback):
+        self.bindings[event_name] = callback
+
+    def winfo_children(self):
+        return list(self._children)
+
+
 class FakeFrameWidget(FakeWidget):
     def __init__(self):
         super().__init__()
@@ -788,6 +800,30 @@ def test_create_regime_refresh_maps_backend_leg_family_to_ui_leg_type() -> None:
     assert leg["selected_model_id"] == "ppo_regime_policy"
     assert float(leg["controls"]["lookback_days"]) == 75.0
     assert float(leg["controls"]["detection_threshold"]) == 1.9
+
+
+def test_create_regime_mousewheel_binding_supports_middle_button_drag_scroll() -> None:
+    page = create_regime_page.CreateRegimePage.__new__(create_regime_page.CreateRegimePage)
+    child = FakeBindableWidget()
+    root = FakeBindableWidget(children=[child])
+    scroll_calls: list[tuple[int, str]] = []
+
+    def _scroll(amount: int, units: str) -> None:
+        scroll_calls.append((amount, units))
+
+    page._bind_mousewheel_recursive(root, _scroll)
+
+    assert "<ButtonPress-2>" in root.bindings
+    assert "<B2-Motion>" in root.bindings
+    assert "<ButtonPress-2>" in child.bindings
+    assert "<B2-Motion>" in child.bindings
+
+    press_event = type("Event", (), {"y_root": 100})()
+    drag_event = type("Event", (), {"y_root": 110})()
+    root.bindings["<ButtonPress-2>"](press_event)
+    root.bindings["<B2-Motion>"](drag_event)
+
+    assert scroll_calls[-1] == (-5, "units")
 
 
 def test_create_regime_unknown_leg_mapping_blocks_training() -> None:

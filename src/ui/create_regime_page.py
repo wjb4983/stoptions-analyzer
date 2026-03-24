@@ -762,6 +762,8 @@ class CreateRegimePage(ttk.Frame):
         return section
 
     def _bind_mousewheel_recursive(self, widget: tk.Widget, scroll_command: object) -> None:
+        middle_drag_state = {"y": 0}
+
         def _on_mousewheel(event: object) -> str:
             delta = int(getattr(event, "delta", 0) or 0)
             num = getattr(event, "num", None)
@@ -776,9 +778,23 @@ class CreateRegimePage(ttk.Frame):
                 return "break"
             return "break"
 
+        def _on_middle_press(event: object) -> str:
+            middle_drag_state["y"] = int(getattr(event, "y_root", 0) or 0)
+            return "break"
+
+        def _on_middle_drag(event: object) -> str:
+            current_y = int(getattr(event, "y_root", 0) or 0)
+            delta = current_y - middle_drag_state["y"]
+            if abs(delta) >= 2:
+                scroll_command(int(-delta / 2), "units")
+                middle_drag_state["y"] = current_y
+            return "break"
+
         widget.bind("<MouseWheel>", _on_mousewheel)
         widget.bind("<Button-4>", _on_mousewheel)
         widget.bind("<Button-5>", _on_mousewheel)
+        widget.bind("<ButtonPress-2>", _on_middle_press)
+        widget.bind("<B2-Motion>", _on_middle_drag)
         for child in widget.winfo_children():
             self._bind_mousewheel_recursive(child, scroll_command)
 
