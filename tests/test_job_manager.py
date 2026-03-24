@@ -42,6 +42,22 @@ class RecoveryBackend:
         return "running"
 
 
+class StatusOverrideBackend:
+    def register_existing_job(self, *, job_id: str, job_type: str = "unknown") -> None:
+        return None
+
+    def get_status(self, job_id: str) -> str:
+        return "running"
+
+    def get_result(self, job_id: str) -> object:
+        return {"server_run_dir": "/remote/runs/job-1", "summary_files": ["/remote/runs/job-1/summary.json"]}
+
+
+class CompletedBackend(StatusOverrideBackend):
+    def get_status(self, job_id: str) -> str:
+        return "completed"
+
+
 @dataclass
 class FakeController:
     state: AppState
@@ -63,7 +79,7 @@ def test_job_manager_retries_transient_status_errors_and_persists_metadata() -> 
         source_page="test",
     )
 
-    assert result.status == "succeeded"
+    assert result.status == "completed"
     assert result.result == {"ok": True}
     assert "job-1" in controller.state.active_jobs
     assert controller.state.active_jobs["job-1"]["transport_retries"] == 1
@@ -101,3 +117,49 @@ def test_active_job_state_roundtrip_includes_new_fields(tmp_path, monkeypatch) -
     assert "abc" in loaded.active_jobs
     assert loaded.active_jobs["abc"]["job_type"] == "backtest"
     assert loaded.active_jobs["abc"]["status"] == "running"
+
+
+def test_rehydrate_remote_jobs_uses_server_canonical_status() -> None:
+    controller = FakeController(
+        state=AppState(
+            remote_jobs={
+                "job-1": {
+                    "job_id": "job-1",
+                    "job_type": "backtesting.multi_signal",
+                    "submitted_at": "2026-01-01T00:00:00Z",
+                    "last_known_state": "queued",
+                    "server_host": "host-1",
+                    "summary_cache_path": None,
+                }
+            }
+        ),
+        execution_backend=StatusOverrideBackend(),
+    )
+    manager = JobManager(controller=controller)
+    manager.rehydrate_remote_jobs()
+
+    assert controller.state.remote_jobs["job-1"]["last_known_state"] == "running"
+    assert controller.state.active_jobs["job-1"]["status"] == "running"
+
+
+def test_refresh_summary_updates_cache_path_for_completed_job() -> None:
+    controller = FakeController(
+        state=AppState(
+            active_jobs={
+                "job-1": {
+                    "job_id": "job-1",
+                    "job_type": "backtesting.multi_signal",
+                    "status": "completed",
+                    "submitted_at": "2026-01-01T00:00:00Z",
+                    "server_hostname": "host-1",
+                }
+            }
+        ),
+        execution_backend=CompletedBackend(),
+    )
+    manager = JobManager(controller=controller)
+    ok = manager.refresh_job_summary("job-1")
+
+    assert ok
+    assert controller.state.active_jobs["job-1"]["summary_paths"]["0"].endswith("summary.json")
+    assert controller.state.remote_jobs["job-1"]["summary_cache_path"].endswith("summary.json")

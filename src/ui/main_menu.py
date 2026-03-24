@@ -111,10 +111,17 @@ class MainMenu(ttk.Frame):
 
         ttk.Button(
             button_frame,
+            text="Remote Jobs",
+            command=lambda: controller.show_frame("RemoteJobsPage"),
+            width=30,
+        ).grid(row=7, column=0, pady=10)
+
+        ttk.Button(
+            button_frame,
             text="Create Regime",
             command=self.open_create_regime_workspace,
             width=30,
-        ).grid(row=7, column=0, pady=10)
+        ).grid(row=8, column=0, pady=10)
 
     def _bind_scroll_events(self) -> None:
         self._bind_scroll_recursive(self)

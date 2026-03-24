@@ -150,4 +150,42 @@ def test_remote_execution_settings_roundtrip_and_defaults(tmp_path, monkeypatch)
     assert loaded.remote_execution_settings["mode"] == "remote"
     assert loaded.remote_execution_settings["ssh_host"] == "example.internal"
     assert loaded.remote_execution_settings["ssh_port"] == "2222"
-    assert loaded.remote_execution_settings["api_key_policy"] == "server_only"
+    assert loaded.remote_execution_settings["api_policy"] == "server_managed"
+
+
+def test_remote_jobs_roundtrip_and_legacy_active_jobs_fallback(tmp_path, monkeypatch) -> None:
+    app_state_path = tmp_path / "remote_jobs_state.json"
+    monkeypatch.setattr(state, "STATE_PATH", app_state_path)
+
+    AppState(
+        remote_jobs={
+            "job-1": {
+                "job_id": "job-1",
+                "job_type": "backtesting.multi_signal",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "last_known_state": "running",
+                "server_host": "quant-host",
+                "summary_cache_path": "/tmp/summary.json",
+            }
+        }
+    ).save()
+    loaded = AppState.load()
+    assert loaded.remote_jobs["job-1"]["last_known_state"] == "running"
+    assert loaded.remote_jobs["job-1"]["server_host"] == "quant-host"
+
+    legacy_payload = {
+        "active_jobs": {
+            "job-2": {
+                "job_id": "job-2",
+                "job_type": "backtesting.multi_signal",
+                "status": "queued",
+                "submitted_at": "2026-01-02T00:00:00Z",
+                "server_hostname": "legacy-host",
+                "server_run_dir": "/tmp/runs/job-2",
+            }
+        }
+    }
+    app_state_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    migrated = AppState.load()
+    assert migrated.remote_jobs["job-2"]["last_known_state"] == "queued"
+    assert migrated.remote_jobs["job-2"]["server_host"] == "legacy-host"
