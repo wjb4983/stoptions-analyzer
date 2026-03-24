@@ -554,6 +554,29 @@ LEG_CONTROL_GROUPS: dict[str, dict[str, object]] = {
     },
 }
 
+_LEG_MODEL_TYPE_ALIASES: dict[str, str] = {
+    "Trend Following": "Trend Following",
+    "Mean Reversion": "Mean Reversion",
+    "Volatility Breakout": "Volatility Breakout",
+    "Regime Change": "Regime Change",
+    "Volatility Clustering": "Volatility Clustering",
+    "IV/EV Spread": "IV/EV Spread",
+    "Event Intensity": "Event Intensity",
+    "Vol Surface": "Vol Surface",
+    "Cross-Asset Macro": "Cross-Asset Macro",
+    "Meta-Label Ensemble": "Meta-Label Ensemble",
+    "timeseries_momentum": "Trend Following",
+    "cheap_vol_buying": "Mean Reversion",
+    "volatility_risk_premium_selling": "Volatility Breakout",
+    "regime_change_detection": "Regime Change",
+    "volatility_clustering": "Volatility Clustering",
+    "iv_ev_spread_term_structure": "IV/EV Spread",
+    "self_exciting_event_intensity": "Event Intensity",
+    "vol_surface_calibration": "Vol Surface",
+    "cross_asset_macro_conditioned": "Cross-Asset Macro",
+    "meta_label_regime_ensemble": "Meta-Label Ensemble",
+}
+
 GROUP_TITLES = {
     "signal_parameters": "Signal parameters",
     "sizing_risk_caps": "Sizing / risk caps",
@@ -818,7 +841,7 @@ class CreateRegimePage(ttk.Frame):
     def _normalize_leg_payload(self, raw_leg: object) -> dict[str, object]:
         if not isinstance(raw_leg, dict):
             return self._build_default_leg("Trend Following")
-        leg_type = str(raw_leg.get("model_type", "Trend Following"))
+        leg_type = _LEG_MODEL_TYPE_ALIASES.get(str(raw_leg.get("model_type", "Trend Following")).strip(), "Trend Following")
         if leg_type not in LEG_CONTROL_GROUPS:
             leg_type = "Trend Following"
         leg = self._build_default_leg(leg_type)

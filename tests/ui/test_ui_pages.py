@@ -753,6 +753,43 @@ def test_create_regime_refresh_reloads_active_definition_legs() -> None:
     assert float(leg["controls"]["entry_zscore"]) == 2.2
 
 
+def test_create_regime_refresh_maps_backend_leg_family_to_ui_leg_type() -> None:
+    controller = FakeController(
+        AppState(
+            regime_definitions={
+                "baseline": {
+                    "label": "Baseline",
+                    "legs": [
+                        {
+                            "name": "Regime Detector",
+                            "model_type": "regime_change_detection",
+                            "selected_model_id": "ppo_regime_policy",
+                            "controls": {
+                                "lookback_days": 75,
+                                "detection_threshold": 1.9,
+                            },
+                        }
+                    ],
+                }
+            },
+            active_regime_id="baseline",
+        )
+    )
+    page = _build_create_regime_logic_page()
+    page.controller = controller
+    page._refresh_legs_list = lambda: None
+    page._load_selected_leg_into_form = lambda: None
+    page._update_validation_and_actions = lambda: None
+
+    page.refresh()
+
+    leg = page._selected_leg()
+    assert leg["model_type"] == "Regime Change"
+    assert leg["selected_model_id"] == "ppo_regime_policy"
+    assert float(leg["controls"]["lookback_days"]) == 75.0
+    assert float(leg["controls"]["detection_threshold"]) == 1.9
+
+
 def test_create_regime_unknown_leg_mapping_blocks_training() -> None:
     page = _build_create_regime_logic_page()
     page.regime_legs[0]["model_type"] = "Not A Leg"
