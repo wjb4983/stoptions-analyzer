@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 from typing import Any
 
+from .run_summary import SUMMARY_DIR_NAME
+
 from config import ANALYSIS_OUTPUT_DIR, BACKTEST_OUTPUT_DIR
 from backtesting.regime_builder import DEFAULT_REGIME_OUTPUT_DIR
 
@@ -96,7 +98,7 @@ def sync_run_artifacts(
     remote_job_id: str,
     remote_run_dir: str | Path,
     local_output_root: str | Path,
-    mode: str = "summary",
+    mode: str = "summary_only",
     namespace_prefix: str = DEFAULT_REMOTE_NAMESPACE_PREFIX,
     include_files: list[str] | None = None,
 ) -> ArtifactSyncResult:
@@ -105,20 +107,25 @@ def sync_run_artifacts(
         raise FileNotFoundError(f"Remote run directory not found: {source_root}")
 
     mode_normalized = str(mode).strip().lower()
-    if mode_normalized not in {"summary", "full"}:
-        raise ValueError("mode must be either 'summary' or 'full'")
+    allowed_modes = {"summary", "summary_only", "selected_files", "full", "full_artifacts"}
+    if mode_normalized not in allowed_modes:
+        raise ValueError("mode must be one of: summary_only, selected_files, full_artifacts")
 
     output_root = Path(local_output_root).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     target_root = output_root / f"{namespace_prefix}__{remote_job_id}"
     target_root.mkdir(parents=True, exist_ok=True)
 
-    if mode_normalized == "full":
+    summary_root = source_root / SUMMARY_DIR_NAME
+    if mode_normalized in {"full", "full_artifacts"}:
         selected_files = [_relative(path, source_root) for path in _iter_files(source_root)]
-    elif include_files:
-        selected_files = [str(path).strip().replace("\\", "/") for path in include_files if str(path).strip()]
+    elif mode_normalized == "selected_files":
+        selected_files = [str(path).strip().replace("\\", "/") for path in (include_files or []) if str(path).strip()]
     else:
-        selected_files = _summary_manifest_files(source_root)
+        selected_files = []
+        if summary_root.exists() and summary_root.is_dir():
+            selected_files.extend(_relative(path, source_root) for path in _iter_files(summary_root))
+        selected_files.extend(path for path in _summary_manifest_files(source_root) if path not in selected_files)
 
     copied: list[str] = []
     for rel_path in selected_files:
@@ -150,30 +157,33 @@ def sync_run_artifacts(
     )
 
 
-def sync_backtest_artifacts(*, remote_job_id: str, remote_run_dir: str | Path, mode: str = "summary") -> ArtifactSyncResult:
+def sync_backtest_artifacts(*, remote_job_id: str, remote_run_dir: str | Path, mode: str = "summary_only", include_files: list[str] | None = None) -> ArtifactSyncResult:
     return sync_run_artifacts(
         remote_job_id=remote_job_id,
         remote_run_dir=remote_run_dir,
         local_output_root=BACKTEST_OUTPUT_DIR,
         mode=mode,
+        include_files=include_files,
     )
 
 
-def sync_analysis_artifacts(*, remote_job_id: str, remote_run_dir: str | Path, mode: str = "summary") -> ArtifactSyncResult:
+def sync_analysis_artifacts(*, remote_job_id: str, remote_run_dir: str | Path, mode: str = "summary_only", include_files: list[str] | None = None) -> ArtifactSyncResult:
     return sync_run_artifacts(
         remote_job_id=remote_job_id,
         remote_run_dir=remote_run_dir,
         local_output_root=ANALYSIS_OUTPUT_DIR,
         mode=mode,
+        include_files=include_files,
     )
 
 
-def sync_regime_training_artifacts(*, remote_job_id: str, remote_run_dir: str | Path, mode: str = "summary") -> ArtifactSyncResult:
+def sync_regime_training_artifacts(*, remote_job_id: str, remote_run_dir: str | Path, mode: str = "summary_only", include_files: list[str] | None = None) -> ArtifactSyncResult:
     return sync_run_artifacts(
         remote_job_id=remote_job_id,
         remote_run_dir=remote_run_dir,
         local_output_root=DEFAULT_REGIME_OUTPUT_DIR,
         mode=mode,
+        include_files=include_files,
     )
 
 

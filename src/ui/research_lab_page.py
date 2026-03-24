@@ -624,13 +624,26 @@ class ResearchLabPage(ttk.Frame):
             return
 
         explain_path = run_dir / "trade_explainability.json"
-        if not explain_path.exists():
-            return
-        try:
-            explain_rows = json.loads(explain_path.read_text(encoding="utf-8"))
-        except Exception:
-            return
+        if explain_path.exists():
+            try:
+                explain_rows = json.loads(explain_path.read_text(encoding="utf-8"))
+            except Exception:
+                explain_rows = []
+        else:
+            explain_rows = []
         if not isinstance(explain_rows, list) or not explain_rows:
+            summary_diag_path = run_dir / "summary" / "top_diagnostics.json"
+            if summary_diag_path.exists():
+                try:
+                    diag = json.loads(summary_diag_path.read_text(encoding="utf-8"))
+                except Exception:
+                    diag = {}
+                if isinstance(diag, dict):
+                    flagged = int(diag.get("flagged_trade_count", 0) or 0)
+                    total = int(diag.get("trade_count", 0) or 0)
+                    line = f"[{task.label}] Summary diagnostics: flagged trades={flagged} / {total}."
+                    self._append_output(line)
+                    task.logs.append(line)
             return
 
         regime_by_timestamp = self._load_regime_by_timestamp(run_dir)

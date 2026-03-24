@@ -31,6 +31,7 @@ from execution.backend import (
 )
 from execution.contracts import SCHEMA_VERSION, ensure_schema_compatible, normalize_job_state
 from execution.remote_payloads import deserialize_from_json, serialize_for_json
+from execution.run_summary import build_workflow_summary
 from remote.scheduler import tick_scheduler
 
 
@@ -116,6 +117,33 @@ def _artifact_manifest(job_dir: Path) -> dict[str, Any]:
     }
 
 
+
+
+def _extract_run_dir_from_result(result: Any) -> Path | None:
+    if isinstance(result, str):
+        marker = "Saved outputs to:"
+        idx = result.rfind(marker)
+        if idx >= 0:
+            candidate = Path(result[idx + len(marker):].strip().splitlines()[0].strip()).expanduser()
+            if candidate.exists() and candidate.is_dir():
+                return candidate.resolve()
+    if isinstance(result, dict):
+        artifact_path = str(result.get("artifact_path", "")).strip()
+        if artifact_path:
+            candidate = Path(artifact_path).expanduser()
+            if candidate.exists():
+                return candidate.resolve().parent
+    return None
+
+
+def _workflow_summary_kind(job_type: str) -> str:
+    normalized = str(job_type).strip().lower()
+    if "regime" in normalized:
+        return "regime_training"
+    if "analysis" in normalized:
+        return "analysis"
+    return "backtesting"
+
 def _dispatch(job_type: str, payload: dict[str, Any], cancellation_token: CancellationToken) -> Any:
     normalized = str(job_type).strip().lower()
 
@@ -177,7 +205,11 @@ def _run_worker(job_file: Path) -> int:
         raw_payload = envelope.get("params", {})
         payload = deserialize_from_json(raw_payload)
         result = _dispatch(str(envelope.get("job_type", "")), payload, cancellation_token)
-        result_payload = {"result": serialize_for_json(result)}
+        run_dir = _extract_run_dir_from_result(result)
+        summary_files: list[str] = []
+        if run_dir is not None:
+            summary_files = build_workflow_summary(run_dir=run_dir, workflow=_workflow_summary_kind(str(envelope.get("job_type", ""))))
+        result_payload = {"result": serialize_for_json(result), "summary_files": summary_files, "server_run_dir": str(run_dir) if run_dir is not None else None}
         _write_json(result_path, result_payload)
 
         completed_at = _now()

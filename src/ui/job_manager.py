@@ -211,6 +211,16 @@ class JobManager:
         result = backend.get_result(job_id) if hasattr(backend, "get_result") else None
         if isinstance(result, dict):
             metadata["summary_payload"] = {**metadata.get("summary_payload", {}), **result}
+            if result.get("server_run_dir"):
+                metadata["server_run_dir"] = str(result.get("server_run_dir"))
+            summary_files = result.get("summary_files")
+            if isinstance(summary_files, list):
+                metadata["summary_paths"] = {str(idx): str(path) for idx, path in enumerate(summary_files)}
+        elif isinstance(result, str):
+            marker = "Saved outputs to:"
+            idx = result.rfind(marker)
+            if idx >= 0:
+                metadata["server_run_dir"] = result[idx + len(marker):].strip().splitlines()[0].strip()
         self._store_metadata(job_id, metadata)
         return JobRunResult(summary=self._build_summary(metadata), result=result, logs=logs)
 
