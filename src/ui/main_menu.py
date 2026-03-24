@@ -13,18 +13,36 @@ class MainMenu(ttk.Frame):
         super().__init__(parent)
         self.controller = controller
 
-        title = ttk.Label(self, text="Stoptions Analyzer", font=("Arial", 24, "bold"))
+        self._canvas = tk.Canvas(self, highlightthickness=0)
+        self._scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._scrollbar.set)
+        self._scrollbar.pack(side="right", fill="y")
+        self._canvas.pack(side="left", fill="both", expand=True)
+
+        self._content = ttk.Frame(self._canvas)
+        self._content.bind(
+            "<Configure>",
+            lambda event: self._canvas.configure(scrollregion=self._canvas.bbox("all")),
+        )
+        self._canvas.create_window((0, 0), window=self._content, anchor="nw")
+        self._canvas.bind(
+            "<Configure>",
+            lambda event: self._canvas.itemconfigure("all", width=event.width),
+        )
+        self._bind_scroll_events()
+
+        title = ttk.Label(self._content, text="Stoptions Analyzer", font=("Arial", 24, "bold"))
         title.pack(pady=20)
 
         description = ttk.Label(
-            self,
+            self._content,
             text="Manage tickers, select a stock, and explore option strategy analysis.",
             wraplength=600,
             justify="center",
         )
         description.pack(pady=10)
 
-        api_frame = ttk.LabelFrame(self, text="Massive API Key")
+        api_frame = ttk.LabelFrame(self._content, text="Massive API Key")
         api_frame.pack(pady=15, padx=40, fill="x")
         api_frame.columnconfigure(1, weight=1)
 
@@ -38,7 +56,7 @@ class MainMenu(ttk.Frame):
 
         self._build_remote_backend_section()
 
-        button_frame = ttk.Frame(self)
+        button_frame = ttk.Frame(self._content)
         button_frame.pack(pady=40)
 
         ttk.Button(
@@ -98,6 +116,21 @@ class MainMenu(ttk.Frame):
             width=30,
         ).grid(row=7, column=0, pady=10)
 
+    def _bind_scroll_events(self) -> None:
+        self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self._canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self._canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        if getattr(event, "num", None) == 4:
+            self._canvas.yview_scroll(-1, "units")
+            return
+        if getattr(event, "num", None) == 5:
+            self._canvas.yview_scroll(1, "units")
+            return
+        delta = int(-1 * (event.delta / 120))
+        self._canvas.yview_scroll(delta, "units")
+
     def open_create_regime_workspace(self) -> None:
         self.controller.show_frame("CreateRegimePage")
 
@@ -117,7 +150,7 @@ class MainMenu(ttk.Frame):
         )
 
     def _build_remote_backend_section(self) -> None:
-        remote_frame = ttk.LabelFrame(self, text="Remote Backend")
+        remote_frame = ttk.LabelFrame(self._content, text="Remote Backend")
         remote_frame.pack(pady=12, padx=40, fill="x")
         remote_frame.columnconfigure(1, weight=1)
         remote_frame.columnconfigure(3, weight=1)
@@ -164,6 +197,18 @@ class MainMenu(ttk.Frame):
                 "or from a secure file path outside this repo.\n"
                 "forward_from_client: forwards your local key only at process launch (ephemeral); "
                 "the key is never written to job files or logs."
+            ),
+            wraplength=760,
+            justify="left",
+        ).grid(row=row, column=1, columnspan=3, sticky="w", padx=8, pady=4)
+
+        row += 1
+        ttk.Label(remote_frame, text="Quick start").grid(row=row, column=0, sticky="nw", padx=8, pady=4)
+        ttk.Label(
+            remote_frame,
+            text=(
+                "Set Mode to remote, enter SSH host/user and remote root, then save settings.\n"
+                "Use Validate connection to verify access before launching analysis or backtests."
             ),
             wraplength=760,
             justify="left",
