@@ -554,6 +554,29 @@ LEG_CONTROL_GROUPS: dict[str, dict[str, object]] = {
     },
 }
 
+_LEG_MODEL_TYPE_ALIASES: dict[str, str] = {
+    "Trend Following": "Trend Following",
+    "Mean Reversion": "Mean Reversion",
+    "Volatility Breakout": "Volatility Breakout",
+    "Regime Change": "Regime Change",
+    "Volatility Clustering": "Volatility Clustering",
+    "IV/EV Spread": "IV/EV Spread",
+    "Event Intensity": "Event Intensity",
+    "Vol Surface": "Vol Surface",
+    "Cross-Asset Macro": "Cross-Asset Macro",
+    "Meta-Label Ensemble": "Meta-Label Ensemble",
+    "timeseries_momentum": "Trend Following",
+    "cheap_vol_buying": "Mean Reversion",
+    "volatility_risk_premium_selling": "Volatility Breakout",
+    "regime_change_detection": "Regime Change",
+    "volatility_clustering": "Volatility Clustering",
+    "iv_ev_spread_term_structure": "IV/EV Spread",
+    "self_exciting_event_intensity": "Event Intensity",
+    "vol_surface_calibration": "Vol Surface",
+    "cross_asset_macro_conditioned": "Cross-Asset Macro",
+    "meta_label_regime_ensemble": "Meta-Label Ensemble",
+}
+
 GROUP_TITLES = {
     "signal_parameters": "Signal parameters",
     "sizing_risk_caps": "Sizing / risk caps",
@@ -688,9 +711,17 @@ class CreateRegimePage(ttk.Frame):
         self._build_config_panel()
         self._build_summary_panel()
         self._build_bottom_panel()
+        self._bind_mousewheel_recursive(self, self._scroll_active_tab_units)
 
         self._load_editor_state_from_definition()
 
+        self._refresh_legs_list()
+        self._load_selected_leg_into_form()
+        self._update_validation_and_actions()
+
+    def refresh(self) -> None:
+        """Reload the editor from the currently active regime definition."""
+        self._load_editor_state_from_definition()
         self._refresh_legs_list()
         self._load_selected_leg_into_form()
         self._update_validation_and_actions()
@@ -732,6 +763,8 @@ class CreateRegimePage(ttk.Frame):
         return section
 
     def _bind_mousewheel_recursive(self, widget: tk.Widget, scroll_command: object) -> None:
+        middle_drag_state = {"y": 0}
+
         def _on_mousewheel(event: object) -> str:
             delta = int(getattr(event, "delta", 0) or 0)
             num = getattr(event, "num", None)
@@ -746,11 +779,39 @@ class CreateRegimePage(ttk.Frame):
                 return "break"
             return "break"
 
+        def _on_middle_press(event: object) -> str:
+            middle_drag_state["y"] = int(getattr(event, "y_root", 0) or 0)
+            return "break"
+
+        def _on_middle_drag(event: object) -> str:
+            current_y = int(getattr(event, "y_root", 0) or 0)
+            delta = current_y - middle_drag_state["y"]
+            if abs(delta) >= 2:
+                scroll_command(int(-delta / 2), "units")
+                middle_drag_state["y"] = current_y
+            return "break"
+
         widget.bind("<MouseWheel>", _on_mousewheel)
         widget.bind("<Button-4>", _on_mousewheel)
         widget.bind("<Button-5>", _on_mousewheel)
+        widget.bind("<ButtonPress-2>", _on_middle_press)
+        widget.bind("<B2-Motion>", _on_middle_drag)
         for child in widget.winfo_children():
             self._bind_mousewheel_recursive(child, scroll_command)
+
+    def _scroll_active_tab_units(self, amount: int, units: str) -> None:
+        if not hasattr(self, "form_notebook"):
+            return
+        current_tab = self.form_notebook.select()
+        if current_tab == str(getattr(self, "advanced_tab", "")):
+            container = getattr(self, "advanced_form_container", None)
+        elif current_tab == str(getattr(self, "validation_tab", "")):
+            container = getattr(self, "validation_form_container", None)
+        else:
+            container = getattr(self, "basics_form_container", None)
+        scroll_command = getattr(container, "_scroll_units_command", None) if container is not None else None
+        if scroll_command is not None:
+            scroll_command(amount, units)
 
     def _build_default_leg(self, leg_type: str) -> dict[str, object]:
         controls = {}
@@ -811,7 +872,7 @@ class CreateRegimePage(ttk.Frame):
     def _normalize_leg_payload(self, raw_leg: object) -> dict[str, object]:
         if not isinstance(raw_leg, dict):
             return self._build_default_leg("Trend Following")
-        leg_type = str(raw_leg.get("model_type", "Trend Following"))
+        leg_type = _LEG_MODEL_TYPE_ALIASES.get(str(raw_leg.get("model_type", "Trend Following")).strip(), "Trend Following")
         if leg_type not in LEG_CONTROL_GROUPS:
             leg_type = "Trend Following"
         leg = self._build_default_leg(leg_type)
@@ -1615,6 +1676,7 @@ class CreateRegimePage(ttk.Frame):
         advanced_scroll = getattr(self.advanced_form_container, "_scroll_units_command", None)
         if advanced_scroll is not None:
             self._bind_mousewheel_recursive(self.advanced_form_container, advanced_scroll)
+        self._bind_mousewheel_recursive(self, self._scroll_active_tab_units)
 
         self._update_validation_and_actions()
 

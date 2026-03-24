@@ -75,6 +75,26 @@ class FakeWidget:
         self.config(**kwargs)
 
 
+class FakeBindableWidget:
+    def __init__(self, children=None):
+        self._children = list(children or [])
+        self.bindings = {}
+
+    def bind(self, event_name, callback):
+        self.bindings[event_name] = callback
+
+    def winfo_children(self):
+        return list(self._children)
+
+
+class FakeCanvas:
+    def __init__(self):
+        self.scroll_calls: list[tuple[int, str]] = []
+
+    def yview_scroll(self, amount: int, units: str):
+        self.scroll_calls.append((amount, units))
+
+
 class FakeFrameWidget(FakeWidget):
     def __init__(self):
         super().__init__()
@@ -278,6 +298,30 @@ def test_main_menu_remote_settings_validation(monkeypatch):
 
     menu.save_remote_settings()
     assert errors and errors[-1][0] == "Remote settings invalid"
+
+
+def test_main_menu_scroll_bindings_allow_wheel_anywhere() -> None:
+    menu = main_menu.MainMenu.__new__(main_menu.MainMenu)
+    menu._canvas = FakeCanvas()
+    child = FakeBindableWidget()
+    root = FakeBindableWidget(children=[child])
+
+    menu._bind_scroll_recursive(root)
+
+    assert "<MouseWheel>" in root.bindings
+    assert "<MouseWheel>" in child.bindings
+    assert "<ButtonPress-2>" in root.bindings
+    assert "<B2-Motion>" in child.bindings
+
+    wheel_event = type("Event", (), {"delta": 120, "num": None})()
+    root.bindings["<MouseWheel>"](wheel_event)
+    assert menu._canvas.scroll_calls[-1] == (-1, "units")
+
+    press_event = type("Event", (), {"y_root": 200})()
+    drag_event = type("Event", (), {"y_root": 212})()
+    child.bindings["<ButtonPress-2>"](press_event)
+    child.bindings["<B2-Motion>"](drag_event)
+    assert menu._canvas.scroll_calls[-1] == (-6, "units")
 
 
 def test_research_lab_validation_no_signal_and_invalid_dates():
@@ -714,6 +758,144 @@ def test_create_regime_change_selection_initializes_expected_controls_defaults()
     assert float(leg["controls"]["detection_threshold"]) == 1.6
     assert float(leg["controls"]["max_position_pct"]) == 0.05
     assert float(leg["controls"]["max_drawdown_stop"]) == 0.08
+
+
+def test_create_regime_refresh_reloads_active_definition_legs() -> None:
+    controller = FakeController(
+        AppState(
+            regime_definitions={
+                "baseline": {
+                    "label": "Baseline",
+                    "legs": [
+                        {
+                            "name": "Saved Leg",
+                            "model_type": "Trend Following",
+                            "controls": {
+                                "lookback_days": 123,
+                                "entry_zscore": 2.2,
+                            },
+                        }
+                    ],
+                }
+            },
+            active_regime_id="baseline",
+        )
+    )
+    page = _build_create_regime_logic_page()
+    page.controller = controller
+    page.regime_legs = [create_regime_page.CreateRegimePage._build_default_leg(page, "Trend Following")]
+
+    page._refresh_legs_list = lambda: None
+    page._load_selected_leg_into_form = lambda: None
+    page._update_validation_and_actions = lambda: None
+
+    page.refresh()
+
+    leg = page._selected_leg()
+    assert leg["name"] == "Saved Leg"
+    assert float(leg["controls"]["lookback_days"]) == 123.0
+    assert float(leg["controls"]["entry_zscore"]) == 2.2
+
+
+def test_create_regime_refresh_maps_backend_leg_family_to_ui_leg_type() -> None:
+    controller = FakeController(
+        AppState(
+            regime_definitions={
+                "baseline": {
+                    "label": "Baseline",
+                    "legs": [
+                        {
+                            "name": "Regime Detector",
+                            "model_type": "regime_change_detection",
+                            "selected_model_id": "ppo_regime_policy",
+                            "controls": {
+                                "lookback_days": 75,
+                                "detection_threshold": 1.9,
+                            },
+                        }
+                    ],
+                }
+            },
+            active_regime_id="baseline",
+        )
+    )
+    page = _build_create_regime_logic_page()
+    page.controller = controller
+    page._refresh_legs_list = lambda: None
+    page._load_selected_leg_into_form = lambda: None
+    page._update_validation_and_actions = lambda: None
+
+    page.refresh()
+
+    leg = page._selected_leg()
+    assert leg["model_type"] == "Regime Change"
+    assert leg["selected_model_id"] == "ppo_regime_policy"
+    assert float(leg["controls"]["lookback_days"]) == 75.0
+    assert float(leg["controls"]["detection_threshold"]) == 1.9
+
+
+def test_create_regime_mousewheel_binding_supports_middle_button_drag_scroll() -> None:
+    page = create_regime_page.CreateRegimePage.__new__(create_regime_page.CreateRegimePage)
+    child = FakeBindableWidget()
+    root = FakeBindableWidget(children=[child])
+    scroll_calls: list[tuple[int, str]] = []
+
+    def _scroll(amount: int, units: str) -> None:
+        scroll_calls.append((amount, units))
+
+    page._bind_mousewheel_recursive(root, _scroll)
+
+    assert "<ButtonPress-2>" in root.bindings
+    assert "<B2-Motion>" in root.bindings
+    assert "<ButtonPress-2>" in child.bindings
+    assert "<B2-Motion>" in child.bindings
+
+    press_event = type("Event", (), {"y_root": 100})()
+    drag_event = type("Event", (), {"y_root": 110})()
+    root.bindings["<ButtonPress-2>"](press_event)
+    root.bindings["<B2-Motion>"](drag_event)
+
+    assert scroll_calls[-1] == (-5, "units")
+
+
+def test_create_regime_scroll_active_tab_units_routes_to_current_tab() -> None:
+    page = create_regime_page.CreateRegimePage.__new__(create_regime_page.CreateRegimePage)
+    scroll_calls: list[tuple[int, str]] = []
+
+    class _Container:
+        def __init__(self, tag: str):
+            self.tag = tag
+
+        def _scroll_units_command(self, amount, units):
+            scroll_calls.append((self.tag, amount, units))
+
+    class _Notebook:
+        def __init__(self, selected_tab: str):
+            self._selected_tab = selected_tab
+
+        def select(self):
+            return self._selected_tab
+
+    page.basics_tab = "basics"
+    page.advanced_tab = "advanced"
+    page.validation_tab = "validation"
+    page.basics_form_container = _Container("basics")
+    page.advanced_form_container = _Container("advanced")
+    page.validation_form_container = _Container("validation")
+
+    page.form_notebook = _Notebook(selected_tab="basics")
+    page._scroll_active_tab_units(-2, "units")
+    page.form_notebook = _Notebook(selected_tab="advanced")
+    page._scroll_active_tab_units(3, "units")
+    page.form_notebook = _Notebook(selected_tab="validation")
+    page._scroll_active_tab_units(1, "units")
+
+    assert scroll_calls == [
+        ("basics", -2, "units"),
+        ("advanced", 3, "units"),
+        ("validation", 1, "units"),
+    ]
+
 
 def test_create_regime_unknown_leg_mapping_blocks_training() -> None:
     page = _build_create_regime_logic_page()
