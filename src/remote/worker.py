@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import threading
 import traceback
@@ -170,6 +171,20 @@ def _dispatch(job_type: str, payload: dict[str, Any], cancellation_token: Cancel
     raise ValueError(f"Unsupported job_type: {job_type}")
 
 
+def _ensure_massive_api_key_available() -> None:
+    if os.getenv("MASSIVE_API_KEY", "").strip():
+        return
+    server_key_file = os.getenv("STOPTIONS_SERVER_API_KEY_FILE", "").strip()
+    if not server_key_file:
+        return
+    candidate = Path(server_key_file).expanduser()
+    if not candidate.exists() or not candidate.is_file():
+        return
+    key = candidate.read_text(encoding="utf-8").strip()
+    if key:
+        os.environ["MASSIVE_API_KEY"] = key
+
+
 def _run_worker(job_file: Path) -> int:
     envelope = json.loads(job_file.read_text(encoding="utf-8"))
     ensure_schema_compatible(int(envelope.get("schema_version", 1)), source="remote worker envelope")
@@ -202,6 +217,7 @@ def _run_worker(job_file: Path) -> int:
     watcher.start()
 
     try:
+        _ensure_massive_api_key_available()
         raw_payload = envelope.get("params", {})
         payload = deserialize_from_json(raw_payload)
         result = _dispatch(str(envelope.get("job_type", "")), payload, cancellation_token)

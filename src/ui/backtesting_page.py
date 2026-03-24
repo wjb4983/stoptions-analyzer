@@ -4263,13 +4263,37 @@ class BacktestingPage(ttk.Frame):
             return False
         mode = str(remote_settings.get("mode", "local")).strip().lower()
         if mode == "remote":
-            policy = str(remote_settings.get("api_key_policy", "server_only")).strip().lower()
-            if policy == "server_only":
+            policy = str(remote_settings.get("api_policy", "server_managed")).strip().lower()
+            if policy == "server_managed":
                 self.logs_text.insert(
                     tk.END,
-                    "[backend] API keys are server-provisioned in remote mode; no per-job forwarding occurs.\n",
+                    "[backend] API policy is server_managed; remote worker expects server-side key provisioning.\n",
                 )
                 self.logs_text.see(tk.END)
+            elif policy == "forward_from_client":
+                if not str(getattr(self.controller, "api_key", "")).strip():
+                    messagebox.showerror(
+                        "Missing local API key",
+                        "Remote mode is configured for forward_from_client, but no local Massive API key is set.\n\n"
+                        "Remediation:\n"
+                        "• Save a local key in Main Menu → Massive API Key, or\n"
+                        "• Switch API policy to server_managed and provision MASSIVE_API_KEY on the remote host.",
+                    )
+                    return False
+            backend = self.controller.execution_backend
+            if hasattr(backend, "validate_api_key_available"):
+                ok, detail = backend.validate_api_key_available()
+                if not ok:
+                    messagebox.showerror(
+                        "Remote API key configuration missing",
+                        "Cannot submit remote job because no API key source is available.\n\n"
+                        f"{detail}\n\n"
+                        "Remediation:\n"
+                        "• server_managed: set MASSIVE_API_KEY on remote host or set a readable secure file path in "
+                        "Main Menu → Remote Backend → Server key file.\n"
+                        "• forward_from_client: save a local Massive API key and keep forwarding enabled.",
+                    )
+                    return False
         return True
 
     def _validate_common_inputs(self) -> tuple[str, int, int, float, float, float] | None:

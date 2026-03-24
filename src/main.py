@@ -87,6 +87,9 @@ class StoptionsApp(tk.Tk):
     def _effective_remote_settings(self) -> dict[str, object]:
         merged = dict(self.state.remote_execution_settings)
         merged.update(load_remote_secrets())
+        policy = str(merged.get("api_policy", "server_managed")).strip().lower()
+        if policy == "forward_from_client" and self.api_key:
+            merged["forwarded_api_key"] = self.api_key
         return merged
 
     def _maximize_window(self) -> None:

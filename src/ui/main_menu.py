@@ -138,21 +138,36 @@ class MainMenu(ttk.Frame):
         self.remote_scheduler_queue_var = tk.StringVar(value=str(settings.get("scheduler_queue", "")))
         self.remote_scheduler_max_jobs_var = tk.StringVar(value=str(settings.get("scheduler_max_concurrent_jobs", "1")))
         self.remote_scheduler_poll_var = tk.StringVar(value=str(settings.get("scheduler_poll_seconds", "1.5")))
-        self.remote_api_key_policy_var = tk.StringVar(value=str(settings.get("api_key_policy", "server_only")))
+        self.remote_api_policy_var = tk.StringVar(value=str(settings.get("api_policy", "server_managed")))
+        self.remote_server_api_key_file_var = tk.StringVar(value=str(settings.get("server_api_key_file", "")))
         self.remote_ssh_options_var = tk.StringVar(value=str(secrets.get("ssh_options", "")))
         self.remote_ssh_identity_var = tk.StringVar(value=str(secrets.get("ssh_identity_file", "")))
 
         row = 0
         ttk.Label(remote_frame, text="Mode").grid(row=row, column=0, sticky="w", padx=8, pady=4)
         ttk.Combobox(remote_frame, textvariable=self.remote_mode_var, values=["local", "remote"], state="readonly", width=16).grid(row=row, column=1, sticky="w", padx=8, pady=4)
-        ttk.Label(remote_frame, text="API key policy").grid(row=row, column=2, sticky="w", padx=8, pady=4)
+        ttk.Label(remote_frame, text="API policy").grid(row=row, column=2, sticky="w", padx=8, pady=4)
         ttk.Combobox(
             remote_frame,
-            textvariable=self.remote_api_key_policy_var,
-            values=["server_only"],
+            textvariable=self.remote_api_policy_var,
+            values=["server_managed", "forward_from_client"],
             state="readonly",
             width=20,
         ).grid(row=row, column=3, sticky="w", padx=8, pady=4)
+
+        row += 1
+        ttk.Label(remote_frame, text="Security").grid(row=row, column=0, sticky="nw", padx=8, pady=4)
+        ttk.Label(
+            remote_frame,
+            text=(
+                "server_managed (recommended): remote worker reads MASSIVE_API_KEY from server env "
+                "or from a secure file path outside this repo.\n"
+                "forward_from_client: forwards your local key only at process launch (ephemeral); "
+                "the key is never written to job files or logs."
+            ),
+            wraplength=760,
+            justify="left",
+        ).grid(row=row, column=1, columnspan=3, sticky="w", padx=8, pady=4)
 
         row += 1
         ttk.Label(remote_frame, text="SSH host").grid(row=row, column=0, sticky="w", padx=8, pady=4)
@@ -171,6 +186,12 @@ class MainMenu(ttk.Frame):
         ttk.Entry(remote_frame, textvariable=self.remote_python_command_var).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
         ttk.Label(remote_frame, text="Virtualenv path").grid(row=row, column=2, sticky="w", padx=8, pady=4)
         ttk.Entry(remote_frame, textvariable=self.remote_venv_path_var).grid(row=row, column=3, sticky="ew", padx=8, pady=4)
+
+        row += 1
+        ttk.Label(remote_frame, text="Server key file (optional)").grid(row=row, column=0, sticky="w", padx=8, pady=4)
+        ttk.Entry(remote_frame, textvariable=self.remote_server_api_key_file_var).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+        ttk.Label(remote_frame, text="").grid(row=row, column=2, sticky="w", padx=8, pady=4)
+        ttk.Label(remote_frame, text="").grid(row=row, column=3, sticky="w", padx=8, pady=4)
 
         row += 1
         ttk.Checkbutton(remote_frame, text="Use scheduler", variable=self.remote_scheduler_enabled_var).grid(row=row, column=0, sticky="w", padx=8, pady=4)
@@ -211,7 +232,8 @@ class MainMenu(ttk.Frame):
             "scheduler_queue": self.remote_scheduler_queue_var.get().strip(),
             "scheduler_max_concurrent_jobs": self.remote_scheduler_max_jobs_var.get().strip() or "1",
             "scheduler_poll_seconds": self.remote_scheduler_poll_var.get().strip() or "1.5",
-            "api_key_policy": self.remote_api_key_policy_var.get().strip().lower() or "server_only",
+            "api_policy": self.remote_api_policy_var.get().strip().lower() or "server_managed",
+            "server_api_key_file": self.remote_server_api_key_file_var.get().strip(),
         }
 
     def _load_remote_settings_into_form(self) -> None:
@@ -229,7 +251,8 @@ class MainMenu(ttk.Frame):
         self.remote_scheduler_queue_var.set(str(settings.get("scheduler_queue", "")))
         self.remote_scheduler_max_jobs_var.set(str(settings.get("scheduler_max_concurrent_jobs", "1")))
         self.remote_scheduler_poll_var.set(str(settings.get("scheduler_poll_seconds", "1.5")))
-        self.remote_api_key_policy_var.set(str(settings.get("api_key_policy", "server_only")))
+        self.remote_api_policy_var.set(str(settings.get("api_policy", "server_managed")))
+        self.remote_server_api_key_file_var.set(str(settings.get("server_api_key_file", "")))
 
     def save_remote_settings(self) -> None:
         settings = self._collect_remote_settings()

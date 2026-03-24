@@ -47,6 +47,9 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         ssh_known_hosts_file: str | None = None,
         strict_host_key_checking: bool = True,
         poll_interval_seconds: float = _STATUS_POLL_SECONDS,
+        api_policy: str = "server_managed",
+        server_api_key_file: str = "",
+        forwarded_api_key: str = "",
     ) -> None:
         self._host = host.strip()
         if not self._host:
@@ -57,6 +60,9 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         self._remote_root = str(remote_root).strip() or DEFAULT_REMOTE_ROOT
         self._ssh_options = str(ssh_options).strip()
         self._poll_interval_seconds = max(0.2, float(poll_interval_seconds))
+        self._api_policy = str(api_policy).strip().lower() or "server_managed"
+        self._server_api_key_file = str(server_api_key_file).strip()
+        self._forwarded_api_key = str(forwarded_api_key).strip()
         self._jobs: dict[str, _RemoteJobRecord] = {}
         self._local_root = Path(tempfile.gettempdir()) / "stoptions_remote_jobs"
         self._local_root.mkdir(parents=True, exist_ok=True)
@@ -74,10 +80,45 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
 
     def _run_scheduler_tick(self) -> None:
         escaped_remote_root = shlex.quote(self._remote_root)
+        policy = shlex.quote(self._api_policy)
+        server_key_file = shlex.quote(self._server_api_key_file) if self._server_api_key_file else "''"
+        key_bootstrap = (
+            f"if [ -z \"${{MASSIVE_API_KEY:-}}\" ] && [ -n {server_key_file} ] && [ -s {server_key_file} ]; "
+            f"then export MASSIVE_API_KEY=\"$(cat {server_key_file})\"; fi; "
+        )
         self._transport.run(
-            f"mkdir -p {escaped_remote_root} && "
-            f"cd {escaped_remote_root} && "
+            f"mkdir -p {escaped_remote_root} && cd {escaped_remote_root} && "
+            f"export STOPTIONS_API_POLICY={policy}; "
+            f"export STOPTIONS_SERVER_API_KEY_FILE={server_key_file}; "
+            f"{key_bootstrap}"
             f"{shlex.quote(self._python_bin)} -m remote.scheduler --remote-root {escaped_remote_root}"
+        )
+
+    def validate_api_key_available(self) -> tuple[bool, str]:
+        if self._api_policy == "forward_from_client":
+            if self._forwarded_api_key:
+                return True, "Forwarded API key is present and will be injected at launch only."
+            return False, "Forward-from-client is enabled but no local API key is available to forward."
+
+        file_clause = ""
+        if self._server_api_key_file:
+            escaped = shlex.quote(self._server_api_key_file)
+            file_clause = f"elif [ -s {escaped} ]; then echo file; "
+        try:
+            output = self._transport.run(
+                "if [ -n \"${MASSIVE_API_KEY:-}\" ]; then echo env; "
+                f"{file_clause}"
+                "else echo missing; fi"
+            ).strip().lower()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Unable to verify remote key source: {exc}"
+        if output == "env":
+            return True, "Server-managed API key found in remote environment."
+        if output == "file":
+            return True, "Server-managed API key file exists on remote host."
+        return (
+            False,
+            "No server-managed key found. Set MASSIVE_API_KEY on the remote host or configure a readable server key file path.",
         )
 
     def validate_connection(self) -> tuple[bool, str]:
@@ -161,7 +202,21 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
                 "submitted_at": created_at,
             }
         )
-        self._run_scheduler_tick()
+        if self._api_policy == "forward_from_client":
+            if not self._forwarded_api_key:
+                raise ValueError("forward_from_client policy requires a local API key to be present")
+            worker_cmd = (
+                f"mkdir -p {escaped_remote_dir} && "
+                f"cd {escaped_remote_dir} && "
+                f"nohup env STOPTIONS_API_POLICY=forward_from_client "
+                f"MASSIVE_API_KEY={shlex.quote(self._forwarded_api_key)} "
+                f"{shlex.quote(self._python_bin)} -m remote.worker --job-file "
+                f"{shlex.quote(remote_dir + '/job_request.json')} "
+                ">> logs.txt 2>&1 < /dev/null &"
+            )
+            self._transport.run(worker_cmd)
+        else:
+            self._run_scheduler_tick()
 
         self._jobs[job_id] = _RemoteJobRecord(
             job_id=job_id,
@@ -319,6 +374,9 @@ def build_remote_backend_from_settings(settings: dict[str, object]) -> RemoteSSH
     strict_host_key_checking = str(settings.get("ssh_strict_host_key_checking", "true")).strip().lower() not in {"0", "false", "no", "off"}
     poll_raw = str(settings.get("scheduler_poll_seconds", "")).strip() or os.getenv("STOPTIONS_REMOTE_POLL_SECONDS", str(_STATUS_POLL_SECONDS))
     poll_interval = float(poll_raw)
+    api_policy = str(settings.get("api_policy", "")).strip().lower() or "server_managed"
+    server_api_key_file = str(settings.get("server_api_key_file", "")).strip()
+    forwarded_api_key = str(settings.get("forwarded_api_key", "")).strip()
     return RemoteSSHExecutionBackend(
         host=host,
         user=user,
@@ -330,4 +388,7 @@ def build_remote_backend_from_settings(settings: dict[str, object]) -> RemoteSSH
         ssh_known_hosts_file=known_hosts_file,
         strict_host_key_checking=strict_host_key_checking,
         poll_interval_seconds=poll_interval,
+        api_policy=api_policy,
+        server_api_key_file=server_api_key_file,
+        forwarded_api_key=forwarded_api_key,
     )

@@ -79,6 +79,19 @@ def _migrate_remote_synced_runs(payload: object) -> dict[str, str]:
             migrated[key.strip()] = value.strip()
     return migrated
 
+
+def _migrate_remote_execution_settings(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        return merged_remote_execution_settings({})
+    migrated = dict(payload)
+    if "api_policy" not in migrated and "api_key_policy" in migrated:
+        legacy = str(migrated.get("api_key_policy", "")).strip().lower()
+        if legacy == "server_only":
+            migrated["api_policy"] = "server_managed"
+        elif legacy == "forward_per_job":
+            migrated["api_policy"] = "forward_from_client"
+    return merged_remote_execution_settings(migrated)
+
 def _migrate_active_jobs(payload: object) -> dict[str, dict[str, object]]:
     if not isinstance(payload, dict):
         return {}
@@ -174,7 +187,7 @@ class AppState:
             "regime_training_runs": self.regime_training_runs,
             "active_regime_id": self.active_regime_id,
             "remote_synced_runs": _migrate_remote_synced_runs(self.remote_synced_runs),
-            "remote_execution_settings": merged_remote_execution_settings(self.remote_execution_settings),
+            "remote_execution_settings": _migrate_remote_execution_settings(self.remote_execution_settings),
             "active_jobs": _migrate_active_jobs(self.active_jobs),
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2))
@@ -203,6 +216,6 @@ class AppState:
             regime_training_runs=payload.get("regime_training_runs", []),
             active_regime_id=payload.get("active_regime_id"),
             remote_synced_runs=_migrate_remote_synced_runs(payload.get("remote_synced_runs", {})),
-            remote_execution_settings=merged_remote_execution_settings(payload.get("remote_execution_settings", {})),
+            remote_execution_settings=_migrate_remote_execution_settings(payload.get("remote_execution_settings", {})),
             active_jobs=_migrate_active_jobs(payload.get("active_jobs", {})),
         )
