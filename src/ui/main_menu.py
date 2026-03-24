@@ -117,19 +117,43 @@ class MainMenu(ttk.Frame):
         ).grid(row=7, column=0, pady=10)
 
     def _bind_scroll_events(self) -> None:
-        self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self._canvas.bind_all("<Button-4>", self._on_mousewheel)
-        self._canvas.bind_all("<Button-5>", self._on_mousewheel)
+        self._bind_scroll_recursive(self)
 
-    def _on_mousewheel(self, event: tk.Event) -> None:
-        if getattr(event, "num", None) == 4:
-            self._canvas.yview_scroll(-1, "units")
-            return
-        if getattr(event, "num", None) == 5:
-            self._canvas.yview_scroll(1, "units")
-            return
-        delta = int(-1 * (event.delta / 120))
-        self._canvas.yview_scroll(delta, "units")
+    def _bind_scroll_recursive(self, widget: tk.Widget) -> None:
+        middle_drag_state = {"y": 0}
+
+        def _on_mousewheel(event: object) -> str:
+            if getattr(event, "num", None) == 4:
+                self._canvas.yview_scroll(-1, "units")
+                return "break"
+            if getattr(event, "num", None) == 5:
+                self._canvas.yview_scroll(1, "units")
+                return "break"
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta:
+                self._canvas.yview_scroll(int(-delta / 120), "units")
+                return "break"
+            return "break"
+
+        def _on_middle_press(event: object) -> str:
+            middle_drag_state["y"] = int(getattr(event, "y_root", 0) or 0)
+            return "break"
+
+        def _on_middle_drag(event: object) -> str:
+            current_y = int(getattr(event, "y_root", 0) or 0)
+            delta = current_y - middle_drag_state["y"]
+            if abs(delta) >= 2:
+                self._canvas.yview_scroll(int(-delta / 2), "units")
+                middle_drag_state["y"] = current_y
+            return "break"
+
+        widget.bind("<MouseWheel>", _on_mousewheel)
+        widget.bind("<Button-4>", _on_mousewheel)
+        widget.bind("<Button-5>", _on_mousewheel)
+        widget.bind("<ButtonPress-2>", _on_middle_press)
+        widget.bind("<B2-Motion>", _on_middle_drag)
+        for child in widget.winfo_children():
+            self._bind_scroll_recursive(child)
 
     def open_create_regime_workspace(self) -> None:
         self.controller.show_frame("CreateRegimePage")

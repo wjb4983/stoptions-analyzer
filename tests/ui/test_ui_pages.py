@@ -87,6 +87,14 @@ class FakeBindableWidget:
         return list(self._children)
 
 
+class FakeCanvas:
+    def __init__(self):
+        self.scroll_calls: list[tuple[int, str]] = []
+
+    def yview_scroll(self, amount: int, units: str):
+        self.scroll_calls.append((amount, units))
+
+
 class FakeFrameWidget(FakeWidget):
     def __init__(self):
         super().__init__()
@@ -290,6 +298,30 @@ def test_main_menu_remote_settings_validation(monkeypatch):
 
     menu.save_remote_settings()
     assert errors and errors[-1][0] == "Remote settings invalid"
+
+
+def test_main_menu_scroll_bindings_allow_wheel_anywhere() -> None:
+    menu = main_menu.MainMenu.__new__(main_menu.MainMenu)
+    menu._canvas = FakeCanvas()
+    child = FakeBindableWidget()
+    root = FakeBindableWidget(children=[child])
+
+    menu._bind_scroll_recursive(root)
+
+    assert "<MouseWheel>" in root.bindings
+    assert "<MouseWheel>" in child.bindings
+    assert "<ButtonPress-2>" in root.bindings
+    assert "<B2-Motion>" in child.bindings
+
+    wheel_event = type("Event", (), {"delta": 120, "num": None})()
+    root.bindings["<MouseWheel>"](wheel_event)
+    assert menu._canvas.scroll_calls[-1] == (-1, "units")
+
+    press_event = type("Event", (), {"y_root": 200})()
+    drag_event = type("Event", (), {"y_root": 212})()
+    child.bindings["<ButtonPress-2>"](press_event)
+    child.bindings["<B2-Motion>"](drag_event)
+    assert menu._canvas.scroll_calls[-1] == (-6, "units")
 
 
 def test_research_lab_validation_no_signal_and_invalid_dates():
