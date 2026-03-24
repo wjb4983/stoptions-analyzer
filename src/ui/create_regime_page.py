@@ -711,8 +711,7 @@ class CreateRegimePage(ttk.Frame):
         self._build_config_panel()
         self._build_summary_panel()
         self._build_bottom_panel()
-        self._global_middle_drag_y: int | None = None
-        self._bind_global_scroll_shortcuts()
+        self._bind_mousewheel_recursive(self, self._scroll_active_tab_units)
 
         self._load_editor_state_from_definition()
 
@@ -800,25 +799,9 @@ class CreateRegimePage(ttk.Frame):
         for child in widget.winfo_children():
             self._bind_mousewheel_recursive(child, scroll_command)
 
-    def _bind_global_scroll_shortcuts(self) -> None:
-        """Allow scrolling the active form tab from anywhere on this page."""
-        self.bind_all("<MouseWheel>", self._on_global_mousewheel, add="+")
-        self.bind_all("<Button-4>", self._on_global_mousewheel, add="+")
-        self.bind_all("<Button-5>", self._on_global_mousewheel, add="+")
-        self.bind_all("<ButtonPress-2>", self._on_global_middle_press, add="+")
-        self.bind_all("<B2-Motion>", self._on_global_middle_drag, add="+")
-
-    def _is_widget_within_page(self, widget: object) -> bool:
-        current = widget
-        while current is not None:
-            if current is self:
-                return True
-            current = getattr(current, "master", None)
-        return False
-
-    def _active_tab_scroll_command(self) -> object | None:
+    def _scroll_active_tab_units(self, amount: int, units: str) -> None:
         if not hasattr(self, "form_notebook"):
-            return None
+            return
         current_tab = self.form_notebook.select()
         if current_tab == str(getattr(self, "advanced_tab", "")):
             container = getattr(self, "advanced_form_container", None)
@@ -826,51 +809,9 @@ class CreateRegimePage(ttk.Frame):
             container = getattr(self, "validation_form_container", None)
         else:
             container = getattr(self, "basics_form_container", None)
-        return getattr(container, "_scroll_units_command", None) if container is not None else None
-
-    def _on_global_mousewheel(self, event: object) -> str | None:
-        widget = getattr(event, "widget", None)
-        if not self._is_widget_within_page(widget):
-            return None
-        scroll_command = self._active_tab_scroll_command()
-        if scroll_command is None:
-            return None
-        delta = int(getattr(event, "delta", 0) or 0)
-        num = getattr(event, "num", None)
-        if num == 4:
-            scroll_command(-1, "units")
-            return "break"
-        if num == 5:
-            scroll_command(1, "units")
-            return "break"
-        if delta:
-            scroll_command(int(-delta / 120), "units")
-            return "break"
-        return None
-
-    def _on_global_middle_press(self, event: object) -> str | None:
-        widget = getattr(event, "widget", None)
-        if not self._is_widget_within_page(widget):
-            return None
-        self._global_middle_drag_y = int(getattr(event, "y_root", 0) or 0)
-        return "break"
-
-    def _on_global_middle_drag(self, event: object) -> str | None:
-        widget = getattr(event, "widget", None)
-        if not self._is_widget_within_page(widget):
-            return None
-        if self._global_middle_drag_y is None:
-            self._global_middle_drag_y = int(getattr(event, "y_root", 0) or 0)
-            return "break"
-        scroll_command = self._active_tab_scroll_command()
-        if scroll_command is None:
-            return None
-        current_y = int(getattr(event, "y_root", 0) or 0)
-        delta = current_y - self._global_middle_drag_y
-        if abs(delta) >= 2:
-            scroll_command(int(-delta / 2), "units")
-            self._global_middle_drag_y = current_y
-        return "break"
+        scroll_command = getattr(container, "_scroll_units_command", None) if container is not None else None
+        if scroll_command is not None:
+            scroll_command(amount, units)
 
     def _build_default_leg(self, leg_type: str) -> dict[str, object]:
         controls = {}
@@ -1735,6 +1676,7 @@ class CreateRegimePage(ttk.Frame):
         advanced_scroll = getattr(self.advanced_form_container, "_scroll_units_command", None)
         if advanced_scroll is not None:
             self._bind_mousewheel_recursive(self.advanced_form_container, advanced_scroll)
+        self._bind_mousewheel_recursive(self, self._scroll_active_tab_units)
 
         self._update_validation_and_actions()
 
