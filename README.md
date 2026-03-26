@@ -1,5 +1,68 @@
 # Stoptions Analyzer
 
+
+## SNN benchmark framework (quant tasks)
+
+A modular SNN benchmark scaffold now lives in `src/snn_bench/` with the following package layout:
+
+- `data_connectors/`
+- `feature_pipelines/`
+- `tasks/`
+- `models/`
+- `trainers/`
+- `eval/`
+- `configs/`
+- `scripts/`
+
+### Data sources
+
+The connectors support:
+
+1. Snapshot cache JSON at `src/data/<SAFE_TICKER>.json`.
+2. Backtest cache bars at `src/data/backtest_cache/<SAFE_TICKER>/<TIMEFRAME>/` with:
+   - `index.json`
+   - `<SAFE_TICKER>_<TIMEFRAME>_<YEAR>.npz` containing arrays: `t,o,h,l,c,v,n`
+
+For compatibility with nearby repos, connectors also probe `../stoptions_analyzer/src/data/` and `../stoptions-analyzer/src/data/`.
+
+### Quickstart
+
+```bash
+cp .env.example .env
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+### One-command smoke pipeline
+
+```bash
+./scripts/run_snn_smoke.sh NVDA 1D
+```
+
+Equivalent direct command:
+
+```bash
+PYTHONPATH=src python -m snn_bench.scripts.smoke_pipeline --ticker NVDA --timeframe 1D
+```
+
+### Experiment flow
+
+1. Load snapshot + bar cache via `data_connectors`.
+2. Generate features via `feature_pipelines`.
+3. Build labels with `tasks`.
+4. Train a model from `models` via `trainers`.
+5. Compute metrics from `eval`.
+6. Iterate configs in `configs/default.yaml`.
+
+### Make targets
+
+```bash
+make setup
+make lint
+make unit-test
+make smoke-run
+```
+
 "For God so loved the world, that he gave his only begotten Son, that whosoever believeth in him should not perish, but have everlasting life." — John 3:16
 
 ## Tests

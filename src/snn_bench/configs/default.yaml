@@ -1,0 +1,6 @@
+data:
+  ticker: NVDA
+  timeframe: 1D
+  years: []
+model:
+  seed: 42

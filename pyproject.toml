@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snn-quant-benchmark"
+version = "0.1.0"
+description = "Modular SNN benchmark framework for quant tasks"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pandas",
+  "pydantic",
+  "scipy",
+  "torch",
+  "pytorch-lightning",
+  "snntorch",
+  "norse",
+  "spikingjelly",
+  "scikit-learn",
+  "statsmodels",
+  "matplotlib",
+  "plotly",
+  "pyyaml",
+  "rich",
+  "tqdm",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["snn_bench*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-ra"
