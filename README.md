@@ -10,7 +10,7 @@ Use Docker to run the project without installing Python locally.
 ### 1) Build the image
 
 ```bash
-./scripts/docker.sh build
+./scripts/docker.sh build  # builds Python 3.10 + tk-enabled image
 ```
 
 ### 2) Run tests in Docker
@@ -39,7 +39,8 @@ git clone <your-repo-url> && cd stoptions-analyzer && ./scripts/docker.sh build 
 
 > Notes:
 > - The container sets `PYTHONPATH=/app/src` so CLI modules work out of the box.
-> - The desktop Tkinter UI in `src/main.py` is not practical in a headless container by default; use CLI/test workflows inside Docker.
+> - The image includes Tk runtime libraries (`tk`) so imports used by UI-related tests work in containerized test runs.
+> - Running the desktop Tkinter UI (`src/main.py`) still typically requires GUI forwarding (X11/Wayland), so CLI/test workflows are the default in Docker.
 
 ## Tests
 
