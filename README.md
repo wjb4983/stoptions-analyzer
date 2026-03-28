@@ -2,6 +2,45 @@
 
 "For God so loved the world, that he gave his only begotten Son, that whosoever believeth in him should not perish, but have everlasting life." — John 3:16
 
+
+## Docker quickstart
+
+Use Docker to run the project without installing Python locally.
+
+### 1) Build the image
+
+```bash
+./scripts/docker.sh build
+```
+
+### 2) Run tests in Docker
+
+```bash
+./scripts/docker.sh test
+```
+
+### 3) Run any command in Docker
+
+```bash
+./scripts/docker.sh run pytest -m smoke -ra
+```
+
+### 4) Open an interactive shell
+
+```bash
+./scripts/docker.sh shell
+```
+
+One-line copy/paste flow:
+
+```bash
+git clone <your-repo-url> && cd stoptions-analyzer && ./scripts/docker.sh build && ./scripts/docker.sh test
+```
+
+> Notes:
+> - The container sets `PYTHONPATH=/app/src` so CLI modules work out of the box.
+> - The desktop Tkinter UI in `src/main.py` is not practical in a headless container by default; use CLI/test workflows inside Docker.
+
 ## Tests
 
 Install dependencies and run pytest from the repo root:
