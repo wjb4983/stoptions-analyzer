@@ -2,6 +2,54 @@
 
 "For God so loved the world, that he gave his only begotten Son, that whosoever believeth in him should not perish, but have everlasting life." — John 3:16
 
+
+## Docker quickstart
+
+Use Docker to run the project without installing Python locally.
+
+### 1) Build the image
+
+```bash
+./scripts/docker.sh build  # builds Python 3.10 + tk-enabled image
+```
+
+### 2) Run tests in Docker
+
+```bash
+./scripts/docker.sh test
+```
+
+This runs the fast **smoke** marker set by default (recommended for quick validation).
+
+### 3) Run the full suite (optional, longer)
+
+```bash
+./scripts/docker.sh test-all
+```
+
+### 4) Run any command in Docker
+
+```bash
+./scripts/docker.sh run pytest -m core -ra
+```
+
+### 5) Open an interactive shell
+
+```bash
+./scripts/docker.sh shell
+```
+
+One-line copy/paste flow:
+
+```bash
+git clone <your-repo-url> && cd stoptions-analyzer && ./scripts/docker.sh build && ./scripts/docker.sh test
+```
+
+> Notes:
+> - The container sets `PYTHONPATH=/app/src` so CLI modules work out of the box.
+> - The image includes common development tools (`git`, `bash`, `curl`, `openssh-client`) plus Tk runtime libraries (`tk`) for broader day-to-day usage and UI-related test imports.
+> - Running the desktop Tkinter UI (`src/main.py`) still typically requires GUI forwarding (X11/Wayland), so CLI/test workflows are the default in Docker.
+
 ## Tests
 
 Install dependencies and run pytest from the repo root:
