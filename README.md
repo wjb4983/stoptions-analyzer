@@ -47,7 +47,7 @@ git clone <your-repo-url> && cd stoptions-analyzer && ./scripts/docker.sh build 
 
 > Notes:
 > - The container sets `PYTHONPATH=/app/src` so CLI modules work out of the box.
-> - The image includes Tk runtime libraries (`tk`) so imports used by UI-related tests work in containerized test runs.
+> - The image includes common development tools (`git`, `bash`, `curl`, `openssh-client`) plus Tk runtime libraries (`tk`) for broader day-to-day usage and UI-related test imports.
 > - Running the desktop Tkinter UI (`src/main.py`) still typically requires GUI forwarding (X11/Wayland), so CLI/test workflows are the default in Docker.
 
 ## Tests

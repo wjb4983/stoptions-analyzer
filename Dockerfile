@@ -9,7 +9,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tk \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        git \
+        openssh-client \
+        tk \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
