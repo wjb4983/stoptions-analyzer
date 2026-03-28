@@ -19,13 +19,21 @@ Use Docker to run the project without installing Python locally.
 ./scripts/docker.sh test
 ```
 
-### 3) Run any command in Docker
+This runs the fast **smoke** marker set by default (recommended for quick validation).
+
+### 3) Run the full suite (optional, longer)
 
 ```bash
-./scripts/docker.sh run pytest -m smoke -ra
+./scripts/docker.sh test-all
 ```
 
-### 4) Open an interactive shell
+### 4) Run any command in Docker
+
+```bash
+./scripts/docker.sh run pytest -m core -ra
+```
+
+### 5) Open an interactive shell
 
 ```bash
 ./scripts/docker.sh shell

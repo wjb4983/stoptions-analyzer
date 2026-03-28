@@ -11,13 +11,16 @@ Usage: ./scripts/docker.sh <command> [args...]
 
 Commands:
   build                 Build the Docker image
-  test                  Run pytest inside the container
+  test [pytest args...] Run smoke tests inside the container (default fast sanity)
+  test-all [pytest args...]
+                        Run the full pytest suite inside the container
   shell                 Open an interactive shell in the container
   run <cmd...>          Run any command in the container
 
 Examples:
   ./scripts/docker.sh build
   ./scripts/docker.sh test
+  ./scripts/docker.sh test-all
   ./scripts/docker.sh run pytest -m smoke -ra
   ./scripts/docker.sh shell
 USAGE
@@ -35,7 +38,10 @@ case "$cmd" in
     docker build -t "$IMAGE_REF" .
     ;;
   test)
-    docker run --rm "$IMAGE_REF" pytest -q
+    docker run --rm "$IMAGE_REF" pytest -q -m smoke "$@"
+    ;;
+  test-all)
+    docker run --rm "$IMAGE_REF" pytest -q "$@"
     ;;
   shell)
     docker run --rm -it \

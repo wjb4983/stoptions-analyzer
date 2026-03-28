@@ -17,4 +17,4 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
-CMD ["python", "-m", "pytest", "-q"]
+CMD ["python", "-m", "pytest", "-q", "-m", "smoke"]
