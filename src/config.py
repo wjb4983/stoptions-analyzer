@@ -488,19 +488,10 @@ def validate_remote_execution_settings(payload: object) -> list[str]:
     if not remote_python_command and not remote_venv_path:
         errors.append("Provide a remote python command or remote virtualenv path.")
 
-    # Remote mode assumes non-interactive, key-based SSH auth only (BatchMode=yes).
-    identity_file = str(settings.get("ssh_identity_file", "")).strip()
-    if not identity_file:
-        errors.append("SSH identity file is required for remote mode (key-based auth only).")
-
     strict_raw = str(settings.get("ssh_strict_host_key_checking", True)).strip().lower()
     strict_host_key_checking = strict_raw not in {"0", "false", "no", "off"}
     if not strict_host_key_checking:
         errors.append("SSH strict host-key checking must remain enabled in remote mode.")
-
-    known_hosts_file = str(settings.get("ssh_known_hosts_file", "")).strip()
-    if not known_hosts_file:
-        errors.append("SSH known hosts file is required for strict host-key validation.")
 
     policy = str(settings.get("api_policy", "server_managed")).strip().lower()
     if policy not in set(API_POLICIES):

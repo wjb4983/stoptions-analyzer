@@ -78,20 +78,28 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
             )
         )
 
+    @staticmethod
+    def _shell_value_with_home_expansion(value: str) -> str:
+        cleaned = str(value).strip()
+        if cleaned.startswith("~/"):
+            return f"$HOME/{shlex.quote(cleaned[2:])}"
+        return shlex.quote(cleaned)
+
     def _run_scheduler_tick(self) -> None:
-        escaped_remote_root = shlex.quote(self._remote_root)
+        escaped_remote_root = self._shell_value_with_home_expansion(self._remote_root)
         policy = shlex.quote(self._api_policy)
         server_key_file = shlex.quote(self._server_api_key_file) if self._server_api_key_file else "''"
         key_bootstrap = (
             f"if [ -z \"${{MASSIVE_API_KEY:-}}\" ] && [ -n {server_key_file} ] && [ -s {server_key_file} ]; "
             f"then export MASSIVE_API_KEY=\"$(cat {server_key_file})\"; fi; "
         )
+        python_cmd = self._shell_value_with_home_expansion(self._python_bin)
         self._transport.run(
             f"mkdir -p {escaped_remote_root} && cd {escaped_remote_root} && "
             f"export STOPTIONS_API_POLICY={policy}; "
             f"export STOPTIONS_SERVER_API_KEY_FILE={server_key_file}; "
             f"{key_bootstrap}"
-            f"{shlex.quote(self._python_bin)} -m remote.scheduler --remote-root {escaped_remote_root}"
+            f"{python_cmd} -m remote.scheduler --remote-root {escaped_remote_root}"
         )
 
     def validate_api_key_available(self) -> tuple[bool, str]:
@@ -122,10 +130,11 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         )
 
     def validate_connection(self) -> tuple[bool, str]:
+        python_cmd = self._shell_value_with_home_expansion(self._python_bin)
         try:
-            output = self._transport.run(f"{shlex.quote(self._python_bin)} --version")
+            output = self._transport.run(f"{python_cmd} --version")
         except Exception as exc:  # noqa: BLE001
-            return False, str(exc)
+            return False, f"{exc} (configured remote python: {self._python_bin})"
         return True, output.strip() or "Remote python is reachable."
 
     def submit_job(self, job_type: str, payload: dict[str, Any]) -> str:
@@ -205,12 +214,13 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         if self._api_policy == "forward_from_client":
             if not self._forwarded_api_key:
                 raise ValueError("forward_from_client policy requires a local API key to be present")
+            python_cmd = self._shell_value_with_home_expansion(self._python_bin)
             worker_cmd = (
                 f"mkdir -p {escaped_remote_dir} && "
                 f"cd {escaped_remote_dir} && "
                 f"nohup env STOPTIONS_API_POLICY=forward_from_client "
                 f"MASSIVE_API_KEY={shlex.quote(self._forwarded_api_key)} "
-                f"{shlex.quote(self._python_bin)} -m remote.worker --job-file "
+                f"{python_cmd} -m remote.worker --job-file "
                 f"{shlex.quote(remote_dir + '/job_request.json')} "
                 ">> logs.txt 2>&1 < /dev/null &"
             )
@@ -361,10 +371,13 @@ def build_remote_backend_from_settings(settings: dict[str, object]) -> RemoteSSH
     port_raw = str(settings.get("ssh_port", "")).strip() or os.getenv("STOPTIONS_REMOTE_PORT", "").strip()
     port = int(port_raw) if port_raw else None
     remote_venv_path = str(settings.get("remote_venv_path", "")).strip()
-    python_from_venv = f"{remote_venv_path.rstrip('/')}/bin/python" if remote_venv_path else ""
+    if remote_venv_path.endswith("/bin/python") or remote_venv_path.endswith("/bin/python3"):
+        python_from_venv = remote_venv_path
+    else:
+        python_from_venv = f"{remote_venv_path.rstrip('/')}/bin/python" if remote_venv_path else ""
     python_bin = (
-        str(settings.get("remote_python_command", "")).strip()
-        or python_from_venv
+        python_from_venv
+        or str(settings.get("remote_python_command", "")).strip()
         or os.getenv("STOPTIONS_REMOTE_PYTHON", "python")
     )
     remote_root = str(settings.get("remote_project_path", "")).strip() or os.getenv("STOPTIONS_REMOTE_ROOT", DEFAULT_REMOTE_ROOT)
