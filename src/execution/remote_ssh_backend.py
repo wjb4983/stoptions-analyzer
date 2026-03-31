@@ -363,8 +363,8 @@ def build_remote_backend_from_settings(settings: dict[str, object]) -> RemoteSSH
     remote_venv_path = str(settings.get("remote_venv_path", "")).strip()
     python_from_venv = f"{remote_venv_path.rstrip('/')}/bin/python" if remote_venv_path else ""
     python_bin = (
-        str(settings.get("remote_python_command", "")).strip()
-        or python_from_venv
+        python_from_venv
+        or str(settings.get("remote_python_command", "")).strip()
         or os.getenv("STOPTIONS_REMOTE_PYTHON", "python")
     )
     remote_root = str(settings.get("remote_project_path", "")).strip() or os.getenv("STOPTIONS_REMOTE_ROOT", DEFAULT_REMOTE_ROOT)
