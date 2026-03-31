@@ -130,11 +130,11 @@ class RemoteSSHExecutionBackend(ExecutionBackend):
         )
 
     def validate_connection(self) -> tuple[bool, str]:
+        python_cmd = self._shell_value_with_home_expansion(self._python_bin)
         try:
-            python_cmd = self._shell_value_with_home_expansion(self._python_bin)
             output = self._transport.run(f"{python_cmd} --version")
         except Exception as exc:  # noqa: BLE001
-            return False, str(exc)
+            return False, f"{exc} (configured remote python: {self._python_bin})"
         return True, output.strip() or "Remote python is reachable."
 
     def submit_job(self, job_type: str, payload: dict[str, Any]) -> str:
@@ -371,7 +371,10 @@ def build_remote_backend_from_settings(settings: dict[str, object]) -> RemoteSSH
     port_raw = str(settings.get("ssh_port", "")).strip() or os.getenv("STOPTIONS_REMOTE_PORT", "").strip()
     port = int(port_raw) if port_raw else None
     remote_venv_path = str(settings.get("remote_venv_path", "")).strip()
-    python_from_venv = f"{remote_venv_path.rstrip('/')}/bin/python" if remote_venv_path else ""
+    if remote_venv_path.endswith("/bin/python") or remote_venv_path.endswith("/bin/python3"):
+        python_from_venv = remote_venv_path
+    else:
+        python_from_venv = f"{remote_venv_path.rstrip('/')}/bin/python" if remote_venv_path else ""
     python_bin = (
         python_from_venv
         or str(settings.get("remote_python_command", "")).strip()
