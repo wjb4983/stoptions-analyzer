@@ -169,6 +169,7 @@ This app supports a split setup:
    - **Remote root** = server job root (e.g. `~/stoptions_jobs`)
    - **Virtualenv path** = path to server venv (e.g. `/home/you/stoptions-analyzer/.venv`)
      - If set, app uses `<venv>/bin/python` for remote jobs.
+   - **SSH identity file (secret)** = optional if your default `ssh` config/agent already works; set it only when you need a specific key file.
    - **API policy**:
      - `server_managed` (recommended): server provides `MASSIVE_API_KEY` or key file.
      - `forward_from_client`: forwards your local key at launch only.

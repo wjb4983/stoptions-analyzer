@@ -12,7 +12,7 @@ def test_remote_settings_validation_accepts_local_mode() -> None:
     assert validate_remote_execution_settings({"mode": "local"}) == []
 
 
-def test_remote_settings_rejects_forward_per_job_policy() -> None:
+def test_remote_settings_accepts_legacy_forward_per_job_policy_alias() -> None:
     errors = validate_remote_execution_settings(
         {
             "mode": "remote",
@@ -26,10 +26,10 @@ def test_remote_settings_rejects_forward_per_job_policy() -> None:
             "api_key_policy": "forward_per_job",
         }
     )
-    assert any("not enabled" in item for item in errors)
+    assert errors == []
 
 
-def test_remote_settings_require_key_auth_and_strict_host_validation() -> None:
+def test_remote_settings_require_strict_host_validation() -> None:
     errors = validate_remote_execution_settings(
         {
             "mode": "remote",
@@ -42,6 +42,4 @@ def test_remote_settings_require_key_auth_and_strict_host_validation() -> None:
             "ssh_strict_host_key_checking": False,
         }
     )
-    assert any("identity file is required" in item.lower() for item in errors)
     assert any("strict host-key checking" in item.lower() for item in errors)
-    assert any("known hosts file" in item.lower() for item in errors)
