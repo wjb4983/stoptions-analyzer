@@ -113,6 +113,75 @@ pytest -m "core or slow" -ra
 In the Backtesting page, select one or more **Entry Signals** and **Exit Signals** via checkboxes.
 The app runs every entry/exit pair using the same lookback/skip/cost/date parameters, starting capital, and bet-size mode (Kelly / Half Kelly / custom %), then prints a ranked leaderboard in the Run Output panel. For each combo, a portfolio-value-over-time chart (x-axis=day) is saved in that combo output folder.
 
+## Run GUI on laptop + execute jobs on a remote server
+
+This app supports a split setup:
+
+- **Laptop:** run the Tkinter desktop GUI.
+- **Server:** run heavy backtest/research jobs over SSH.
+
+### 1) Server setup (one-time)
+
+1. Install Python 3.10+ and clone this repo on the server.
+2. Create and activate a virtualenv, then install dependencies:
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+3. Ensure the source tree is importable for module launches:
+
+   ```bash
+   export PYTHONPATH=/absolute/path/to/stoptions-analyzer/src
+   ```
+
+   Add that export to your shell profile (`~/.bashrc`/`~/.profile`) so non-interactive SSH launches also see it.
+
+4. Configure Massive API key handling on the server:
+   - Recommended: set `MASSIVE_API_KEY` in server environment.
+   - Alternative: store it in a secure file (for example `/etc/stoptions/massive_api_key`) and reference that path from the GUI’s **Server key file** field.
+
+5. Verify SSH key-based login from laptop to server works (no interactive password prompt).
+
+### 2) Laptop setup (GUI machine)
+
+1. Clone the repo on your laptop, create virtualenv, install dependencies:
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+2. Launch GUI:
+
+   ```bash
+   PYTHONPATH=src python src/main.py
+   ```
+
+3. In **Main Menu → Remote Backend**, set:
+   - **Mode** = `remote`
+   - **SSH host** = your server DNS/IP
+   - **SSH user** = your server user
+   - **SSH port** = usually `22`
+   - **Remote root** = server job root (e.g. `~/stoptions_jobs`)
+   - **Virtualenv path** = path to server venv (e.g. `/home/you/stoptions-analyzer/.venv`)
+     - If set, app uses `<venv>/bin/python` for remote jobs.
+   - **API policy**:
+     - `server_managed` (recommended): server provides `MASSIVE_API_KEY` or key file.
+     - `forward_from_client`: forwards your local key at launch only.
+
+4. Click **Save remote settings**, then **Validate connection**.
+
+### 3) Operational notes
+
+- Local secrets/remote credentials are stored under `~/.stoptions_analyzer/` on the laptop.
+- Job metadata and outputs are written on the server under your **Remote root** directory.
+- Use **Remote Jobs** page in the GUI to monitor status and retrieve outputs.
+- For unattended server runs, prefer `server_managed` key policy to avoid depending on a laptop-side key.
+
 ## Backtest CLI
 
 ### Single-run entry/exit signal selection
