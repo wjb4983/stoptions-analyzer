@@ -60,7 +60,7 @@ def test_cross_sectional_momentum_accepts_ui_price_history_keyword() -> None:
     cs = compute_cross_sectional_momentum(
         price_history=prices,
         fundamentals_by_ticker=None,
-        momentum_settings=MomentumSettings(lookback_days=20, skip_days=2),
+        settings=MomentumSettings(lookback_days=20, skip_days=2),
     )
 
     assert cs.ranking
