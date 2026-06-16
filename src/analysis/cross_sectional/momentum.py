@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -27,10 +28,34 @@ class MomentumSettings:
 
 
 def compute_cross_sectional_momentum(
-    prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
-    fundamentals_by_ticker: dict[str, dict] | None,
-    settings: MomentumSettings,
+    prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]] | None = None,
+    fundamentals_by_ticker: dict[str, dict] | None = None,
+    settings: MomentumSettings | None = None,
+    **kwargs: Any,
 ) -> CrossSectionalResult:
+    """Compute cross-sectional momentum scores for a local price history.
+
+    UI and background execution paths may call analysis functions through a
+    generic backend adapter that forwards inputs by keyword.  Accept
+    ``price_history`` as an alias for ``prices_by_ticker`` so momentum uses the
+    same payload name as the UI without failing before local computation starts.
+    """
+    if prices_by_ticker is None:
+        prices_by_ticker = kwargs.pop("price_history", None)
+    else:
+        kwargs.pop("price_history", None)
+    if settings is None:
+        settings = kwargs.pop("momentum_settings", None) or kwargs.pop("settings", None)
+    if kwargs:
+        unexpected = next(iter(kwargs))
+        raise TypeError(
+            f"compute_cross_sectional_momentum() got an unexpected keyword argument {unexpected!r}"
+        )
+    if prices_by_ticker is None:
+        raise TypeError("compute_cross_sectional_momentum() missing required price history")
+    if settings is None:
+        settings = MomentumSettings()
+
     min_points = settings.lookback_days + settings.skip_days + 1
     returns: list[float] = []
     tickers: list[str] = []
