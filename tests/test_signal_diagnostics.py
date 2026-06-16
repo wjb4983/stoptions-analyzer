@@ -53,3 +53,15 @@ def test_alpha_model_build_signal_diagnostics_ready_flag() -> None:
 
     assert out.diagnostics_ready is True
     assert out.diagnostics["exposure"]["gross_exposure"] > 0
+
+
+def test_cross_sectional_momentum_accepts_ui_price_history_keyword() -> None:
+    prices = _prices()
+    cs = compute_cross_sectional_momentum(
+        price_history=prices,
+        fundamentals_by_ticker=None,
+        momentum_settings=MomentumSettings(lookback_days=20, skip_days=2),
+    )
+
+    assert cs.ranking
+    assert cs.metadata["universe"] == len(prices)

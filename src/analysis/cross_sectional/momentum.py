@@ -27,10 +27,29 @@ class MomentumSettings:
 
 
 def compute_cross_sectional_momentum(
-    prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]],
-    fundamentals_by_ticker: dict[str, dict] | None,
-    settings: MomentumSettings,
+    prices_by_ticker: dict[str, list[float] | list[dict] | tuple[float, ...]] | None = None,
+    fundamentals_by_ticker: dict[str, dict] | None = None,
+    settings: MomentumSettings | None = None,
+    *,
+    price_history: dict[str, list[float] | list[dict] | tuple[float, ...]] | None = None,
+    momentum_settings: MomentumSettings | None = None,
 ) -> CrossSectionalResult:
+    """Compute cross-sectional momentum scores for a local price history.
+
+    The local UI backend submits analysis inputs by keyword and names the price
+    payload ``price_history``.  The analysis layer historically used the
+    ``prices_by_ticker`` name, so normalize the UI alias before computing to
+    keep local and direct calls on the same execution path.
+    """
+    if prices_by_ticker is None:
+        prices_by_ticker = price_history
+    if settings is None:
+        settings = momentum_settings
+    if prices_by_ticker is None:
+        raise TypeError("compute_cross_sectional_momentum() missing required price history")
+    if settings is None:
+        settings = MomentumSettings()
+
     min_points = settings.lookback_days + settings.skip_days + 1
     returns: list[float] = []
     tickers: list[str] = []
